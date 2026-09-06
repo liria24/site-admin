@@ -1,0 +1,9 @@
+node_modules
+dist
+.data
+.nuxt
+.output
+.cache
+.tmp
+coverage
+*.tgz

@@ -1,0 +1,43 @@
+{
+    "name": "site-admin-workspace",
+    "private": true,
+    "workspaces": [
+        "packages/*"
+    ],
+    "type": "module",
+    "scripts": {
+        "build": "bun --filter @liria24/site-admin build",
+        "check": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:nuxt && bun run package:check",
+        "format": "oxfmt . --write",
+        "format:check": "oxfmt . --check",
+        "lint": "oxlint .",
+        "package:check": "publint packages/site-admin && attw --pack packages/site-admin --profile esm-only",
+        "test": "vitest run",
+        "test:nuxt": "node test/nuxt-build.mjs",
+        "typecheck": "bun --filter @liria24/site-admin typecheck && tsc --noEmit -p test/tsconfig.json"
+    },
+    "devDependencies": {
+        "@arethetypeswrong/cli": "^0.18.5",
+        "@liria24/site-admin": "workspace:*",
+        "@nuxt/kit": "^4.5.2",
+        "@nuxt/schema": "^4.5.2",
+        "@tanstack/vue-form": "2.0.0-alpha.2",
+        "@types/node": "^26.4.1",
+        "@vue/compiler-sfc": "3.6.0-rc.7",
+        "db0": "^0.4.0",
+        "files-sdk": "^2.3.1",
+        "nitropack": "2.13.4",
+        "nuxt": "4.5.2",
+        "oxfmt": "^0.66.0",
+        "oxlint": "^1.81.0",
+        "publint": "^0.3.24",
+        "tsdown": "^0.23.0",
+        "typescript": "^7.0.2",
+        "vitest": "^5.0.0",
+        "vue": "3.6.0-rc.7"
+    },
+    "engines": {
+        "node": ">=24.0.0"
+    },
+    "packageManager": "bun@1.4.2"
+}

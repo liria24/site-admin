@@ -1,0 +1,88 @@
+{
+    "name": "@liria24/site-admin",
+    "version": "0.0.0",
+    "description": "Runtime-first, schema-driven site administration for Nuxt",
+    "homepage": "https://github.com/liria24/site-admin#readme",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/liria24/site-admin.git",
+        "directory": "packages/site-admin"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./ai": {
+            "types": "./dist/ai.d.ts",
+            "import": "./dist/ai.js"
+        },
+        "./form": {
+            "types": "./dist/form.d.ts",
+            "import": "./dist/form.js"
+        },
+        "./nuxt": {
+            "types": "./dist/nuxt.d.ts",
+            "import": "./dist/nuxt.js"
+        },
+        "./server": {
+            "types": "./dist/server.d.ts",
+            "import": "./dist/server.js"
+        },
+        "./runtime/public-handler": "./dist/runtime/public-handler.js",
+        "./runtime/management-handler": "./dist/runtime/management-handler.js",
+        "./runtime/diagnostics-handler": "./dist/runtime/diagnostics-handler.js",
+        "./runtime/llms-handler": "./dist/runtime/llms-handler.js",
+        "./package.json": "./package.json"
+    },
+    "publishConfig": {
+        "access": "public",
+        "provenance": true
+    },
+    "scripts": {
+        "build": "tsdown",
+        "dev": "tsdown --watch",
+        "prepack": "bun run build",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@nuxt/kit": "^4.5.2",
+        "@nuxtjs/robots": "^5.6.7",
+        "@nuxtjs/sitemap": "^7.5.0",
+        "@standard-schema/spec": "^1.1.0",
+        "comark": "^0.6.0",
+        "comark-content": "^0.3.0",
+        "db0": "^0.4.0",
+        "files-sdk": "^2.3.1",
+        "h3": "^1.15.11",
+        "jiti": "^2.7.0",
+        "nuxt-files-sdk": "^0.0.1",
+        "nuxt-og-image": "^5.1.13",
+        "nuxt-schema-org": "^5.0.10",
+        "nuxt-seo-utils": "^7.0.19",
+        "rou3": "^0.9.2"
+    },
+    "peerDependencies": {
+        "@tanstack/vue-form": "2.0.0-alpha.2",
+        "nuxt": "^4.0.0",
+        "vue": "^3.6.0-rc.2"
+    },
+    "peerDependenciesMeta": {
+        "@tanstack/vue-form": {
+            "optional": true
+        },
+        "nuxt": {
+            "optional": true
+        },
+        "vue": {
+            "optional": true
+        }
+    }
+}
