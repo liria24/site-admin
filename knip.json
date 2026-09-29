@@ -1,0 +1,26 @@
+{
+    "$schema": "https://unpkg.com/knip@6/schema.json",
+    "ignoreExportsUsedInFile": true,
+    "workspaces": {
+        ".": {
+            "entry": ["*.config.ts", "test/**/*.test.ts", "test/*.mjs", "test/types.ts", "test/fixtures/**/*.{ts,vue}"],
+            "project": ["*.ts", "test/**/*.{ts,mjs,vue}"],
+            "ignoreDependencies": ["@takumi-rs/core", "@vue/compiler-sfc", "tailwindcss"],
+            "ignore": ["test/fixtures/**/.nuxt/**", "test/fixtures/**/.wrangler/**"]
+        },
+        "packages/site-admin": {
+            "entry": ["src/{index,adapter,ai,client,cli,form,generate,nuxt}.ts!", "src/runtime/*.ts!"],
+            "project": ["src/**/*.ts!", "*.config.ts"],
+            "ignoreDependencies": [
+                "@nuxtjs/i18n",
+                "@nuxtjs/robots",
+                "@nuxtjs/sitemap",
+                "nuxt-files-sdk",
+                "nuxt-og-image",
+                "nuxt-schema-org",
+                "nuxt-seo-utils"
+            ],
+            "ignoreIssues": { "package.json": ["optionalPeerDependencies"] }
+        }
+    }
+}

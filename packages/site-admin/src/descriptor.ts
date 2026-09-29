@@ -23,17 +23,16 @@ export interface FieldDescriptor {
 
 export interface ModelDescriptor {
     fields: Record<string, FieldDescriptor>
-    presentation?: ModelDefinition['presentation']
+    displayFields?: ModelDefinition['displayFields']
     public: boolean
     publishing: boolean
     route: ModelDefinition['route']
-    schemaVersion: number
     serverValidation: boolean
     sortable: boolean
 }
 
 export interface SiteAdminDescriptor {
-    assets: false | { maxUploadSize: number; storage: string }
+    assets: false | { maxUploadSize?: number; storage: string }
     models: Record<string, ModelDescriptor>
 }
 
@@ -66,7 +65,7 @@ const describeFields = (fields: FieldRecord): Record<string, FieldDescriptor> =>
 export const createSiteAdminDescriptor = (config: SiteAdminConfig): SiteAdminDescriptor => ({
     assets: config.assets
         ? {
-              maxUploadSize: config.assets.maxUploadSize ?? 10_000_000,
+              ...(config.assets.maxUploadSize === undefined ? {} : { maxUploadSize: config.assets.maxUploadSize }),
               storage: config.assets.storage,
           }
         : false,
@@ -75,11 +74,10 @@ export const createSiteAdminDescriptor = (config: SiteAdminConfig): SiteAdminDes
             name,
             {
                 fields: describeFields(definition.fields),
-                ...(definition.presentation ? { presentation: definition.presentation } : {}),
+                ...(definition.displayFields ? { displayFields: definition.displayFields } : {}),
                 public: definition.public ?? true,
                 publishing: definition.publishing ?? true,
                 route: definition.route ?? false,
-                schemaVersion: definition.schemaVersion ?? 1,
                 serverValidation: definition.validate !== undefined,
                 sortable: definition.sortable ?? false,
             },

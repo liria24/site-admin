@@ -1,8 +1,10 @@
+import { createMigratedTestAdmin } from './migrate'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
 import { Files } from 'files-sdk'
 import { memory } from 'files-sdk/memory'
+import { createSiteAdminClient } from '../packages/site-admin/src/client'
 
 import {
     array,
@@ -10,18 +12,12 @@ import {
     defineSiteAdminConfig,
     image,
     markdown,
-    model,
     object,
     relation,
     text,
     url,
 } from '../packages/site-admin/src'
-import {
-    createSiteAdmin,
-    handleManagementRequest,
-    handlePublicRequest,
-    type SiteAdmin,
-} from '../packages/site-admin/src/server'
+import { handleManagementRequest, handlePublicRequest, type SiteAdmin } from '../packages/site-admin/src/server'
 
 const databases: Database[] = []
 
@@ -29,43 +25,41 @@ afterEach(async () => {
     await Promise.all(databases.splice(0).map((database) => database.dispose()))
 })
 
-const setup = (): {
+const setup = async (): Promise<{
     admin: SiteAdmin
     advance: (milliseconds: number) => void
     files: Files
-} => {
+}> => {
     const database = createDatabase(nodeSqlite({ name: ':memory:' }))
     databases.push(database)
     const files = new Files({ adapter: memory() })
     let sequence = 0
     let time = Date.parse('2026-01-01T00:00:00.000Z')
     const config = defineSiteAdminConfig({
-        assets: { maxUploadSize: 32, orphanGracePeriod: '24h', storage: 'content' },
+        assets: { maxUploadSize: 32, cleanup: { minimumAge: 86400 }, storage: 'content' },
         models: {
-            authors: model({ fields: { name: text({ required: true }) } }),
-            posts: model({
+            authors: { fields: { name: text({ required: true }) } },
+            posts: {
                 fields: {
                     body: markdown(),
                     cover: image(),
-                    sections: array(
-                        object({ author: relation('authors', { required: true }), heading: text() }),
-                    ),
+                    sections: array(object({ author: relation('authors', { required: true }), heading: text() })),
                     title: text({ required: true }),
                 },
                 route: true,
-            }),
-            secrets: model({
+            },
+            secrets: {
                 fields: { cover: image(), destination: url(), title: text() },
                 public: false,
                 publishing: false,
                 route: { path: '/secrets/:slug', redirect: 'destination' },
-            }),
-            settings: model({ fields: { enabled: boolean() }, publishing: false }),
+            },
+            settings: { fields: { enabled: boolean() }, publishing: false },
         },
     })
     return {
-        admin: createSiteAdmin({
-            authorize: () => ({ id: 'editor' }),
+        admin: await createMigratedTestAdmin({
+            authorize: () => ({ id: 'editor', roles: ['admin'] }),
             config,
             database,
             getFiles: async (name) => {
@@ -83,8 +77,22 @@ const setup = (): {
 }
 
 describe('SiteAdmin', () => {
+    it('public client exposes entry identity and gets route-less content by slug or id', async () => {
+        const { admin } = await setup()
+        const draft = await admin.createEntry('authors', { slug: 'writer', data: { name: 'Writer' } })
+        await admin.publishEntry(draft.id, { expectedVersion: draft.version })
+        const client = createSiteAdminClient({
+            origin: 'http://localhost',
+            fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
+        })
+        const list = await client.list('authors')
+        expect(list).toMatchObject([{ id: draft.id, slug: 'writer', data: { name: 'Writer' } }])
+        expect(await client.get('authors', 'writer')).toEqual(list[0])
+        expect(await client.get('authors', draft.id)).toEqual(list[0])
+        expect(await client.get('authors', 'missing')).toBe(null)
+    })
     it('keeps drafts private, guards nested relations, and preserves route history', async () => {
-        const { admin } = setup()
+        const { admin } = await setup()
         const asset = await admin.uploadAsset({
             body: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
             filename: 'cover.png',
@@ -144,7 +152,7 @@ describe('SiteAdmin', () => {
             kind: 'page',
         })
         const content = await admin.content('posts')
-        expect(await content.list('posts')).toEqual(
+        expect(await content.list()).toEqual(
             expect.arrayContaining([expect.objectContaining({ path: '/posts/changed' })]),
         )
         expect(await admin.llms()).toContain('[Changed](/posts/changed) — Intro')
@@ -164,7 +172,7 @@ describe('SiteAdmin', () => {
     })
 
     it('publishes route-less data without exposing private models or their assets', async () => {
-        const { admin } = setup()
+        const { admin } = await setup()
         const settings = await admin.createEntry('settings', { data: { enabled: true } })
         expect(await admin.listPublicEntries('settings')).toMatchObject([
             { data: { enabled: true }, id: settings.id, path: null },
@@ -192,7 +200,7 @@ describe('SiteAdmin', () => {
     })
 
     it('uses immutable asset keys and only collects unreferenced assets after the grace period', async () => {
-        const { admin, advance, files } = setup()
+        const { admin, advance, files } = await setup()
         const first = await admin.uploadAsset({
             body: 'same',
             contentType: 'text/plain',
@@ -218,16 +226,16 @@ describe('SiteAdmin', () => {
     })
 
     it('pins the scheduled revision and publishes it through the normal pipeline', async () => {
-        const { admin, advance } = setup()
+        const { admin, advance } = await setup()
         const entry = await admin.createEntry('authors', { data: { name: 'Scheduled' } })
         const scheduled = await admin.schedulePublish(entry.id, {
             at: '2026-01-01T01:00:00.000Z',
             expectedVersion: entry.version,
         })
         expect(scheduled.scheduledRevisionId).toBe(entry.revisionId)
-        await expect(
-            admin.cancelScheduledPublish(entry.id, { expectedVersion: entry.version }),
-        ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
+        await expect(admin.cancelScheduledPublish(entry.id, { expectedVersion: entry.version })).rejects.toMatchObject({
+            code: 'SITE_ADMIN_CONFLICT',
+        })
 
         const edited = await admin.updateEntry(entry.id, {
             data: { name: 'Newer draft' },
@@ -241,10 +249,10 @@ describe('SiteAdmin', () => {
     })
 
     it('fails management HTTP closed and exposes only published content', async () => {
-        const { admin } = setup()
+        const { admin } = await setup()
         const unauthorizedDatabase = createDatabase(nodeSqlite({ name: ':memory:' }))
         databases.push(unauthorizedDatabase)
-        const unauthorized = createSiteAdmin({
+        const unauthorized = await createMigratedTestAdmin({
             config: admin.config,
             database: unauthorizedDatabase,
         })
@@ -280,5 +288,18 @@ describe('SiteAdmin', () => {
                 }),
             ]),
         )
+        const remove = (match: string) =>
+            handleManagementRequest(
+                admin,
+                new Request(`http://localhost/api/site-admin/entries/${draft.id}`, {
+                    method: 'DELETE',
+                    headers: { 'if-match': match },
+                }),
+            )
+        expect((await remove('*')).status).toBe(400)
+        expect((await remove(`"${draft.version}"`)).status).toBe(409)
+        const current = await admin.getEntry(draft.id)
+        expect((await remove(`"${current.version}"`)).status).toBe(204)
+        expect(await admin.listEntries('authors')).toEqual([])
     })
 })

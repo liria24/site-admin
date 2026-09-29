@@ -1,0 +1,49 @@
+name: Cloudflare temporary account
+
+on:
+    workflow_dispatch:
+        inputs:
+            accept_cloudflare_terms:
+                description: 'I accept the Cloudflare Terms of Service and Privacy Policy for this temporary test account'
+                required: true
+                type: boolean
+
+permissions:
+    contents: read
+
+jobs:
+    d1:
+        if: inputs.accept_cloudflare_terms
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+            - uses: ./.github/actions/setup
+            - run: bun run build
+            - run: bun run test:cloudflare
+            - name: Deploy to an unclaimed temporary account
+              id: deploy
+              env:
+                  CLOUDFLARE_ACCOUNT_ID: ''
+                  CLOUDFLARE_API_TOKEN: ''
+              run: |
+                  set -euo pipefail
+                  log="$RUNNER_TEMP/cloudflare-temporary.log"
+                  if ! bun x wrangler deploy --temporary --config test/fixtures/cloudflare/wrangler.temporary.jsonc >"$log" 2>&1; then
+                    sed -E 's#https://dash.cloudflare.com/claim-preview[^[:space:]]*#[claim URL redacted]#g' "$log"
+                    exit 1
+                  fi
+                  url="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' "$log" | tail -1)"
+                  test -n "$url"
+                  echo "url=$url" >> "$GITHUB_OUTPUT"
+            - name: Apply real D1 migrations
+              env:
+                  CLOUDFLARE_ACCOUNT_ID: ''
+                  CLOUDFLARE_API_TOKEN: ''
+              run: bun x wrangler d1 migrations apply SITE_ADMIN_DB --remote --config test/fixtures/cloudflare/wrangler.temporary.jsonc
+            - name: Probe CRUD, publish, conflict and rollback
+              env:
+                  DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+              run: |
+                  node --input-type=module -e "const result=await (await fetch(process.env.DEPLOY_URL)).json(); if(!result.conflict || result.entries?.[0]?.data?.title !== 'D1') throw new Error(JSON.stringify(result)); const rollback=await (await fetch(process.env.DEPLOY_URL + '/rollback')).json(); if(!rollback.rolledBack) throw new Error(JSON.stringify(rollback))"

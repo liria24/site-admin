@@ -1,15 +1,6 @@
 # @liria24/site-admin
 
-Runtime-first, schema-driven site administration for Nuxt 4 and Nitro 2. It provides the content domain and APIs; it does not provide an admin UI or page builder.
-
-Version `0.0.0` is the initial development version. The first Uppt release PR advances it to `0.0.1`.
-
-## Requirements
-
-- Node.js 24 or newer
-- Nuxt 4 / Nitro 2
-- SQLite through `node:sqlite`, or Cloudflare D1
-- Vue 3.6 and `@tanstack/vue-form` 2.0.0-alpha.2 only when using `/form`
+Content models, publishing, authentication, and file management for Nuxt 4 and Nitro 2. Build your own administration UI using the server APIs and headless forms.
 
 ## Install
 
@@ -17,82 +8,200 @@ Version `0.0.0` is the initial development version. The first Uppt release PR ad
 bun add @liria24/site-admin
 ```
 
-Add the Nuxt module:
-
 ```ts
 // nuxt.config.ts
 export default defineNuxtConfig({
     modules: ['@liria24/site-admin/nuxt'],
 
+    siteAdmin: {
+        enabled: true,
+        configFile: './site-admin.config.ts',
+        client: { basePath: '/api/content' },
+        server: { enabled: true, managementBase: '/api/site-admin' },
+        routing: { enabled: true },
+        assets: { storage: 'content' }, // Named storage defined in files.config.ts
+        ai: false, // Set to {} to load site-admin.ai.ts
+        devtools: true,
+
+        // Integration switches
+        auth: true,
+        i18n: true,
+        seo: true,
+        sitemap: true,
+        robots: true,
+        schemaOrg: true,
+        ogImage: true,
+        llms: true,
+    },
+
+    // Site identity and canonical URL
     site: {
         name: 'Example',
         url: 'https://example.com',
     },
 
-    siteAdmin: {
-        database: {
-            connector: 'node-sqlite',
-            path: '.data/site-admin.sqlite3',
-        },
-        auth: { enabled: true },
+    // Authentication and localization
+    auth: {},
+    i18n: { defaultLocale: 'en', locales: ['en'] },
+
+    // Search engines, structured data, and social sharing
+    seo: {},
+    sitemap: {},
+    robots: {},
+    schemaOrg: {},
+    ogImage: {},
+
+    // LLM indexes
+    llms: {
+        domain: 'https://example.com',
+        title: 'Example',
     },
+
+    // File storage and development tools
+    files: { config: 'files.config.ts' },
+    devtools: { enabled: true },
 })
 ```
 
-Define the domain separately from framework configuration:
+Use `siteAdmin` to enable integrations and configure content APIs, routing, assets, and AI. The other top-level options configure each integrated module; empty objects use that module's defaults. The authentication, database, and file storage setup used in this example is described below.
+
+Site Admin installs its integration dependencies automatically. If your application directly imports another package's API, declare that package in your application's dependencies as shown below.
+
+## Define content models
 
 ```ts
 // site-admin.config.ts
-import { defineSiteAdminConfig, image, markdown, model, relation, text, url } from '@liria24/site-admin'
+import {
+    defineSiteAdminAuthorization,
+    defineSiteAdminConfig,
+    image,
+    markdown,
+    relation,
+    text,
+} from '@liria24/site-admin'
 
 export default defineSiteAdminConfig({
+    authorization: defineSiteAdminAuthorization({
+        editor: { models: { posts: ['create', 'readDraft', 'update'] } },
+    }),
     models: {
-        authors: model({
+        authors: {
             fields: { name: text({ required: true }) },
-        }),
-        posts: model({
+        },
+        posts: {
             route: true,
+            displayFields: { title: 'title', image: 'cover' },
             fields: {
                 author: relation('authors', { required: true }),
                 body: markdown(),
                 cover: image(),
                 title: text({ required: true }),
             },
-        }),
-        socials: model({
-            route: { path: '/:slug', redirect: 'url' },
-            fields: { name: text(), url: url() },
-        }),
+        },
     },
 })
 ```
 
-The field DSL also includes `textarea`, `number`, `boolean`, `datetime`, `select`, `object`, `array`, `file`, and `images`. Standard Schema validators can be attached to fields or whole models. Server validation is authoritative; browser descriptors only disclose safe capability metadata.
+Other field types include `textarea`, `number`, `boolean`, `datetime`, `select`, `object`, `array`, `file`, `images`, and `url`. Attach Standard Schema validators to fields or whole models for custom validation.
 
-## Authentication
+Models are public by default. Set `public: false` to exclude a model and its content from anonymous reads. `route: true` gives entries public URLs; models without routes can still expose published data through the API. Use `displayFields` to select the fields used for titles, descriptions, and images.
 
-Management HTTP routes are registered only when `siteAdmin.auth.enabled` is true, and every request must receive an actor from the Nitro hook:
+Nuxt aliases work in the configuration file. During development, changes to `site-admin.config.ts` and an enabled AI configuration restart Nuxt automatically. Add imported helper files to Nuxt's `watch` option if changes to them should also trigger a restart. Use `siteAdmin.configFile` to select a different configuration file.
+
+## Configure authentication
+
+```sh
+bun add @nuxtjs/better-auth
+```
 
 ```ts
-// server/plugins/site-admin-auth.ts
-export default defineNitroPlugin((nitroApp) => {
-    nitroApp.hooks.hook('site-admin:authorize', async (context) => {
-        const session = await readYourExistingSession(context.request)
-        if (session) context.actor = { id: session.user.id, roles: session.user.roles }
+// server/auth.config.ts
+import { defineServerAuth } from '@nuxtjs/better-auth/config'
+
+export default defineServerAuth({
+    emailAndPassword: { enabled: true },
+})
+```
+
+```ts
+// app/auth.config.ts
+import { defineClientAuth } from '@nuxtjs/better-auth/config'
+
+export default defineClientAuth({})
+```
+
+Set `NUXT_BETTER_AUTH_SECRET` and configure the authentication providers your application needs. Site Admin applies the roles defined in `defineSiteAdminAuthorization()` to management requests. Missing sessions receive `401`; insufficient permissions receive `403`.
+
+The `admin` role has all permissions. The ordinary `user` role has none unless you grant them. To set up the first administrator, create an account and assign its Better Auth `admin` role through a trusted setup script or your database. The first signup is not promoted automatically.
+
+Set `siteAdmin.auth: false` to disable authentication integration and management HTTP routes. Trusted server code can still use `useSiteAdmin()`.
+
+## Set up the database
+
+Site Admin supports SQLite and Cloudflare D1 through Drizzle. Your application creates the connection and runs migrations.
+
+```sh
+bun add drizzle-orm@1.0.0-rc.4 @better-auth/drizzle-adapter
+bun add -D drizzle-kit@1.0.0-rc.4
+```
+
+Generate the content and authentication schema:
+
+```sh
+bun x site-admin generate --auth server/auth.config.ts --auth-use-plural --out schema.ts
+```
+
+Omit `--auth` when authentication is disabled. Use `--config` for a custom Site Admin configuration path.
+
+For local SQLite, configure and run migrations:
+
+```ts
+// drizzle.config.ts
+import { defineConfig } from 'drizzle-kit'
+
+export default defineConfig({
+    dialect: 'sqlite',
+    schema: './schema.ts',
+    out: './drizzle',
+    dbCredentials: { url: './.data/application.sqlite3' },
+})
+```
+
+```sh
+bun x drizzle-kit generate --config drizzle.config.ts
+bun x drizzle-kit migrate --config drizzle.config.ts
+```
+
+Keep the generated schema and migrations under version control. After changing models, regenerate the schema and review the migration, including its effect on historical revisions. Site Admin does not apply migrations automatically. For D1, apply the generated SQL using your deployment tooling.
+
+Provide the database adapters through a Nitro plugin. Replace `useDB()` below with your application's Drizzle connection accessor:
+
+```ts
+// server/plugins/site-admin-database.ts
+import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
+import { drizzleAdapter as betterAuthAdapter } from '@better-auth/drizzle-adapter/relations-v2'
+import * as schema from '../../schema'
+
+export default defineNitroPlugin((app) => {
+    app.hooks.hook('site-admin:database', (context) => {
+        const db = useDB(context.event)
+        context.database = drizzleAdapter(db, { schema })
+        context.authDatabase = betterAuthAdapter(db, {
+            provider: 'sqlite',
+            schema,
+            usePlural: true,
+            transaction: false,
+        })
     })
 })
 ```
 
-No hook result means `401`. Setting `auth.enabled: false` removes the management HTTP routes; it never makes them anonymous. Trusted server code can call `useSiteAdmin()` directly.
+Keep `usePlural` consistent with the CLI's `--auth-use-plural` option. Both adapters should use the same connection. For D1 or other request-bound connections, resolve the connection from `context.event` rather than caching one request's binding globally. When authentication is disabled, omit `authDatabase`.
 
-## Publishing and content
-
-Every write creates an immutable revision. Models default to drafts plus explicit publish. `publishing: false` still creates revisions but advances the public pointer in the same atomic mutation.
-
-`route` controls whether an entry owns a URL, not whether its data is public. A route-less model remains available through its published projection. Set `public: false` to exclude a model, its routes, relations, and assets from anonymous reads.
+## Create and publish content
 
 ```ts
-const siteAdmin = useSiteAdmin()
+const siteAdmin = await useSiteAdmin(event)
 
 const draft = await siteAdmin.createEntry('posts', {
     actorId: user.id,
@@ -105,107 +214,106 @@ await siteAdmin.publishEntry(draft.id, {
 })
 ```
 
-Writes use optimistic versions. SQLite uses `BEGIN IMMEDIATE`; D1 uses one native `batch()`. There is no sequential fallback. Revision data, relation and asset indexes, routes, public pointers, and the public generation are guarded together.
+Changes create revisions and remain drafts until published. Set `publishing: false` on a model to publish each save automatically. Pass the latest `expectedVersion` when updating or publishing to detect conflicting edits.
 
-Required relations must point to public, published entries. Optional unpublished relations project as `null`. Relations resolve the target entry's current published revision; publication does not snapshot the whole relation graph.
+Required relations must point to public, published entries. Optional relations to unpublished entries appear as `null`. Relations show the target's current published content.
 
-Public changes advance a site-level generation used to refresh Comark Content and route caches. Draft saves do not. HTML and CDN invalidation remain application/platform policy, so configure Nuxt `routeRules` for the freshness the site actually allows. Never share-cache management or preview responses.
+For scheduled publication, call `publishDue()` or POST `/api/site-admin/tasks/publish-due` from a Nitro Task or platform scheduler. Scheduling an entry alone does not create a cron job.
 
-## HTTP routes
+Configure Nuxt `routeRules` and CDN caching for the freshness your site needs. Do not share-cache management or draft preview responses.
 
-The defaults are:
+## HTTP API
 
-- Public content: `/api/content/**`
-- Management: `/api/site-admin/**`
-- Generated sitemap source: `/api/content/_sitemap`
-- Published asset delivery: `/api/content/_assets/:id`
-- LLM indexes: `/llms.txt` and `/llms-full.txt`
-- Safe development diagnostics, only with Nuxt DevTools enabled: `/_site-admin/diagnostics`
+| Purpose                  | Default route              |
+| ------------------------ | -------------------------- |
+| Public content           | `/api/content/**`          |
+| Authenticated management | `/api/site-admin/**`       |
+| Sitemap source           | `/api/content/_sitemap`    |
+| Published assets         | `/api/content/_assets/:id` |
+| LLM index                | `/llms.txt`                |
 
-Management operations cover entry CRUD, revision lists, publish/unpublish, schedule/cancel, sorting, upload/download/delete, `publish-due`, asset GC, and diagnostics. `handlePublicRequest()` and `handleManagementRequest()` are also exported for non-Nuxt HTTP composition.
+Enable top-level `llms.full` for `/llms-full.txt`. Management APIs cover content editing, revisions, publishing, scheduling, sorting, assets, and AI proposals.
 
-Scheduling only records intent. Call `publishDue()` or POST `/api/site-admin/tasks/publish-due` from a Nitro Task or platform scheduler. Site Admin does not register a cron job.
+Send JSON mutations with `Content-Type: application/json`; browser mutations must be same-origin. Bulk ordering uses `POST /api/site-admin/entries/:model/reorder` with `{ items: [{ id, sortOrder, expectedVersion }] }`.
 
-## Assets
+## Store files and images
 
-Assets require `nuxt-files-sdk` and a named Files storage:
+Declare a named storage using `nuxt-files-sdk`:
+
+```sh
+bun add nuxt-files-sdk
+```
 
 ```ts
 // files.config.ts
 import { defineFilesConfig } from 'nuxt-files-sdk/config'
-import { validation } from 'nuxt-files-sdk/plugins'
 
 export default defineFilesConfig({
     storage: {
         content: {
             adapter: 'fs',
-            root: '.data/files/content',
-            plugins: [validation({ maxSize: 10_000_000 })],
+            config: { root: '.data/files/content' },
         },
     },
 })
 ```
 
 ```ts
-// site-admin.config.ts
-export default defineSiteAdminConfig({
-    assets: {
-        storage: 'content',
-        maxUploadSize: 10_000_000,
-        orphanGracePeriod: '24h',
+// nuxt.config.ts
+export default defineNuxtConfig({
+    siteAdmin: {
+        assets: {
+            storage: 'content',
+            maxUploadSize: 10_000_000,
+            cleanup: { minimumAge: 86400 },
+        },
     },
-    models: {/* ... */},
 })
 ```
 
-Uploads are server-mediated and size-bounded. Each Asset ID owns a new immutable key and checksum. Only assets referenced by a published entry in a public model are anonymously delivered. Draft previews use the authenticated management route and `private, no-store` caching.
+`maxUploadSize` is in bytes; no application size limit is set by default. Platform and storage limits still apply. When using R2 on Cloudflare Workers, enable `nodejs_compat`.
 
-Markdown can reference a managed asset with `site-admin://asset/<id>`. These references participate in retention and are rewritten to delivery URLs in public projections.
+Only assets referenced by published entries in public models are publicly served. Draft previews require authentication. Markdown can reference an asset with `site-admin://asset/<id>`.
 
-GC atomically claims only unreferenced, grace-expired assets before deleting the blob. Failed deletes retain metadata for retry. Retained current, published, scheduled, and historical revisions all retain their assets.
+`useSiteAdminForm()` handles uploads. For direct HTTP uploads, send the raw File body with `x-filename: encodeURIComponent(file.name)` and `x-upload-size: String(file.size)`; multipart uploads are not supported.
 
-The generated Nuxt resolver intentionally accepts only the configured default storage name because `nuxt-files-sdk` v0.0.1 has no public dynamic-name resolver. Trusted non-Nuxt runtimes may inject a wider async `getFiles(storage)` resolver. Native R2 binding injection and direct upload are not claimed by this release.
+Run asset GC from your own scheduler. It removes unreferenced assets older than `cleanup.minimumAge` seconds from creation. Historical revisions also retain their assets, so prune unwanted revisions before expecting those assets to be collected.
 
-## Forms and AI
+## Generate OG images
 
-`@liria24/site-admin/form` wraps TanStack Form state with model defaults, server errors, conflict state, and authenticated upload. It is headless and ships no editor widgets.
+Site Admin enables `nuxt-og-image`. Create a component such as `app/components/OgImage/Home.takumi.vue`, then call `defineOgImage('Home.takumi', props, options)` from a page.
+
+Choose `.takumi.vue`, `.satori.vue`, or `.browser.vue` components and install the renderer dependencies requested by `nuxt-og-image` before building. Configure the renderer using Nuxt's native `ogImage` options. Set `siteAdmin.ogImage: false` to disable the integration.
+
+## Build forms
+
+`@liria24/site-admin/form` provides headless form state, validation errors, conflict handling, and authenticated uploads. It requires Vue 3.6 and `@tanstack/vue-form` 2.0.0-alpha.2.
 
 ```ts
 import { useSiteAdminForm } from '@liria24/site-admin/form'
 
-const { form, conflict, serverError, upload } = useSiteAdminForm({
-    action: `/api/site-admin/entries/${entry.id}`,
-    defaultValues: entry.data,
-    expectedVersion: entry.version,
-    model: descriptor.models.posts,
+const controller = useSiteAdminForm({
+    descriptor: descriptor.models.posts,
+    entry,
+    managementBase: '/api/site-admin',
+    modelName: 'posts',
 })
+
+await controller.form.handleSubmit()
 ```
 
-`@liria24/site-admin/ai` provides typed, server-owned suggestion actions. AI slug suggestions run only when both the Nuxt AI flag and a domain resolver are configured; failures fall back to deterministic slug generation and never publish or delete content.
+After creation, later submissions update the same entry. Publishing, scheduling, restoring revisions, and deleting entries are separate actions.
 
-## Database operations
+## Add AI suggestions
 
-New local SQLite databases initialize automatically. D1 and other production databases fail closed until an explicit deployment migration runs:
+Enable `siteAdmin.ai: {}` and define suggestion actions in `site-admin.ai.ts` using `defineSiteAdminAIConfig` from `@liria24/site-admin/ai`. Use `siteAdmin.ai.configFile` for a different file path.
 
-```ts
-import { migrateSiteAdmin } from '@liria24/site-admin/server'
+Actions return proposals for review. Applying a proposal saves an update; it does not publish or delete content.
 
-await migrateSiteAdmin(database)
-```
+## Inspect your configuration
 
-The runtime rejects an incompatible schema version. Model `schemaVersion` records semantic validation versions; it does not transform old JSON automatically.
+During development, Nuxt DevTools includes a Site Admin inspector for models, routes, database readiness, and asset settings. It requires an authenticated user with `system.diagnostics` permission. Set `siteAdmin.devtools: false` to disable it.
 
-## Scope
+## Try a preview version
 
-Supported now: Nuxt 4/Nitro 2, SQLite, D1 native batches, Comark Content sources, revisions, relations, publishing and scheduling, Files-backed assets, SEO module wiring, sitemap/LLM feeds, locale identity, headless forms, and deterministic optional AI slugs.
-
-Deliberately absent: admin UI, page builder, Ask AI, Eve, generic workflow engine, direct upload, native R2 binding shortcuts, and MCP. MCP waits for a compatible Nuxt MCP Toolkit and authentication stack rather than shipping a provisional protocol or auth layer.
-
-## Development
-
-```sh
-bun install
-bun run check
-```
-
-The package starts at `0.0.0`. Pushes to `main` update an Uppt release PR; merging that PR is the separate release action.
+When a PR has a package preview, install the tarball URL from its pkg.pr.new comment to try the change in your application.

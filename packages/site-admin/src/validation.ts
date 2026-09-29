@@ -27,15 +27,18 @@ const runSchema = async (
     schema: StandardSchemaV1<unknown, unknown> | undefined,
     value: unknown,
     path: string,
-): Promise<SiteAdminIssue[]> => {
-    if (!schema) return []
+): Promise<{ issues: SiteAdminIssue[]; value: unknown }> => {
+    if (!schema) return { issues: [], value }
     try {
         const result = await schema['~standard'].validate(value)
         return 'issues' in result && result.issues
-            ? result.issues.map((entry) => issue(pathFromStandardIssue(entry, path), entry.message))
-            : []
+            ? {
+                  issues: result.issues.map((entry) => issue(pathFromStandardIssue(entry, path), entry.message)),
+                  value,
+              }
+            : { issues: [], value: result.value }
     } catch (error) {
-        return [issue(path, error instanceof Error ? error.message : 'Validation failed.')]
+        return { issues: [issue(path, error instanceof Error ? error.message : 'Validation failed.')], value }
     }
 }
 
@@ -49,8 +52,7 @@ const validateString = (field: AnyField, value: string, path: string): SiteAdmin
     }
     if ('pattern' in field && field.pattern !== undefined) {
         try {
-            if (!new RegExp(field.pattern, 'u').test(value))
-                issues.push(issue(path, 'Has an invalid format.'))
+            if (!new RegExp(field.pattern, 'u').test(value)) issues.push(issue(path, 'Has an invalid format.'))
         } catch {
             issues.push(issue(path, 'The configured pattern is invalid.'))
         }
@@ -64,20 +66,23 @@ const validateAsset = (value: unknown, path: string): SiteAdminIssue[] => {
     return [issue(path, 'Must be an Asset ID or Asset reference.')]
 }
 
-const validateField = async (field: AnyField, value: unknown, path: string): Promise<SiteAdminIssue[]> => {
+const validateField = async (
+    field: AnyField,
+    value: unknown,
+    path: string,
+    schemas = true,
+): Promise<{ issues: SiteAdminIssue[]; value: unknown }> => {
     if (value === undefined || value === null) {
-        return field.required ? [issue(path, 'Required.')] : []
+        return { issues: field.required ? [issue(path, 'Required.')] : [], value }
     }
 
     let issues: SiteAdminIssue[] = []
+    let output: unknown = value
     switch (field.kind) {
         case 'text':
         case 'textarea':
         case 'markdown':
-            issues =
-                typeof value === 'string'
-                    ? validateString(field, value, path)
-                    : [issue(path, 'Must be a string.')]
+            issues = typeof value === 'string' ? validateString(field, value, path) : [issue(path, 'Must be a string.')]
             break
         case 'url':
             if (typeof value !== 'string') {
@@ -117,8 +122,7 @@ const validateField = async (field: AnyField, value: unknown, path: string): Pro
             }
             break
         case 'relation':
-            if (typeof value !== 'string' || value.length === 0)
-                issues.push(issue(path, 'Must be an Entry ID.'))
+            if (typeof value !== 'string' || value.length === 0) issues.push(issue(path, 'Must be an Entry ID.'))
             break
         case 'file':
         case 'image':
@@ -134,15 +138,16 @@ const validateField = async (field: AnyField, value: unknown, path: string): Pro
                 if (field.maxItems !== undefined && value.length > field.maxItems) {
                     issues.push(issue(path, `Must contain at most ${field.maxItems} items.`))
                 }
-                for (const [index, item] of value.entries())
-                    issues.push(...validateAsset(item, `${path}.${index}`))
+                for (const [index, item] of value.entries()) issues.push(...validateAsset(item, `${path}.${index}`))
             }
             break
         case 'object':
             if (!isRecord(value)) {
                 issues.push(issue(path, 'Must be an object.'))
             } else {
-                issues.push(...(await validateFields(field.fields, value, path)))
+                const nested = await validateFields(field.fields, value, path, schemas)
+                issues.push(...nested.issues)
+                output = nested.data
             }
             break
         case 'array':
@@ -155,31 +160,42 @@ const validateField = async (field: AnyField, value: unknown, path: string): Pro
                 if (field.maxItems !== undefined && value.length > field.maxItems) {
                     issues.push(issue(path, `Must contain at most ${field.maxItems} items.`))
                 }
+                const items: unknown[] = []
                 for (const [index, item] of value.entries()) {
-                    issues.push(...(await validateField(field.item, item, `${path}.${index}`)))
+                    const nested = await validateField(field.item, item, `${path}.${index}`, schemas)
+                    issues.push(...nested.issues)
+                    items.push(nested.value)
                 }
+                output = items
             }
             break
     }
-    issues.push(...(await runSchema(field.validate, value, path)))
-    return issues
+    if (issues.length === 0 && schemas) {
+        const result = await runSchema(field.validate, output, path)
+        issues.push(...result.issues)
+        output = result.value
+    }
+    return { issues, value: output }
 }
 
 const validateFields = async (
     fields: FieldRecord,
     data: Record<string, unknown>,
     parent = '',
-): Promise<SiteAdminIssue[]> => {
+    schemas = true,
+): Promise<{ data: Record<string, unknown>; issues: SiteAdminIssue[] }> => {
     const issues: SiteAdminIssue[] = []
+    const output: Record<string, unknown> = {}
     for (const key of Object.keys(data)) {
-        if (!Object.hasOwn(fields, key))
-            issues.push(issue([parent, key].filter(Boolean).join('.'), 'Unknown field.'))
+        if (!Object.hasOwn(fields, key)) issues.push(issue([parent, key].filter(Boolean).join('.'), 'Unknown field.'))
     }
     for (const [key, field] of Object.entries(fields)) {
         const path = [parent, key].filter(Boolean).join('.')
-        issues.push(...(await validateField(field, data[key], path)))
+        const result = await validateField(field, data[key], path, schemas)
+        issues.push(...result.issues)
+        if (Object.hasOwn(data, key) || result.value !== undefined) output[key] = result.value
     }
-    return issues
+    return { data: output, issues }
 }
 
 export const validateModelData = async (
@@ -187,19 +203,19 @@ export const validateModelData = async (
     value: unknown,
 ): Promise<{ data?: Record<string, unknown>; issues: SiteAdminIssue[] }> => {
     if (!isRecord(value)) return { issues: [issue('', 'Must be an object.')] }
-    const issues = await validateFields(definition.fields, value)
-    issues.push(...(await runSchema(definition.validate, value, '')))
-    return issues.length > 0 ? { issues } : { data: value, issues }
+    const fields = await validateFields(definition.fields, value)
+    if (fields.issues.length > 0) return { issues: fields.issues }
+    const model = await runSchema(definition.validate, fields.data, '')
+    if (model.issues.length > 0) return { issues: model.issues }
+    if (!isRecord(model.value)) return { issues: [issue('', 'Model validation must return an object.')] }
+    const final = await validateFields(definition.fields, model.value, '', false)
+    return final.issues.length > 0 ? { issues: final.issues } : { data: final.data, issues: [] }
 }
 
-export const applyFieldDefaults = (
-    fields: FieldRecord,
-    input: Record<string, unknown>,
-): Record<string, unknown> => {
+export const applyFieldDefaults = (fields: FieldRecord, input: Record<string, unknown>): Record<string, unknown> => {
     const output = { ...input }
     for (const [key, field] of Object.entries(fields)) {
-        if (output[key] === undefined && field.default !== undefined)
-            output[key] = structuredClone(field.default)
+        if (output[key] === undefined && field.default !== undefined) output[key] = structuredClone(field.default)
         if (field.kind === 'object' && isRecord(output[key])) {
             output[key] = applyFieldDefaults(field.fields, output[key])
         }

@@ -1,13 +1,30 @@
-export interface SiteAdminAIAction<Input, Output> {
-    name: string
-    run: (input: Input) => Promise<Output> | Output
+import type { SiteAdminIssue } from './errors'
+import type { EntryRecord } from './server/types'
+
+export interface SiteAdminAIActionInput {
+    entry: EntryRecord
+    input: Record<string, unknown>
 }
 
-export const defineSiteAdminAIAction = <Input, Output>(
-    action: SiteAdminAIAction<Input, Output>,
-): SiteAdminAIAction<Input, Output> => action
+export interface SiteAdminAIActionResult {
+    data: Record<string, unknown>
+    issues?: SiteAdminIssue[]
+    slug?: string
+}
 
-export const runSiteAdminAIAction = async <Input, Output>(
-    action: SiteAdminAIAction<Input, Output>,
-    input: Input,
-): Promise<Output> => action.run(input)
+export type SiteAdminAIAction = (
+    input: SiteAdminAIActionInput,
+) => Promise<SiteAdminAIActionResult> | SiteAdminAIActionResult
+
+export interface SiteAdminAIConfig {
+    models: Record<string, Record<string, SiteAdminAIAction>>
+}
+
+export interface SiteAdminAIProposal extends SiteAdminAIActionResult {
+    baseRevisionId: string
+    issues: SiteAdminIssue[]
+    slug: string
+    version: number
+}
+
+export const defineSiteAdminAIConfig = <const Config extends SiteAdminAIConfig>(config: Config): Config => config

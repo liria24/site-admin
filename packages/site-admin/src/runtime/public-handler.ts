@@ -7,6 +7,6 @@ export default eventHandler(async (event) => {
     const runtime = useSiteAdminRuntime()
     return sendWebResponse(
         event,
-        await handlePublicRequest(runtime.siteAdmin, toWebRequest(event), runtime.publicBase),
+        await handlePublicRequest(await runtime.getSiteAdmin(event), toWebRequest(event), runtime.publicBase),
     )
 })

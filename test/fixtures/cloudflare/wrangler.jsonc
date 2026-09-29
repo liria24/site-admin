@@ -1,0 +1,21 @@
+{
+    "$schema": "../../../node_modules/wrangler/config-schema.json",
+    "name": "site-admin-d1-test",
+    "main": "worker.ts",
+    "compatibility_date": "2026-09-14",
+    "alias": {
+        "@aws-sdk/client-s3": "./unused-aws.ts",
+        "@aws-sdk/s3-presigned-post": "./unused-aws.ts",
+        "@aws-sdk/s3-request-presigner": "./unused-aws.ts",
+    },
+    "compatibility_flags": ["nodejs_compat"],
+    "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "site-admin-test-assets" }],
+    "d1_databases": [
+        {
+            "binding": "SITE_ADMIN_DB",
+            "database_name": "site-admin-test",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "migrations_dir": "./.data/wrangler-migrations",
+        },
+    ],
+}

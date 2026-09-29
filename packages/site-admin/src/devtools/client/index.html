@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Site Admin</title>
+        <style>
+            :root {
+                color-scheme: light;
+                font-family:
+                    Inter,
+                    ui-sans-serif,
+                    system-ui,
+                    -apple-system,
+                    BlinkMacSystemFont,
+                    'Segoe UI',
+                    sans-serif;
+                --background: #fafafa;
+                --surface: #ffffff;
+                --surface-muted: #f4f4f5;
+                --border: #e4e4e7;
+                --text: #18181b;
+                --muted: #71717a;
+                --accent: #00a96e;
+                --accent-soft: #e6f8f1;
+            }
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    color-scheme: dark;
+                    --background: #09090b;
+                    --surface: #18181b;
+                    --surface-muted: #27272a;
+                    --border: #27272a;
+                    --text: #f4f4f5;
+                    --muted: #a1a1aa;
+                    --accent: #00dc82;
+                    --accent-soft: #0b3328;
+                }
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                min-width: 320px;
+                min-height: 100vh;
+                background: var(--background);
+                color: var(--text);
+                font-size: 14px;
+                line-height: 1.5;
+                -webkit-font-smoothing: antialiased;
+            }
+            .page-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                min-height: 64px;
+                padding: 12px 20px;
+                border-bottom: 1px solid var(--border);
+                background: color-mix(in srgb, var(--surface) 92%, transparent);
+            }
+            .app-icon {
+                display: grid;
+                flex: 0 0 auto;
+                width: 36px;
+                height: 36px;
+                place-items: center;
+                border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+                border-radius: 9px;
+                background: var(--accent-soft);
+                color: var(--accent);
+            }
+            .app-icon svg {
+                width: 20px;
+                height: 20px;
+            }
+            h1 {
+                margin: 0;
+                font-size: 15px;
+                font-weight: 600;
+                letter-spacing: -0.01em;
+            }
+            .summary {
+                margin: 2px 0 0;
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .content {
+                padding: 20px;
+            }
+            .panel {
+                overflow: hidden;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                background: var(--surface);
+            }
+            .panel-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 12px 14px;
+                border-bottom: 1px solid var(--border);
+            }
+            h2 {
+                margin: 0;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            .panel-description {
+                margin: 2px 0 0;
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .actions {
+                display: flex;
+                gap: 8px;
+            }
+            button {
+                font: inherit;
+                min-height: 30px;
+                padding: 5px 9px;
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                background: var(--surface);
+                color: var(--text);
+                cursor: pointer;
+            }
+            button:hover {
+                background: var(--surface-muted);
+            }
+            button:focus-visible {
+                outline: 2px solid var(--accent);
+                outline-offset: 2px;
+            }
+            #status {
+                margin: 0;
+                padding: 8px 14px;
+                border-bottom: 1px solid var(--border);
+                background: var(--surface-muted);
+                color: var(--muted);
+                font-size: 12px;
+            }
+            pre {
+                margin: 0;
+                padding: 14px;
+                background: var(--surface);
+                color: var(--text);
+                font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+                font-size: 12px;
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
+            }
+            @media (max-width: 640px) {
+                .page-header,
+                .content {
+                    padding-right: 14px;
+                    padding-left: 14px;
+                }
+                .panel-header {
+                    align-items: flex-start;
+                    flex-direction: column;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <header class="page-header">
+            <span class="app-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                    <ellipse cx="12" cy="5.5" rx="7.5" ry="3" />
+                    <path d="M4.5 5.5v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3v-6" />
+                    <path d="M4.5 11.5v6c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3v-6" />
+                </svg>
+            </span>
+            <div>
+                <h1>Site Admin</h1>
+                <p class="summary">Read-only runtime diagnostics</p>
+            </div>
+        </header>
+        <main class="content">
+            <section class="panel" aria-labelledby="snapshot-heading">
+                <header class="panel-header">
+                    <div>
+                        <h2 id="snapshot-heading">Runtime snapshot</h2>
+                        <p class="panel-description">Models, routes, revisions, and database readiness.</p>
+                    </div>
+                    <div class="actions">
+                        <button id="refresh" type="button">Refresh</button>
+                        <button id="copy" type="button">Copy diagnostics</button>
+                    </div>
+                </header>
+                <p id="status" role="status" aria-live="polite">Loading…</p>
+                <pre id="snapshot"></pre>
+            </section>
+        </main>
+        <script type="module" src="./app.js"></script>
+    </body>
+</html>

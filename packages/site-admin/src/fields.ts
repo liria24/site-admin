@@ -47,10 +47,7 @@ export type UrlField = Field<'url', string> & StringFieldOptions
 export type FileField = Field<'file', AssetInput> & AssetFieldOptions
 export type ImageField = Field<'image', AssetInput> & AssetFieldOptions
 
-export type SelectField<Values extends readonly string[] = readonly string[]> = Field<
-    'select',
-    Values[number]
-> &
+export type SelectField<Values extends readonly string[] = readonly string[]> = Field<'select', Values[number]> &
     BaseFieldOptions<Values[number]> & {
         values: Values
     }
@@ -156,25 +153,39 @@ export const url = <const Options extends StringFieldOptions = StringFieldOption
     options?: Options,
 ): UrlField & Options => scalar<'url', string, Options>('url', options)
 
-export const select = <const Values extends readonly string[]>(
+export const select = <
+    const Values extends readonly string[],
+    const Options extends BaseFieldOptions<Values[number]> = BaseFieldOptions<Values[number]>,
+>(
     values: Values,
-    options?: BaseFieldOptions<Values[number]>,
-): SelectField<Values> => ({ kind: 'select', values, ...options })
+    options?: Options,
+): SelectField<Values> & Options => ({ kind: 'select', values, ...options }) as unknown as SelectField<Values> & Options
 
-export const relation = <const Model extends string>(
+export const relation = <
+    const Model extends string,
+    const Options extends BaseFieldOptions<string> = BaseFieldOptions<string>,
+>(
     modelName: Model,
-    options?: BaseFieldOptions<string>,
-): RelationField<Model> => ({ kind: 'relation', model: modelName, ...options })
+    options?: Options,
+): RelationField<Model> & Options =>
+    ({ kind: 'relation', model: modelName, ...options }) as unknown as RelationField<Model> & Options
 
-export const object = <const Fields extends FieldRecord>(
+export const object = <
+    const Fields extends FieldRecord,
+    const Options extends BaseFieldOptions<InferFields<Fields>> = BaseFieldOptions<InferFields<Fields>>,
+>(
     fields: Fields,
-    options?: BaseFieldOptions<InferFields<Fields>>,
-): ObjectField<Fields> => ({ kind: 'object', fields, ...options })
+    options?: Options,
+): ObjectField<Fields> & Options => ({ kind: 'object', fields, ...options }) as unknown as ObjectField<Fields> & Options
 
-export const array = <const Item extends AnyField>(
+export const array = <
+    const Item extends AnyField,
+    const Options extends BaseFieldOptions<InferField<Item>[]> & { maxItems?: number; minItems?: number } =
+        BaseFieldOptions<InferField<Item>[]> & { maxItems?: number; minItems?: number },
+>(
     item: Item,
-    options?: BaseFieldOptions<InferField<Item>[]> & { maxItems?: number; minItems?: number },
-): ArrayField<Item> => ({ kind: 'array', item, ...options })
+    options?: Options,
+): ArrayField<Item> & Options => ({ kind: 'array', item, ...options }) as unknown as ArrayField<Item> & Options
 
 export const file = <const Options extends AssetFieldOptions = AssetFieldOptions>(
     options?: Options,

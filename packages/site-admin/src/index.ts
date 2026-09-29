@@ -1,12 +1,17 @@
-export { defineSiteAdminConfig, model } from './config'
+export { defineSiteAdminAuthorization, defineSiteAdminConfig } from './config'
 export type {
     InferModelData,
     InferSiteAdminModels,
     ModelDefinition,
     ModelOptions,
-    ModelPresentation,
+    ModelDisplayFields,
     ModelRouteOptions,
+    SiteAdminAssetAction,
+    SiteAdminAuthorization,
     SiteAdminConfig,
+    SiteAdminModelAction,
+    SiteAdminRoleDefinition,
+    SiteAdminSystemAction,
 } from './config'
 export { SiteAdminError } from './errors'
 export type { SiteAdminErrorCode, SiteAdminIssue } from './errors'

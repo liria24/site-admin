@@ -1,16 +1,7 @@
 import type { ModelDefinition, ModelRouteOptions } from '../config'
 import { SiteAdminError } from '../errors'
 
-const reserved = [
-    '/api',
-    '/_nuxt',
-    '/_ipx',
-    '/__nuxt',
-    '/_site-admin',
-    '/favicon.ico',
-    '/llms.txt',
-    '/llms-full.txt',
-]
+const reserved = ['/api', '/_nuxt', '/_ipx', '/__nuxt', '/_site-admin', '/favicon.ico', '/llms.txt', '/llms-full.txt']
 
 export const slugify = (value: string, maxLength = 80): string =>
     value
@@ -23,25 +14,19 @@ export const slugify = (value: string, maxLength = 80): string =>
         .replace(/-+$/u, '')
 
 export const validateSlug = (value: string, maxLength = 80): string => {
-    if (
-        !value ||
-        value.length > maxLength ||
-        value.includes('/') ||
-        value.includes('?') ||
-        value.includes('#')
-    ) {
-        throw new SiteAdminError(
-            'SITE_ADMIN_INVALID_INPUT',
-            `Slug must be 1-${maxLength} URL-path characters.`,
-        )
+    if (!value || value.length > maxLength || value.includes('/') || value.includes('?') || value.includes('#')) {
+        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', `Slug must be 1-${maxLength} URL-path characters.`)
     }
     return value
 }
 
 const routeOptions = (definition: ModelDefinition): ModelRouteOptions | null => {
     if (!definition.route) return null
-    return definition.route === true ? {} : definition.route
+    if (definition.route === true) return {}
+    return typeof definition.route === 'string' ? { path: definition.route } : definition.route
 }
+
+export const modelRouteOptions = routeOptions
 
 export const entryPath = (
     modelName: string,
@@ -59,22 +44,13 @@ export const entryPath = (
         path.includes('#') ||
         (pattern === path && !pattern.includes(':slug'))
     ) {
-        throw new SiteAdminError(
-            'SITE_ADMIN_INVALID_INPUT',
-            `Invalid route pattern for model "${modelName}".`,
-        )
+        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', `Invalid route pattern for model "${modelName}".`)
     }
     if (reserved.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
-        throw new SiteAdminError(
-            'SITE_ADMIN_ROUTE_CONFLICT',
-            `Route "${path}" is reserved by Nuxt or Site Admin.`,
-        )
+        throw new SiteAdminError('SITE_ADMIN_ROUTE_CONFLICT', `Route "${path}" is reserved by Nuxt or Site Admin.`)
     }
     if (apiBases.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
-        throw new SiteAdminError(
-            'SITE_ADMIN_ROUTE_CONFLICT',
-            `Route "${path}" conflicts with a Site Admin API.`,
-        )
+        throw new SiteAdminError('SITE_ADMIN_ROUTE_CONFLICT', `Route "${path}" conflicts with a Site Admin API.`)
     }
     return path
 }
@@ -104,11 +80,8 @@ export const routeRedirect = (
     return { status: options.status ?? 302, target }
 }
 
-export const preferredSlugSource = (
-    definition: ModelDefinition,
-    data: Record<string, unknown>,
-): string | undefined => {
-    const explicit = definition.presentation?.title
+export const preferredSlugSource = (definition: ModelDefinition, data: Record<string, unknown>): string | undefined => {
+    const explicit = definition.displayFields?.title
     if (explicit && typeof data[explicit] === 'string') return data[explicit]
     for (const key of ['title', 'name']) {
         if (typeof data[key] === 'string') return data[key]

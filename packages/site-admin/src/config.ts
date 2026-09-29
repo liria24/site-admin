@@ -8,10 +8,14 @@ export interface ModelRouteOptions {
     path?: string
     /** Redirect to the URL stored in this field instead of serving a page. */
     redirect?: string
+    /** Exclude this route from llms.txt while keeping it publicly routable. */
+    llms?: boolean
+    /** Exclude this route from the sitemap while keeping it publicly routable. */
+    sitemap?: boolean
     status?: 301 | 302 | 307 | 308
 }
 
-export interface ModelPresentation {
+export interface ModelDisplayFields {
     description?: string
     image?: string
     title?: string
@@ -19,46 +23,73 @@ export interface ModelPresentation {
 
 export interface ModelOptions<Fields extends FieldRecord = FieldRecord> {
     fields: Fields
-    presentation?: ModelPresentation
+    /** Store one revision stream per locale. Nuxt i18n remains the locale source of truth. */
+    localized?: boolean
+    displayFields?: ModelDisplayFields
     /** `false` publishes each revision immediately while still retaining history. */
     publishing?: boolean
     /** Public projection is independent from whether the model owns routes. */
     public?: boolean
-    route?: boolean | ModelRouteOptions
-    schemaVersion?: number
+    route?: boolean | ModelRouteOptions | string
     sortable?: boolean
     validate?: StandardSchemaV1<unknown, InferFields<Fields>>
 }
 
-export interface ModelDefinition<Fields extends FieldRecord = FieldRecord> extends ModelOptions<Fields> {
-    readonly kind: 'model'
-}
-
-export const model = <const Fields extends FieldRecord>(
-    options: ModelOptions<Fields>,
-): ModelDefinition<Fields> => ({ kind: 'model', ...options })
+export type ModelDefinition<Fields extends FieldRecord = FieldRecord> = ModelOptions<Fields>
 
 export interface SiteAdminLifecycleEvent {
     actorId?: string
     entryId: string
     model: string
     revisionId?: string
-    type: 'create' | 'delete' | 'publish' | 'schedule' | 'unpublish' | 'update'
+    type: 'create' | 'delete' | 'publish' | 'restore' | 'schedule' | 'unpublish' | 'update'
 }
 
 export interface SiteAdminAIConfig {
     slug?: (input: { data: Record<string, unknown>; model: string }) => Promise<string | null> | string | null
 }
 
-export interface SiteAdminConfig<
-    Models extends Record<string, ModelDefinition> = Record<string, ModelDefinition>,
-> {
+export type SiteAdminModelAction =
+    | 'ai'
+    | 'create'
+    | 'delete'
+    | 'publish'
+    | 'prune'
+    | 'readDraft'
+    | 'restore'
+    | 'schedule'
+    | 'sort'
+    | 'update'
+
+export type SiteAdminAssetAction = 'delete' | 'gc' | 'read' | 'upload'
+export type SiteAdminSystemAction = 'diagnostics' | 'publishDue'
+
+export interface SiteAdminRoleDefinition {
+    assets?: readonly SiteAdminAssetAction[]
+    models?: Readonly<Record<string, readonly SiteAdminModelAction[]>>
+    system?: readonly SiteAdminSystemAction[]
+}
+
+export interface SiteAdminAuthorization {
+    roles: Readonly<Record<string, SiteAdminRoleDefinition>>
+}
+
+export const defineSiteAdminAuthorization = <const Roles extends Readonly<Record<string, SiteAdminRoleDefinition>>>(
+    roles: Roles,
+): SiteAdminAuthorization & { roles: Roles } => {
+    if (Object.hasOwn(roles, 'admin')) throw new Error('The built-in "admin" role cannot be overridden.')
+    return { roles }
+}
+
+export interface SiteAdminConfig<Models extends Record<string, ModelDefinition> = Record<string, ModelDefinition>> {
     ai?: SiteAdminAIConfig
     assets?: {
         maxUploadSize?: number
-        orphanGracePeriod?: string
+        operationLeaseSeconds?: number
+        cleanup?: { minimumAge?: number }
         storage: string
     }
+    authorization?: SiteAdminAuthorization
     hooks?: {
         afterCommit?: (event: SiteAdminLifecycleEvent) => Promise<void> | void
     }

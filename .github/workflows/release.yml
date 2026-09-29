@@ -9,11 +9,13 @@ on:
     workflow_dispatch:
         inputs:
             prerelease:
-                description: 'Cut a prerelease instead of a normal release, e.g. `beta`, `rc`, or `0`'
+                description: 'Cut a prerelease instead of a normal release, e.g. `beta`, `rc`,
+                    or `0`'
                 required: false
                 default: ''
             npm-tag:
-                description: 'npm dist-tag to publish to. Set by uppt/release for maintenance lines; leave blank otherwise'
+                description: 'npm dist-tag to publish to. Set by uppt/release for maintenance
+                    lines; leave blank otherwise'
                 required: false
                 default: ''
 
@@ -37,7 +39,7 @@ jobs:
             contents: write
             pull-requests: write
         steps:
-            - uses: danielroe/uppt/pr@09882a5a0a1a20a0e802613a77ad59fcb1c1611c # v0.6.9
+            - uses: danielroe/uppt/pr@65a86313a63b10a6793de6c4ff8614b18e127a71 # v0.6.10
               with:
                   token: ${{ secrets.GITHUB_TOKEN }}
                   prerelease: ${{ inputs.prerelease }}
@@ -58,37 +60,59 @@ jobs:
             contents: write
             actions: write
         steps:
-            - uses: danielroe/uppt/release@09882a5a0a1a20a0e802613a77ad59fcb1c1611c # v0.6.9
+            - uses: danielroe/uppt/release@65a86313a63b10a6793de6c4ff8614b18e127a71 # v0.6.10
               with:
                   token: ${{ secrets.GITHUB_TOKEN }}
                   packages: packages/site-admin
 
     pack:
-        if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'workflow_dispatch' && startsWith(github.ref,
+            'refs/tags/v')
         runs-on: ubuntu-latest
         concurrency:
             group: pack-${{ github.ref }}
             cancel-in-progress: false
-        permissions: {}
+        permissions:
+            contents: read
+            actions: read
+        timeout-minutes: 45
         outputs:
             files: ${{ steps.pack.outputs.files }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   persist-credentials: false
-            - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+            - name: Require successful CI for the tagged commit
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  sha=$(git rev-parse HEAD)
+                  for attempt in {1..60}; do
+                    run_id=$(gh run list --workflow ci.yml --commit "$sha" --event push --limit 1 --json databaseId --jq '.[0].databaseId')
+                    if [[ -n "$run_id" && "$run_id" != null ]]; then break; fi
+                    sleep 5
+                  done
+                  [[ -n "$run_id" && "$run_id" != null ]]
+                  gh run watch "$run_id" --exit-status
+                  gh run view "$run_id" --json headSha,jobs | jq -e --arg sha "$sha" '.headSha == $sha and ([.jobs[] | select(.name == "check")] | length == 1 and all(.[]; .conclusion == "success"))'
+            - uses: ./.github/actions/setup
               with:
-                  node-version: 24
-            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-              with:
-                  bun-version: 1.4.2
-            - run: bun ci
+                  ignore-scripts: 'true'
             - id: pack
-              uses: danielroe/uppt/pack@09882a5a0a1a20a0e802613a77ad59fcb1c1611c # v0.6.9
+              uses: danielroe/uppt/pack@65a86313a63b10a6793de6c4ff8614b18e127a71 # v0.6.10
               with:
                   checkout: false
                   install: false
                   packages: packages/site-admin
+
+            - name: Verify the exact release artifact
+              env:
+                  PACKED_FILES: ${{ steps.pack.outputs.files }}
+              run: |
+                  set -euo pipefail
+                  tarball=$(jq -er 'if length == 1 then .[0] else error("Expected one release tarball") end' <<< "$PACKED_FILES")
+                  SITE_ADMIN_TARBALL="$RUNNER_TEMP/uppt-pack/$tarball" bun run test:packed
 
     publish:
         if: |
@@ -104,7 +128,7 @@ jobs:
             id-token: write
         environment: npm
         steps:
-            - uses: danielroe/uppt/publish@09882a5a0a1a20a0e802613a77ad59fcb1c1611c # v0.6.9
+            - uses: danielroe/uppt/publish@65a86313a63b10a6793de6c4ff8614b18e127a71 # v0.6.10
               with:
                   files: ${{ needs.pack.outputs.files }}
                   npm-tag: ${{ inputs.npm-tag }}

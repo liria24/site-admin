@@ -3,7 +3,8 @@
     "compilerOptions": {
         "paths": {
             "@liria24/site-admin": ["../packages/site-admin/src/index.ts"],
-            "@liria24/site-admin/nuxt": ["../packages/site-admin/src/nuxt.ts"]
+            "@liria24/site-admin/*": ["../packages/site-admin/src/*"],
+            "@liria24/site-admin/server": ["../packages/site-admin/src/server/index.ts"]
         }
     },
     "include": ["**/*.ts", "../vitest.config.ts"]

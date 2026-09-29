@@ -4,26 +4,86 @@ on:
     push:
         branches: [main]
     pull_request:
+    merge_group:
+    workflow_dispatch:
 
 permissions:
     contents: read
 
 concurrency:
-    group: ci-${{ github.event.pull_request.number || github.ref }}
-    cancel-in-progress: true
+    group: ci-${{ github.event.pull_request.number || github.sha }}
+    cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
-    check:
+    static:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   persist-credentials: false
-            - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-              with:
-                  node-version: 24
-            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-              with:
-                  bun-version: 1.4.2
-            - run: bun ci
-            - run: bun run check
+            - uses: ./.github/actions/setup
+            - run: bun run format:check
+            - run: bun run lint
+            - run: bun run workspace:check
+            - run: bun run unused
+            - run: bun run typecheck
+    unit:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with: { persist-credentials: false }
+            - uses: ./.github/actions/setup
+            - run: bun run test
+    package:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with: { persist-credentials: false }
+            - uses: ./.github/actions/setup
+            - run: bun run build
+            - run: bun run package:check
+    nuxt:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with: { persist-credentials: false }
+            - uses: ./.github/actions/setup
+            - run: bun run build
+            - run: bun run test:nuxt
+    cloudflare:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with: { persist-credentials: false }
+            - uses: ./.github/actions/setup
+            - run: bun run build
+            - run: bun run test:cloudflare
+    consumer:
+        strategy:
+            fail-fast: false
+            matrix:
+                package-manager: [bun, npm, pnpm]
+        runs-on: ubuntu-latest
+        env:
+            SITE_ADMIN_PACKAGE_MANAGER: ${{ matrix.package-manager }}
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with: { persist-credentials: false }
+            - uses: ./.github/actions/setup
+            - if: matrix.package-manager == 'pnpm'
+              run: npm install --global pnpm@10.25.0
+            - run: bun run build
+            - run: bun run test:packed
+    check:
+        if: always()
+        needs: [static, unit, package, nuxt, cloudflare, consumer]
+        runs-on: ubuntu-latest
+        steps:
+            - name: Require every blocking job
+              env:
+                  NEEDS: ${{ toJSON(needs) }}
+              run: jq -e 'all(.[]; .result == "success")' <<< "$NEEDS"
