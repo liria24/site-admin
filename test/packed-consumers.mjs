@@ -119,6 +119,9 @@ try {
     if (!(await stat(tarball)).isFile()) throw new Error('SITE_ADMIN_TARBALL must be a package file.')
     console.log(`Testing ${tarball} with ${packageManager}`)
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
+    // Package boundaries keep pnpm exec in each app instead of the parent dependency directory.
+    for (const name of ['server', 'remote'])
+        await writeFile(join(temporary, name, 'package.json'), JSON.stringify({ private: true, type: 'module' }))
     await writeFile(
         join(temporary, 'package.json'),
         JSON.stringify({
