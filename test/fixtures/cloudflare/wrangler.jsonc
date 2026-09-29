@@ -5,6 +5,7 @@
     "compatibility_date": "2026-09-14",
     "alias": {
         "@aws-sdk/client-s3": "./unused-aws.ts",
+        "@aws-sdk/lib-storage": "./unused-aws.ts",
         "@aws-sdk/s3-presigned-post": "./unused-aws.ts",
         "@aws-sdk/s3-request-presigner": "./unused-aws.ts",
     },

@@ -3,6 +3,14 @@
     "name": "site-admin-d1-temporary-test",
     "main": "worker.ts",
     "compatibility_date": "2026-09-14",
+    "alias": {
+        "@aws-sdk/client-s3": "./unused-aws.ts",
+        "@aws-sdk/lib-storage": "./unused-aws.ts",
+        "@aws-sdk/s3-presigned-post": "./unused-aws.ts",
+        "@aws-sdk/s3-request-presigner": "./unused-aws.ts",
+    },
+    "compatibility_flags": ["nodejs_compat"],
+    "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "site-admin-test-assets" }],
     "d1_databases": [
         {
             "binding": "SITE_ADMIN_DB",
