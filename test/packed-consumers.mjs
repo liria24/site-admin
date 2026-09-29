@@ -119,9 +119,6 @@ try {
     if (!(await stat(tarball)).isFile()) throw new Error('SITE_ADMIN_TARBALL must be a package file.')
     console.log(`Testing ${tarball} with ${packageManager}`)
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
-    // Package boundaries keep pnpm exec in each app instead of the parent dependency directory.
-    for (const name of ['server', 'remote'])
-        await writeFile(join(temporary, name, 'package.json'), JSON.stringify({ private: true, type: 'module' }))
     await writeFile(
         join(temporary, 'package.json'),
         JSON.stringify({
@@ -230,14 +227,24 @@ await import('@liria24/site-admin/adapter')
 `,
     ])
     run(process.execPath, ['form.ts'])
-    exec(['site-admin', 'generate'], join(temporary, 'server'))
+    exec(['site-admin', 'generate', '--config', 'server/site-admin.config.ts', '--out', 'server/schema.ts'])
     await writeFile(
         join(temporary, 'server/auth.config.ts'),
         `import { defineServerAuth } from '@nuxtjs/better-auth/config'
 export default defineServerAuth({ emailAndPassword: { enabled: true } })
 `,
     )
-    exec(['site-admin', 'generate', '--auth', 'auth.config.ts', '--auth-use-plural'], join(temporary, 'server'))
+    exec([
+        'site-admin',
+        'generate',
+        '--config',
+        'server/site-admin.config.ts',
+        '--out',
+        'server/schema.ts',
+        '--auth',
+        'server/auth.config.ts',
+        '--auth-use-plural',
+    ])
     await writeFile(
         join(temporary, 'server/drizzle.config.ts'),
         `export default { dialect: 'sqlite', schema: './schema.ts', out: './migrations', dbCredentials: { url: './.data/content.sqlite3' } }`,
