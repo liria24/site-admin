@@ -1,6 +1,6 @@
 {
     "name": "@liria24/site-admin",
-    "version": "0.0.0",
+    "version": "0.0.1",
     "description": "Runtime-first, schema-driven site administration for Nuxt",
     "homepage": "https://github.com/liria24/site-admin#readme",
     "license": "MIT",
