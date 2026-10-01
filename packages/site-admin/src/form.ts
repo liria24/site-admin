@@ -4,7 +4,8 @@ import { ref, toRaw, type Ref } from 'vue'
 
 import type { FieldDescriptor, ModelDescriptor } from './descriptor'
 import type { SiteAdminIssue } from './errors'
-import type { AssetRecord, EntryRecord } from './server/types'
+import type { AssetRecord, EntryRecord, EntryMutationResult } from './server/types'
+import { validateAsset } from './validation'
 
 export interface SiteAdminFormError {
     code: string
@@ -20,7 +21,7 @@ export interface UseSiteAdminFormOptions<Data extends Record<string, unknown>> {
     locale?: string
     managementBase?: string
     modelName: string
-    onSuccess?: (entry: EntryRecord) => Promise<void> | void
+    onSuccess?: (entry: EntryMutationResult) => Promise<void> | void
     slug?: string
 }
 
@@ -92,7 +93,20 @@ const descriptorIssues = (
                     add(`Minimum ${field.minItems} items.`)
                 if (field.maxItems !== undefined && value.length > field.maxItems)
                     add(`Maximum ${field.maxItems} items.`)
+                if (field.kind === 'images')
+                    for (const [index, item] of value.entries())
+                        issues.push(
+                            ...validateAsset(item, `${path}.${index}`).map((issue) => ({
+                                message: issue.message,
+                                path: issue.path.split('.'),
+                            })),
+                        )
+                else if (field.item)
+                    for (const [index, item] of value.entries())
+                        issues.push(...descriptorIssues({ [index]: field.item }, { [index]: item }, path))
             }
+        } else if (field.kind === 'image' || field.kind === 'file') {
+            for (const issue of validateAsset(value, path)) add(issue.message)
         } else if (field.kind === 'number') {
             if (typeof value !== 'number' || !Number.isFinite(value)) add('Must be a finite number.')
             else if (field.min !== undefined && value < field.min) add(`Must be at least ${field.min}.`)
@@ -200,10 +214,10 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                 }
                 return createValidationError({ fields: {}, form: error.message })
             }
-            const entry = (await response.json()) as EntryRecord
+            const entry = (await response.json()) as EntryMutationResult
             entryId.value = entry.id
             version.value = entry.version
-            form.reset(entry.data as Data)
+            form.reset(('data' in entry ? entry.data : value) as Data)
             await options.onSuccess?.(entry)
             return entry
         },
@@ -255,7 +269,7 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                 if (locale) url.searchParams.set('locale', locale)
                 const response = await request(`${url.pathname}${url.search}`)
                 if (!response.ok) throw new Error((await readError(response)).message)
-                return (await response.json()) as EntryRecord[]
+                return ((await response.json()) as { items: EntryRecord[] }).items
             },
         },
         serverError,

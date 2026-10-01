@@ -139,10 +139,13 @@ try {
     )
     await writeFile(
         join(temporary, 'core.ts'),
-        `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
-import { createSiteAdminClient } from '@liria24/site-admin/client'
+        `import { defineSiteAdminConfig, image, text, type InferSiteAdminPublicModels } from '@liria24/site-admin'
+import { createSiteAdminClient, managementAssetUrl, type PublicAsset } from '@liria24/site-admin/client'
 import { createSiteAdmin } from '@liria24/site-admin/server'
-const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text({ required: true }) } } } })
+const config = defineSiteAdminConfig({ models: { posts: { fields: { cover: image(), title: text({ required: true }) } } } })
+const data = { title: 'Public', cover: { id: 'asset', url: '/api/content/_assets/asset' } } satisfies InferSiteAdminPublicModels<typeof config>['posts']['data']
+const cover: PublicAsset = data.cover
+if (managementAssetUrl(cover.id, '/manage/') !== '/manage/assets/asset/content') throw new Error('management asset helper invalid')
 if (!config.models.posts || typeof createSiteAdmin !== 'function' || typeof createSiteAdminClient !== 'function') throw new Error('core exports missing')
 `,
     )

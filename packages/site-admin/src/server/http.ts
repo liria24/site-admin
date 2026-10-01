@@ -1,7 +1,7 @@
 import { SiteAdminError } from '../errors'
 import type { SiteAdmin } from './site-admin'
 
-const json = (value: unknown, init: ResponseInit = {}): Response => {
+const jsonResponse = (value: unknown, init: ResponseInit = {}): Response => {
     const headers = new Headers(init.headers)
     headers.set('content-type', 'application/json; charset=utf-8')
     return new Response(JSON.stringify(value), { ...init, headers })
@@ -9,7 +9,7 @@ const json = (value: unknown, init: ResponseInit = {}): Response => {
 
 const errorResponse = (error: unknown): Response => {
     if (error instanceof SiteAdminError) {
-        return json(
+        return jsonResponse(
             {
                 error: {
                     code: error.code,
@@ -20,7 +20,7 @@ const errorResponse = (error: unknown): Response => {
             { status: error.status },
         )
     }
-    return json(
+    return jsonResponse(
         { error: { code: 'SITE_ADMIN_INTERNAL_ERROR', message: 'Internal Site Admin error.' } },
         { status: 500 },
     )
@@ -96,8 +96,18 @@ const handleManagementRequestInner = async (
     base = '/api/site-admin',
     context?: unknown,
 ): Promise<Response> => {
+    let redactError = false
     try {
         const actor = await siteAdmin.authorizeRequest(request, context)
+        const entryResult = (value: unknown): unknown => {
+            if (!value || typeof value !== 'object' || !('currentRevisionId' in value)) return value
+            const entry = value as Awaited<ReturnType<SiteAdmin['getEntry']>>
+            return siteAdmin.can(actor, 'model', 'readDraft', entry.model)
+                ? entry
+                : { id: entry.id, model: entry.model, sortOrder: entry.sortOrder, version: entry.version }
+        }
+        const json = (value: unknown, init?: ResponseInit): Response =>
+            jsonResponse(Array.isArray(value) ? value.map(entryResult) : entryResult(value), init)
         const path = pathAfter(request, base)
         const method = request.method.toUpperCase()
         if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
@@ -109,6 +119,7 @@ const handleManagementRequestInner = async (
         }
         const entryFor = async (id: string, action: Parameters<SiteAdmin['can']>[2]) => {
             const entry = await siteAdmin.getEntry(id)
+            redactError = !siteAdmin.can(actor, 'model', 'readDraft', entry.model)
             siteAdmin.assertPermission(actor, 'model', action, entry.model)
             return entry
         }
@@ -129,7 +140,13 @@ const handleManagementRequestInner = async (
             if (!model) entries = entries.filter((entry) => siteAdmin.can(actor, 'model', 'readDraft', entry.model))
             const locale = url.searchParams.get('locale')
             const query = url.searchParams.get('q')?.toLocaleLowerCase()
-            const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50), 1), 100)
+            const limit = Number(url.searchParams.get('limit') ?? 50)
+            const offset = Number(url.searchParams.get('offset') ?? 0)
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_INVALID_INPUT',
+                    'limit must be 1–100 and offset a non-negative integer.',
+                )
             if (locale) entries = entries.filter((entry) => entry.locale === locale)
             if (query) {
                 entries = entries.filter(
@@ -138,9 +155,10 @@ const handleManagementRequestInner = async (
                         JSON.stringify(entry.data).toLocaleLowerCase().includes(query),
                 )
             }
-            return json(entries.slice(0, limit))
+            return json({ items: entries.slice(offset, offset + limit), total: entries.length, limit, offset })
         }
         if (method === 'POST' && path.length === 2 && path[0] === 'entries') {
+            redactError = !siteAdmin.can(actor, 'model', 'readDraft', path[1])
             siteAdmin.assertPermission(actor, 'model', 'create', requiredString(path[1], 'model'))
             const body = await bodyObject(request)
             const data = body.data
@@ -164,6 +182,7 @@ const handleManagementRequestInner = async (
         }
         if (method === 'POST' && path.length === 3 && path[0] === 'entries' && path[2] === 'reorder') {
             const model = requiredString(path[1], 'model')
+            redactError = !siteAdmin.can(actor, 'model', 'readDraft', model)
             siteAdmin.assertPermission(actor, 'model', 'sort', model)
             const body = await bodyObject(request)
             if (!Array.isArray(body.items))
@@ -277,6 +296,7 @@ const handleManagementRequestInner = async (
             }
             if (method === 'POST' && path.length === 4 && path[2] === 'ai') {
                 await entryFor(id, 'ai')
+                await entryFor(id, 'readDraft')
                 return json(
                     await siteAdmin.runAIAction(id, requiredString(path[3], 'action'), await bodyObject(request)),
                 )
@@ -348,7 +368,13 @@ const handleManagementRequestInner = async (
         }
         if (method === 'POST' && path.length === 2 && path[0] === 'tasks' && path[1] === 'publish-due') {
             siteAdmin.assertPermission(actor, 'system', 'publishDue')
-            return json(await siteAdmin.publishDue())
+            const result = await siteAdmin.publishDue()
+            for (const failure of result.failed) {
+                const entry = await siteAdmin.getEntry(failure.entryId).catch(() => null)
+                if (!entry || !siteAdmin.can(actor, 'model', 'readDraft', entry.model))
+                    failure.message = 'Scheduled publication failed.'
+            }
+            return json(result)
         }
         if (method === 'POST' && path.length === 2 && path[0] === 'tasks' && path[1] === 'asset-gc') {
             siteAdmin.assertPermission(actor, 'asset', 'gc')
@@ -359,6 +385,15 @@ const handleManagementRequestInner = async (
             { status: 404 },
         )
     } catch (error) {
+        if (redactError && error instanceof SiteAdminError)
+            return errorResponse(
+                new SiteAdminError(
+                    error.code,
+                    error.code === 'SITE_ADMIN_STORAGE_UNAVAILABLE'
+                        ? 'The entry was saved, but Asset synchronization needs retry.'
+                        : 'The requested operation failed.',
+                ),
+            )
         return errorResponse(error)
     }
 }
@@ -389,7 +424,7 @@ export const handlePublicRequest = async (
     let response: Response
     try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-            response = json(
+            response = jsonResponse(
                 { error: { code: 'SITE_ADMIN_METHOD_NOT_ALLOWED', message: 'Method not allowed.' } },
                 { status: 405 },
             )
@@ -397,29 +432,32 @@ export const handlePublicRequest = async (
             const url = new URL(request.url)
             const locale = url.searchParams.get('locale') ?? undefined
             const path = pathAfter(request, base)
-            if (path.length === 1 && path[0] === 'models') response = json(publicDescriptor(siteAdmin))
-            else if (path.length === 1 && path[0] === '_sitemap') response = json(await siteAdmin.sitemap())
+            if (path.length === 1 && path[0] === 'models') response = jsonResponse(publicDescriptor(siteAdmin))
+            else if (path.length === 1 && path[0] === '_sitemap') response = jsonResponse(await siteAdmin.sitemap())
             else if (path.length === 1 && path[0] === '_route') {
                 const route = new URL(request.url).searchParams.get('path')
                 if (!route) throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Query parameter "path" is required.')
                 const result = await siteAdmin.resolvePath(route, locale)
-                response = result ? json(result) : json(null, { status: 404 })
+                response = result ? jsonResponse(result) : jsonResponse(null, { status: 404 })
             } else if (path[0] === '_assets' && path[1]) {
                 const { asset, file } = await siteAdmin.downloadAsset(path[1], true)
                 response = assetResponse(request, asset, file, false)
             } else {
                 const modelName = optionalString(path[0])
                 if (!modelName) {
-                    response = json({ models: Object.keys((publicDescriptor(siteAdmin) as { models: object }).models) })
+                    response = jsonResponse({
+                        models: Object.keys((publicDescriptor(siteAdmin) as { models: object }).models),
+                    })
                 } else {
                     const content = await siteAdmin.content(modelName, locale)
-                    if (path.length === 1) response = json(await content.list())
+                    if (path.length === 1) response = jsonResponse(await content.list())
                     else {
-                        const published = await siteAdmin.getPublicEntry(modelName, path.slice(1).join('/'), locale)
-                        const key =
-                            published && (siteAdmin.config.models[modelName]?.route ? published.slug : published.id)
-                        const item = key ? await content.get(`/${modelName}/${key}`) : null
-                        response = item ? json(item) : json(null, { status: 404 })
+                        const key = path.slice(1).join('/')
+                        const item = (await content.list()).find((document) => {
+                            const metadata = document.data['_siteAdmin'] as { id?: string; slug?: string } | undefined
+                            return metadata?.id === key || metadata?.slug === key
+                        })
+                        response = item ? jsonResponse(item) : jsonResponse(null, { status: 404 })
                     }
                 }
             }

@@ -6,6 +6,7 @@ import summary from 'comark/plugins/summary'
 import { addRoute, createRouter, findRoute, type RouterContext } from 'rou3'
 import type { SiteAdminStorage } from '../adapter'
 import { prepareUpload } from './upload'
+import type { Files } from 'files-sdk'
 
 import type {
     ModelDefinition,
@@ -29,6 +30,7 @@ import { queryRow, queryRows, runAtomic, type AtomicStatement } from './database
 import { entryPath, modelRouteOptions, preferredSlugSource, routeRedirect, slugify, validateSlug } from './routes'
 import type {
     AssetRecord,
+    AssetSyncResult,
     DownloadedAsset,
     EntryInput,
     EntryRecord,
@@ -130,6 +132,17 @@ interface LLMSEntry {
 
 interface MetaRow {
     value: string
+}
+
+interface ProjectionBudget {
+    nodes: number
+}
+
+interface AssetCopy {
+    assetId: string
+    key: string
+    state: 'copying' | 'ready' | 'retired'
+    storage: string
 }
 
 interface SqlGuard {
@@ -336,6 +349,14 @@ export class SiteAdmin {
         this.#revisionSource = this.#storage.revisionSource
         durationMilliseconds(options.config.assets?.cleanup?.minimumAge ?? 60 * 60 * 24)
         durationMilliseconds(options.config.assets?.operationLeaseSeconds ?? 60 * 15)
+        if (
+            options.config.assets?.separateDrafts === true &&
+            (options.config.assets.operationLeaseSeconds ?? 60 * 15) === 0
+        )
+            throw new SiteAdminError(
+                'SITE_ADMIN_INVALID_INPUT',
+                'separateDrafts requires a positive operationLeaseSeconds.',
+            )
         const maxSize = options.config.assets?.maxUploadSize
         if (maxSize !== undefined && (!Number.isSafeInteger(maxSize) || maxSize <= 0))
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'maxUploadSize must be a positive safe integer.')
@@ -411,7 +432,45 @@ export class SiteAdmin {
     async #initialize(): Promise<void> {
         this.#validateConfig()
         await this.#storage.assertSchema()
+        const mode = await queryRow<MetaRow>(
+            this.#options.database,
+            "SELECT value FROM site_admin_meta WHERE key = 'asset_storage_mode'",
+        )
+        const assets = this.config.assets
+        if (mode && mode.value !== (assets?.separateDrafts === true ? `separate:${assets.storage}` : 'shared'))
+            throw new SiteAdminError(
+                'SITE_ADMIN_MIGRATION_REQUIRED',
+                'Migrate existing Asset copies before changing the storage mode.',
+            )
+        if (assets?.separateDrafts === true) {
+            await this.#assetStores()
+            const legacy = await queryRow<{ id: string }>(
+                this.#options.database,
+                "SELECT id FROM site_admin_assets WHERE storage <> 'draft' AND state <> 'deleted' LIMIT 1",
+            )
+            if (legacy)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_MIGRATION_REQUIRED',
+                    'Move existing Asset originals to private draft storage before enabling separateDrafts.',
+                )
+            await this.#commit([
+                {
+                    sql: "INSERT INTO site_admin_meta(key, value) VALUES ('asset_storage_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE site_admin_meta.value = excluded.value RETURNING value",
+                    params: [`separate:${assets.storage}`],
+                    query: true,
+                    expectRow: true,
+                },
+            ])
+        }
         await this.#reconcileRoutes()
+        if (assets?.separateDrafts === true) {
+            const sync = await this.#syncAssetCopies()
+            if (sync.failed.length)
+                this.diagnostics.push({
+                    code: 'SITE_ADMIN_ASSET_SYNC_FAILED',
+                    message: 'Asset copies need retry through publishDue or Asset GC.',
+                })
+        }
     }
 
     #validateConfig(): void {
@@ -514,7 +573,7 @@ export class SiteAdmin {
              FROM site_admin_entries e
              JOIN ${this.#revisionSource} r ON r.id = e.current_revision_id
              ${modelName ? 'WHERE e.model = ?' : ''}
-             ORDER BY e.sort_order IS NULL, e.sort_order, e.updated_at DESC`,
+             ORDER BY e.sort_order IS NULL, e.sort_order, e.updated_at DESC, e.id`,
             modelName ? [modelName] : [],
         )
         return rows.map(toEntry)
@@ -608,7 +667,7 @@ export class SiteAdmin {
         const definition = this.#model(entry.model)
         const revision = await this.#revision(revisionId, entryId)
         const prepared = await this.#prepareRevision(definition, revision)
-        await this.#assertPublishableRelations(definition, prepared.relations)
+        await this.#assertPublishableRelations(definition, prepared.relations, entryId)
         const restoredRevisionId = this.#id()
         const time = this.#now()
         const guard = this.#combineGuards(
@@ -696,6 +755,7 @@ export class SiteAdmin {
                 params: [entryId, ...candidates, entryId, entryId],
             },
         ])
+        await this.#requireAssetSync()
         return { deleted: ((results.at(-1)?.rows ?? []) as Array<{ id: string }>).map((row) => row.id) }
     }
 
@@ -1132,15 +1192,30 @@ export class SiteAdmin {
     }
 
     async #afterCommit(event: SiteAdminLifecycleEvent): Promise<void> {
-        if (!this.config.hooks?.afterCommit) return
-        try {
-            await this.config.hooks.afterCommit(event)
-        } catch (error) {
-            this.diagnostics.push({
-                code: 'SITE_ADMIN_HOOK_FAILED',
-                message: error instanceof Error ? error.message : 'A post-commit hook failed.',
-            })
+        const result = await this.#syncAssetCopies()
+        if (this.config.hooks?.afterCommit) {
+            try {
+                await this.config.hooks.afterCommit(event)
+            } catch (error) {
+                this.diagnostics.push({
+                    code: 'SITE_ADMIN_HOOK_FAILED',
+                    message: error instanceof Error ? error.message : 'A post-commit hook failed.',
+                })
+            }
         }
+        this.#assertAssetSync(result)
+    }
+
+    #assertAssetSync(result: AssetSyncResult): void {
+        if (result.failed.length)
+            throw new SiteAdminError(
+                'SITE_ADMIN_STORAGE_UNAVAILABLE',
+                'The entry was saved, but Asset copies need retry through publishDue or Asset GC.',
+            )
+    }
+
+    async #requireAssetSync(): Promise<void> {
+        this.#assertAssetSync(await this.#syncAssetCopies())
     }
 
     async createEntry(modelName: string, input: EntryInput): Promise<EntryRecord> {
@@ -1201,7 +1276,7 @@ export class SiteAdmin {
             }),
         ]
         if (published) {
-            await this.#assertPublishableRelations(definition, prepared.relations)
+            await this.#assertPublishableRelations(definition, prepared.relations, id)
             statements.push(
                 ...(await this.#routeStatements({
                     data: prepared.data,
@@ -1265,7 +1340,7 @@ export class SiteAdmin {
             relations: prepared.relations,
         })
         if (published) {
-            await this.#assertPublishableRelations(definition, prepared.relations)
+            await this.#assertPublishableRelations(definition, prepared.relations, entryId)
             statements.push(
                 ...(await this.#routeStatements({
                     data: prepared.data,
@@ -1308,15 +1383,20 @@ export class SiteAdmin {
         return this.getEntry(entryId)
     }
 
-    async #assertPublishableRelations(definition: ModelDefinition, references: IndexedReference[]): Promise<void> {
+    async #assertPublishableRelations(
+        definition: ModelDefinition,
+        references: IndexedReference[],
+        entryId: string,
+    ): Promise<void> {
         const required = references.filter((reference) => {
             const field = fieldAtPath(definition.fields, reference.path)
             return field?.kind === 'relation' && field.required
         })
-        if (required.length === 0) return
-        const ids = [...new Set(required.map((reference) => reference.id))]
+        if (references.length === 0) return
+        const ids = [...new Set(references.map((reference) => reference.id))]
         const rows = await this.#publishedRows(undefined, ids)
-        const published = new Set((await this.#publicSnapshot(rows)).keys())
+        const graph = await this.#publicSnapshot(rows)
+        const published = new Set(graph.keys())
         const issues = required
             .filter((reference) => !published.has(reference.id))
             .map((reference) => ({
@@ -1330,6 +1410,11 @@ export class SiteAdmin {
                 issues,
             )
         }
+        const budget = { nodes: 1 }
+        for (const reference of references) {
+            const target = graph.get(reference.id)
+            if (target) this.#projectPublished(target, graph, new Set([entryId]), budget)
+        }
     }
 
     async publishEntry(
@@ -1341,7 +1426,7 @@ export class SiteAdmin {
         const definition = this.#model(entry.model)
         const revision = await this.#revision(input.revisionId ?? entry.current_revision_id, entryId)
         const prepared = await this.#prepareRevision(definition, revision)
-        await this.#assertPublishableRelations(definition, prepared.relations)
+        await this.#assertPublishableRelations(definition, prepared.relations, entryId)
         const time = this.#now()
         const guard = this.#combineGuards(
             this.#guard(entryId, input.expectedVersion),
@@ -1497,6 +1582,7 @@ export class SiteAdmin {
                       WHERE id = ? AND version = ? RETURNING version`,
             },
         ])
+        await this.#requireAssetSync()
         return this.getEntry(entryId)
     }
 
@@ -1527,6 +1613,7 @@ export class SiteAdmin {
                 })
             }
         }
+        if (this.config.assets?.separateDrafts === true) result.assets = await this.#syncAssetCopies()
         return result
     }
 
@@ -1742,14 +1829,20 @@ export class SiteAdmin {
         }
     }
 
-    #hydrateField(field: AnyField, value: unknown, graph: Map<string, PublishedRow>, trail: Set<string>): unknown {
+    #hydrateField(
+        field: AnyField,
+        value: unknown,
+        graph: Map<string, PublishedRow>,
+        trail: Set<string>,
+        budget: ProjectionBudget,
+    ): unknown {
         if (value === undefined || value === null) return value
         switch (field.kind) {
             case 'relation': {
                 if (typeof value !== 'string') return null
                 const target = graph.get(value)
                 if (!target) return null
-                return this.#projectPublished(target, graph, trail)
+                return this.#projectPublished(target, graph, trail, budget)
             }
             case 'file':
             case 'image':
@@ -1764,10 +1857,11 @@ export class SiteAdmin {
                         : {},
                     graph,
                     trail,
+                    budget,
                 )
             case 'array':
                 return Array.isArray(value)
-                    ? value.map((item) => this.#hydrateField(field.item, item, graph, trail))
+                    ? value.map((item) => this.#hydrateField(field.item, item, graph, trail, budget))
                     : []
             case 'markdown':
                 return typeof value === 'string'
@@ -1786,9 +1880,13 @@ export class SiteAdmin {
         data: Record<string, unknown>,
         graph: Map<string, PublishedRow>,
         trail: Set<string>,
+        budget: ProjectionBudget,
     ): Record<string, unknown> {
         return Object.fromEntries(
-            Object.entries(fields).map(([name, field]) => [name, this.#hydrateField(field, data[name], graph, trail)]),
+            Object.entries(fields).map(([name, field]) => [
+                name,
+                this.#hydrateField(field, data[name], graph, trail, budget),
+            ]),
         )
     }
 
@@ -1796,7 +1894,13 @@ export class SiteAdmin {
         row: PublishedRow,
         graph: Map<string, PublishedRow>,
         parentTrail = new Set<string>(),
+        budget: ProjectionBudget = { nodes: 0 },
     ): PublicEntry {
+        if (parentTrail.size > 16 || ++budget.nodes > 10_000)
+            throw new SiteAdminError(
+                'SITE_ADMIN_RELATION_LIMIT',
+                'Public relations exceed depth 16 or 10,000 projected nodes.',
+            )
         const definition = this.#publicModel(row.model)
         if (!definition) throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${row.model}" is private.`)
         const redirect = routeRedirect(definition, parseObject(row.data))
@@ -1819,7 +1923,7 @@ export class SiteAdmin {
         }
         const trail = new Set(parentTrail).add(row.id)
         return {
-            data: this.#hydrateFields(definition.fields, parseObject(row.data), graph, trail),
+            data: this.#hydrateFields(definition.fields, parseObject(row.data), graph, trail, budget),
             id: row.id,
             locale: row.locale,
             model: row.model,
@@ -1838,7 +1942,10 @@ export class SiteAdmin {
         const normalizedLocale = this.#locale(definition, locale)
         const rows = await this.#publishedRows(modelName, undefined, normalizedLocale)
         const graph = await this.#publicSnapshot(rows)
-        return rows.filter((row) => graph.has(row.id)).map((row) => this.#projectPublished(row, graph))
+        const budget = { nodes: 0 }
+        return rows
+            .filter((row) => graph.has(row.id))
+            .map((row) => this.#projectPublished(row, graph, new Set(), budget))
     }
 
     async getPublicEntry(modelName: string, slugOrId: string, locale?: string): Promise<PublicEntry | null> {
@@ -1972,10 +2079,14 @@ export class SiteAdmin {
                 [entry.model, entry.translation_group],
             )
             const alternateGraph = await this.#publicSnapshot(alternates)
-            const projected = this.#projectPublished(entry, graph)
+            const budget = { nodes: 0 }
+            const projected = this.#projectPublished(entry, graph, new Set(), budget)
             projected.alternates = alternates.flatMap((alternate) => {
                 if (!alternateGraph.has(alternate.id)) return []
-                const alternatePath = this.#projectPublished(alternate, alternateGraph).path
+                const alternatePath =
+                    alternate.id === entry.id
+                        ? projected.path
+                        : this.#projectPublished(alternate, alternateGraph, new Set(), budget).path
                 return alternatePath ? [{ locale: alternate.locale, path: alternatePath }] : []
             })
             return { entry: projected, kind: 'page' }
@@ -2138,7 +2249,8 @@ export class SiteAdmin {
         if (!assets || !this.#options.getFiles) {
             throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
         }
-        const files = await this.#options.getFiles(assets.storage)
+        const storage = assets.separateDrafts === true ? 'draft' : assets.storage
+        const files = await this.#options.getFiles(storage)
         const upload = await prepareUpload(input, assets.maxUploadSize)
         const id = this.#id()
         const key = `site-admin/${id}/${safeFilename(input.filename)}`
@@ -2153,7 +2265,7 @@ export class SiteAdmin {
                 {
                     params: [
                         id,
-                        assets.storage,
+                        storage,
                         key,
                         contentType,
                         upload.size,
@@ -2254,6 +2366,14 @@ export class SiteAdmin {
         if (!this.#options.getFiles) {
             throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
         }
+        if (publicOnly && this.config.assets?.separateDrafts === true) {
+            const copy = (await this.#assetCopies()).find(
+                ({ copy: record }) => record.assetId === id && record.state === 'ready',
+            )?.copy
+            if (!copy) throw new SiteAdminError('SITE_ADMIN_ASSET_NOT_READY', 'The public Asset copy needs retry.')
+            const files = await this.#options.getFiles(copy.storage)
+            return { asset, file: await files.download(copy.key, { as: 'stream' }) }
+        }
         const files = await this.#options.getFiles(asset.storage)
         return { asset, file: await files.download(asset.key, { as: 'stream' }) }
     }
@@ -2267,6 +2387,12 @@ export class SiteAdmin {
             [id],
         )
         if (reference) throw new SiteAdminError('SITE_ADMIN_ASSET_IN_USE', 'A retained revision still uses this Asset.')
+        const sync = await this.#syncAssetCopies()
+        if (sync.failed.length)
+            throw new SiteAdminError(
+                'SITE_ADMIN_STORAGE_UNAVAILABLE',
+                'Retry Asset copy cleanup before deleting its original.',
+            )
         const token = await this.#claimAsset(id)
         await this.#deleteClaimedAsset(asset, token)
     }
@@ -2324,6 +2450,8 @@ export class SiteAdmin {
     async runAssetGC(): Promise<{ deleted: string[]; failed: Array<{ id: string; message: string }> }> {
         await this.initialize()
         if (!this.config.assets) return { deleted: [], failed: [] }
+        const sync = await this.#syncAssetCopies()
+        if (sync.failed.length) return { deleted: [], failed: sync.failed }
         const grace = durationMilliseconds(this.config.assets.cleanup?.minimumAge ?? 60 * 60 * 24)
         const cutoff = new Date(this.#date().getTime() - grace).toISOString()
         const candidates = await queryRows<AssetRow>(
@@ -2350,6 +2478,241 @@ export class SiteAdmin {
                     message: error instanceof Error ? error.message : 'Asset deletion failed.',
                 })
             }
+        }
+        return result
+    }
+
+    async #assetStores(): Promise<{ draft: Files; public: Files }> {
+        const assets = this.config.assets
+        if (!assets || !assets.storage || assets.storage === 'draft' || !this.#options.getFiles)
+            throw new SiteAdminError(
+                'SITE_ADMIN_STORAGE_UNAVAILABLE',
+                'separateDrafts requires private draft and distinct public storage.',
+            )
+        try {
+            const draft = await this.#options.getFiles('draft')
+            const publicFiles = await this.#options.getFiles(assets.storage)
+            if (!draft || !publicFiles || draft === publicFiles) throw new Error('Storage must be distinct.')
+            const sameBinding =
+                draft.adapter.name === 'r2-binding' &&
+                publicFiles.adapter.name === 'r2-binding' &&
+                draft.raw === publicFiles.raw
+            const sameRoot =
+                draft.adapter.name === 'fs' &&
+                publicFiles.adapter.name === 'fs' &&
+                isObject(draft.raw) &&
+                isObject(publicFiles.raw) &&
+                draft.raw.root === publicFiles.raw.root
+            if (draft.adapter === publicFiles.adapter || sameBinding || sameRoot)
+                throw new Error('Storage backends must be distinct.')
+            return { draft, public: publicFiles }
+        } catch {
+            throw new SiteAdminError(
+                'SITE_ADMIN_STORAGE_UNAVAILABLE',
+                'Configure private Files SDK draft storage and distinct public storage.',
+            )
+        }
+    }
+
+    async #assetCopies(): Promise<Array<{ ledger: string; copy: AssetCopy }>> {
+        const rows = await queryRows<{ key: string; value: string }>(
+            this.#options.database,
+            "SELECT key, value FROM site_admin_meta WHERE key LIKE 'asset_copy:%' ORDER BY key",
+        )
+        return rows.map((row) => ({ ledger: row.key, copy: JSON.parse(row.value) as AssetCopy }))
+    }
+
+    async #desiredAssetCopies(): Promise<Set<string>> {
+        const graph = await this.#publicSnapshot(await this.#publishedRows())
+        const ids = new Set<string>()
+        for (const row of graph.values()) {
+            const definition = this.#publicModel(row.model)
+            if (definition)
+                for (const reference of collectReferences(definition.fields, parseObject(row.data)).assets)
+                    ids.add(reference.id)
+        }
+        return ids
+    }
+
+    async #retireAssetCopy(ledger: string, copy: AssetCopy, guard?: SqlGuard): Promise<void> {
+        // ponytail: keep tombstones for late storage writes; compact after enforcing storage-operation deadlines.
+        await this.#commit([
+            {
+                sql: `UPDATE site_admin_meta SET value = ? WHERE key = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING key`,
+                params: [JSON.stringify({ ...copy, state: 'retired' }), ledger, ...(guard?.params ?? [])],
+                query: true,
+                expectRow: true,
+            },
+        ])
+        if (!this.#options.getFiles)
+            throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
+        const files = await this.#options.getFiles(copy.storage)
+        if (await files.exists(copy.key)) await files.delete(copy.key)
+    }
+
+    async syncAssetCopies(): Promise<AssetSyncResult> {
+        await this.initialize()
+        return this.#syncAssetCopies()
+    }
+
+    async #syncAssetCopies(): Promise<AssetSyncResult> {
+        const result: AssetSyncResult = { copied: [], deleted: [], failed: [] }
+        if (this.config.assets?.separateDrafts !== true) return result
+        // ponytail: one DB lease serializes copy I/O; use per-Asset leases if publication throughput requires it.
+        const lease = `${this.#leaseExpiresAt()}|${this.#id()}`
+        const owner = (): SqlGuard => ({
+            clause: "EXISTS (SELECT 1 FROM site_admin_meta WHERE key = 'asset_sync_lease' AND value = ? AND value > ?)",
+            params: [lease, `${this.#now()}|~`],
+        })
+        const generation = async (): Promise<string> =>
+            (
+                await queryRow<MetaRow>(
+                    this.#options.database,
+                    "SELECT value FROM site_admin_meta WHERE key = 'public_generation'",
+                )
+            )?.value ?? '0'
+        try {
+            await this.#commit([
+                {
+                    sql: "INSERT INTO site_admin_meta(key, value) VALUES ('asset_sync_lease', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE site_admin_meta.value <= ? RETURNING value",
+                    params: [lease, `${this.#now()}|~`],
+                    query: true,
+                    expectRow: true,
+                },
+            ])
+        } catch {
+            result.failed.push({
+                id: '*',
+                message: 'Asset synchronization is busy; retry through publishDue or Asset GC.',
+            })
+            return result
+        }
+        try {
+            const stores = await this.#assetStores()
+            const startGeneration = await generation()
+            const desired = await this.#desiredAssetCopies()
+            const copies = await this.#assetCopies()
+            for (const { ledger, copy } of copies) {
+                if (copy.state === 'ready' && desired.has(copy.assetId)) continue
+                try {
+                    await this.#retireAssetCopy(ledger, copy, owner())
+                    result.deleted.push(copy.assetId)
+                } catch (error) {
+                    result.failed.push({
+                        id: copy.assetId,
+                        message: error instanceof Error ? error.message : 'Public copy deletion failed.',
+                    })
+                }
+            }
+            for (const id of desired) {
+                if (copies.some(({ copy }) => copy.assetId === id && copy.state === 'ready')) continue
+                const token = this.#id()
+                const ledger = `asset_copy:${id}:${token}`
+                const copy: AssetCopy = {
+                    assetId: id,
+                    key: `site-admin/public/${id}/${token}`,
+                    state: 'copying',
+                    storage: this.config.assets.storage,
+                }
+                const guard = owner()
+                let recorded = false
+                try {
+                    await this.#commit([
+                        {
+                            sql: `INSERT INTO site_admin_meta(key, value) SELECT ?, ? WHERE ${guard.clause} RETURNING key`,
+                            params: [ledger, JSON.stringify(copy), ...guard.params],
+                            query: true,
+                            expectRow: true,
+                        },
+                    ])
+                    recorded = true
+                    const asset = await queryRow<AssetRow>(
+                        this.#options.database,
+                        "SELECT * FROM site_admin_assets WHERE id = ? AND storage = 'draft' AND state = 'ready'",
+                        [id],
+                    )
+                    if (!asset)
+                        throw new SiteAdminError('SITE_ADMIN_ASSET_NOT_READY', 'The original Asset is not ready.')
+                    const file = await stores.draft.download(asset.key, { as: 'stream' })
+                    const upload = await prepareUpload({
+                        body: file.stream(),
+                        filename: asset.key,
+                        size: Number(asset.size),
+                    })
+                    const abort = new AbortController()
+                    let pumping: Promise<void> | undefined
+                    try {
+                        const FixedLength = (
+                            globalThis as typeof globalThis & {
+                                FixedLengthStream?: new (size: number) => TransformStream<Uint8Array, Uint8Array>
+                            }
+                        ).FixedLengthStream
+                        let body = upload.stream
+                        if (FixedLength) {
+                            const fixed = new FixedLength(upload.size)
+                            pumping = body.pipeTo(fixed.writable, { signal: abort.signal })
+                            void pumping.catch(() => {})
+                            body = fixed.readable
+                        }
+                        const stored = await stores.public.upload(copy.key, body, { contentType: asset.content_type })
+                        await pumping
+                        if (
+                            Number(stored.size) !== upload.size ||
+                            (asset.checksum && upload.checksum() !== asset.checksum)
+                        )
+                            throw new Error('Public copy does not match its original.')
+                    } catch (error) {
+                        abort.abort(error)
+                        await upload.cancel(error).catch(() => {})
+                        await pumping?.catch(() => {})
+                        throw error
+                    }
+                    const currentGeneration = await generation()
+                    if (!(await this.#desiredAssetCopies()).has(id)) {
+                        await this.#retireAssetCopy(ledger, copy)
+                        result.deleted.push(id)
+                        continue
+                    }
+                    const currentOwner = owner()
+                    await this.#commit([
+                        {
+                            sql: `UPDATE site_admin_meta SET value = ? WHERE key = ? AND ${currentOwner.clause} AND COALESCE((SELECT value FROM site_admin_meta WHERE key = 'public_generation'), '0') = ? RETURNING key`,
+                            params: [
+                                JSON.stringify({ ...copy, state: 'ready' }),
+                                ledger,
+                                ...currentOwner.params,
+                                currentGeneration,
+                            ],
+                            query: true,
+                            expectRow: true,
+                        },
+                    ])
+                    result.copied.push(id)
+                } catch (error) {
+                    if (recorded) {
+                        try {
+                            await this.#retireAssetCopy(ledger, copy)
+                        } catch {
+                            /* The durable tombstone is retried by GC. */
+                        }
+                    }
+                    result.failed.push({ id, message: error instanceof Error ? error.message : 'Public copy failed.' })
+                }
+            }
+            if ((await generation()) !== startGeneration)
+                result.failed.push({
+                    id: '*',
+                    message: 'Publication changed during synchronization; retry through publishDue or Asset GC.',
+                })
+        } catch (error) {
+            result.failed.push({
+                id: '*',
+                message: error instanceof Error ? error.message : 'Asset synchronization failed.',
+            })
+        } finally {
+            await this.#commit([
+                { sql: "DELETE FROM site_admin_meta WHERE key = 'asset_sync_lease' AND value = ?", params: [lease] },
+            ])
         }
         return result
     }

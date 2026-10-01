@@ -84,9 +84,25 @@ export interface RevisionRecord {
     slug: string
 }
 
-export interface PublicEntry {
+export interface EntryMutationReceipt {
+    id: string
+    model: string
+    sortOrder: number | null
+    version: number
+}
+
+export type EntryMutationResult = EntryRecord | EntryMutationReceipt
+
+export interface EntryPage {
+    items: EntryRecord[]
+    limit: number
+    offset: number
+    total: number
+}
+
+export interface PublicEntry<Data = Record<string, unknown>> {
     alternates?: Array<{ locale: string; path: string }>
-    data: Record<string, unknown>
+    data: Data
     id: string
     locale: string
     model: string
@@ -135,8 +151,15 @@ export interface DownloadedAsset {
 }
 
 export interface PublishDueResult {
+    assets?: AssetSyncResult
     failed: Array<{ entryId: string; message: string }>
     published: string[]
+}
+
+export interface AssetSyncResult {
+    copied: string[]
+    deleted: string[]
+    failed: Array<{ id: string; message: string }>
 }
 
 export interface SiteAdminDiagnostic {

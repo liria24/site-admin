@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { defineSiteAdminConfig, text } from '../packages/site-admin/dist/index.js'
+import { defineSiteAdminConfig, file, text } from '../packages/site-admin/dist/index.js'
 import { generateFixtureSQL } from './generate-fixture.mjs'
 
 const run = promisify(execFile)
@@ -18,7 +18,9 @@ await mkdir(migrations, { recursive: true })
 await writeFile(
     migrations + '/0001_initial.sql',
     await generateFixtureSQL(
-        defineSiteAdminConfig({ models: { posts: { fields: { title: text({ required: true }) }, route: true } } }),
+        defineSiteAdminConfig({
+            models: { posts: { fields: { attachment: file(), title: text({ required: true }) }, route: true } },
+        }),
         fixture + '/.data/schema',
     ),
 )
@@ -47,12 +49,13 @@ try {
     let response
     for (let attempt = 0; attempt < 100; attempt += 1) {
         try {
-            response = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1000) })
+            response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) })
             break
         } catch {
             await new Promise((resolve) => setTimeout(resolve, 100))
         }
     }
+    response = response?.ok && (await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(30000) }))
     const result = response && (await response.json())
     if (!response?.ok || !result?.conflict || result.entries?.[0]?.data?.title !== 'D1') {
         throw new Error(`Cloudflare D1 CRUD/publish probe failed.\n${JSON.stringify(result)}\n${output.join('')}`)
@@ -77,6 +80,25 @@ try {
     if (missing.status !== 500 || !String((await missing.json()).error)) {
         throw new Error('Cloudflare D1 missing-binding probe did not fail closed.')
     }
+    const alias = await (await fetch(`http://127.0.0.1:${port}/alias`)).json()
+    if (!alias.rejected) throw new Error('Same R2 bucket aliases were accepted as private/public storage.')
+    const separated = await (
+        await fetch(`http://127.0.0.1:${port}/separation`, {
+            method: 'POST',
+            body: bytes,
+            signal: AbortSignal.timeout(30000),
+            headers: { 'x-upload-size': String(bytes.length) },
+        })
+    ).json()
+    if (
+        !separated.privateBefore ||
+        separated.publicBefore !== 0 ||
+        separated.copiedBytes !== bytes.length ||
+        !separated.cleared ||
+        !separated.retained ||
+        !separated.deleted
+    )
+        throw new Error(`D1/R2 separateDrafts failed: ${JSON.stringify(separated)}`)
 } catch (error) {
     console.error(output.join(''))
     throw error

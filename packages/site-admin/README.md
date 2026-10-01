@@ -218,6 +218,8 @@ Changes create revisions and remain drafts until published. Set `publishing: fal
 
 Required relations must point to public, published entries. Optional relations to unpublished entries appear as `null`. Relations show the target's current published content.
 
+Public projection rejects relation depth above 16 or more than 10,000 expanded entries with `SITE_ADMIN_RELATION_LIMIT` (HTTP 422). Repeated references count each time, and a list shares one allowance across its entries. Publication validates the candidate's relations before committing.
+
 For scheduled publication, call `publishDue()` or POST `/api/site-admin/tasks/publish-due` from a Nitro Task or platform scheduler. Scheduling an entry alone does not create a cron job.
 
 Configure Nuxt `routeRules` and CDN caching for the freshness your site needs. Do not share-cache management or draft preview responses.
@@ -235,6 +237,10 @@ Configure Nuxt `routeRules` and CDN caching for the freshness your site needs. D
 Enable top-level `llms.full` for `/llms-full.txt`. Management APIs cover content editing, revisions, publishing, scheduling, sorting, assets, and AI proposals.
 
 Send JSON mutations with `Content-Type: application/json`; browser mutations must be same-origin. Bulk ordering uses `POST /api/site-admin/entries/:model/reorder` with `{ items: [{ id, sortOrder, expectedVersion }] }`.
+
+`GET /api/site-admin/entries` accepts `model`, `locale`, `q`, `limit` (1–100, default 50), and `offset` (non-negative, default 0). It returns `{ items, total, limit, offset }` after permission and search filtering. Fetch every page before reordering a complete list.
+
+Entry mutations return the full entry to actors with `readDraft`; other authorized actors receive only `{ id, model, version, sortOrder }` (`EntryMutationReceipt`). Draft-derived validation details are also withheld. AI proposals require both `ai` and `readDraft`.
 
 ## Store files and images
 
@@ -275,6 +281,14 @@ export default defineNuxtConfig({
 
 Only assets referenced by published entries in public models are publicly served. Draft previews require authentication. Markdown can reference an asset with `site-admin://asset/<id>`.
 
+This API check does not make a public bucket private. For private originals, explicitly set `assets.separateDrafts: true` and configure a genuinely private Files SDK storage named `draft`, distinct from `assets.storage`. The default is `false`; defining a `draft` storage alone does not enable separation.
+
+In separated mode, originals stay in `draft`, including those retained by historical revisions. Valid public references get copies in the usual storage; the last public reference removes its copy. Draft edits keep the current published copy. Configuration errors never fall back to public storage. Existing originals or a changed storage mode require an explicit migration with old writers stopped before enabling the new configuration.
+
+Copy I/O uses durable records, a database lease, unique attempt keys, and checksum verification. If synchronization fails after an entry commit, the mutation reports HTTP 503 and the entry is already saved: read its latest version and retry via `syncAssetCopies()`, `publishDue()`, or asset GC. Run these from a scheduler even when no entries are due. Database state and object storage cannot commit atomically; interrupted public-copy cleanup is retried while the public API immediately checks the current publication state.
+
+Use `managementAssetUrl(id, managementBase?)` from `@liria24/site-admin/client` for authenticated previews. `PublicAsset`, `PublicEntry<Data>`, `InferPublicModelData`, and `InferSiteAdminPublicModels` describe public projections, including asset URLs and expanded relations.
+
 `useSiteAdminForm()` handles uploads. For direct HTTP uploads, send the raw File body with `x-filename: encodeURIComponent(file.name)` and `x-upload-size: String(file.size)`; multipart uploads are not supported.
 
 Run asset GC from your own scheduler. It removes unreferenced assets older than `cleanup.minimumAge` seconds from creation. Historical revisions also retain their assets, so prune unwanted revisions before expecting those assets to be collected.
@@ -303,6 +317,8 @@ await controller.form.handleSubmit()
 ```
 
 After creation, later submissions update the same entry. Publishing, scheduling, restoring revisions, and deleting entries are separate actions.
+
+`onSuccess` receives `EntryMutationResult`, which can be a receipt for actors without `readDraft`. Receipt submissions retain the submitted form values and update the entry ID/version. In public inferred types, relation data is partial because a cycle boundary returns an empty data object.
 
 ## Add AI suggestions
 

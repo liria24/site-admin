@@ -8,6 +8,10 @@ export interface AssetValue {
 
 export type AssetInput = string | AssetValue
 
+export interface PublicAsset extends AssetValue {
+    url: string
+}
+
 export interface BaseFieldOptions<Value> {
     default?: Value
     description?: string

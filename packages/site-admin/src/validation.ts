@@ -60,7 +60,7 @@ const validateString = (field: AnyField, value: string, path: string): SiteAdmin
     return issues
 }
 
-const validateAsset = (value: unknown, path: string): SiteAdminIssue[] => {
+export const validateAsset = (value: unknown, path: string): SiteAdminIssue[] => {
     if (typeof value === 'string' && value.length > 0) return []
     if (isRecord(value) && typeof value.id === 'string' && value.id.length > 0) return []
     return [issue(path, 'Must be an Asset ID or Asset reference.')]

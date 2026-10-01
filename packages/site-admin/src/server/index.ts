@@ -5,9 +5,13 @@ export type { SiteAdminDatabase, SiteAdminStorage, AtomicStatement, AtomicResult
 export { configureSiteAdminRuntime, useSiteAdmin, useSiteAdminRuntime } from './runtime'
 export type {
     AssetRecord,
+    AssetSyncResult,
     DownloadedAsset,
     EntryInput,
     EntryRecord,
+    EntryMutationReceipt,
+    EntryMutationResult,
+    EntryPage,
     FilesResolver,
     IncomingReference,
     PublicEntry,

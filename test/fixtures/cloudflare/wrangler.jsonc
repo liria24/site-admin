@@ -10,7 +10,10 @@
         "@aws-sdk/s3-request-presigner": "./unused-aws.ts",
     },
     "compatibility_flags": ["nodejs_compat"],
-    "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "site-admin-test-assets" }],
+    "r2_buckets": [
+        { "binding": "ASSETS", "bucket_name": "site-admin-test-assets" },
+        { "binding": "DRAFT_ASSETS", "bucket_name": "site-admin-test-draft-assets" },
+    ],
     "d1_databases": [
         {
             "binding": "SITE_ADMIN_DB",

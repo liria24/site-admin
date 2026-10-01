@@ -5,23 +5,25 @@ import { drizzleAdapter } from '../../../packages/site-admin/src/adapters/drizzl
 // @ts-ignore Test setup generates this application schema before bundling.
 import * as schema from './.data/schema/schema'
 
-import { defineSiteAdminConfig, text } from '../../../packages/site-admin/src/index'
+import { defineSiteAdminConfig, file, text } from '../../../packages/site-admin/src/index'
 import { queryRow, runAtomic } from '../../../packages/site-admin/src/server/database'
 import { createSiteAdmin } from '../../../packages/site-admin/src/server/index'
 
 interface Env {
     SITE_ADMIN_DB: AnyD1Database
     ASSETS: Extract<Parameters<typeof r2>[0], { binding: unknown }>['binding']
+    DRAFT_ASSETS: Env['ASSETS']
 }
 
 const config = defineSiteAdminConfig({
     assets: { storage: 'content' },
-    models: { posts: { fields: { title: text({ required: true }) }, route: true, sortable: true } },
+    models: { posts: { fields: { attachment: file(), title: text({ required: true }) }, route: true, sortable: true } },
 })
 
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         try {
+            if (new URL(request.url).pathname === '/health') return new Response('OK')
             const database = drizzleAdapter(drizzle(env.SITE_ADMIN_DB), { schema })
             if (new URL(request.url).pathname === '/missing-binding') {
                 const missing = drizzleAdapter(drizzle(undefined as unknown as AnyD1Database), { schema })
@@ -40,6 +42,52 @@ export default {
                 })
             }
             const files = new Files({ adapter: r2({ binding: env.ASSETS }) })
+            if (new URL(request.url).pathname === '/alias') {
+                const aliased = createSiteAdmin({
+                    config: { ...config, assets: { storage: 'content', separateDrafts: true } },
+                    database,
+                    getFiles: async () => new Files({ adapter: r2({ binding: env.ASSETS }) }),
+                })
+                try {
+                    await aliased.initialize()
+                } catch (error) {
+                    return Response.json({
+                        rejected:
+                            error instanceof Error &&
+                            'code' in error &&
+                            error.code === 'SITE_ADMIN_STORAGE_UNAVAILABLE',
+                    })
+                }
+                return Response.json({ rejected: false })
+            }
+            if (new URL(request.url).pathname === '/separation') {
+                const draftFiles = new Files({ adapter: r2({ binding: env.DRAFT_ASSETS }) })
+                const separated = createSiteAdmin({
+                    config: {
+                        ...config,
+                        assets: { storage: 'content', separateDrafts: true, cleanup: { minimumAge: 0 } },
+                    },
+                    database,
+                    getFiles: async (name) => (name === 'draft' ? draftFiles : files),
+                })
+                const asset = await separated.uploadAsset({
+                    body: request.body!,
+                    size: Number(request.headers.get('x-upload-size')),
+                    filename: 'separated.bin',
+                })
+                let entry = await separated.createEntry('posts', { data: { title: 'Separated', attachment: asset.id } })
+                const privateBefore = await draftFiles.exists(asset.key)
+                const publicBefore = (await files.list({ prefix: `site-admin/public/${asset.id}/` })).items.length
+                entry = await separated.publishEntry(entry.id, { expectedVersion: entry.version })
+                const publicAsset = await separated.downloadAsset(asset.id)
+                const copiedBytes = (await publicAsset.file.arrayBuffer()).byteLength
+                entry = await separated.unpublishEntry(entry.id, { expectedVersion: entry.version })
+                const cleared = (await files.list({ prefix: `site-admin/public/${asset.id}/` })).items.length === 0
+                const retained = await draftFiles.exists(asset.key)
+                await separated.deleteEntry(entry.id, { expectedVersion: entry.version })
+                const deleted = (await separated.runAssetGC()).deleted.includes(asset.id)
+                return Response.json({ privateBefore, publicBefore, copiedBytes, cleared, retained, deleted })
+            }
             const admin = createSiteAdmin({ config, database, getFiles: async () => files })
             if (new URL(request.url).pathname === '/upload') {
                 const asset = await admin.uploadAsset({

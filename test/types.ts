@@ -1,11 +1,13 @@
 import {
     array,
     defineSiteAdminConfig,
+    image,
     object,
     relation,
     select,
     text,
     type InferSiteAdminModels,
+    type InferSiteAdminPublicModels,
 } from '../packages/site-admin/src'
 
 const config = defineSiteAdminConfig({
@@ -14,6 +16,7 @@ const config = defineSiteAdminConfig({
         posts: {
             fields: {
                 sections: array(object({ author: relation('authors'), heading: text({ required: true }) })),
+                cover: image(),
                 title: text({ required: true }),
             },
         },
@@ -26,6 +29,30 @@ const post = {
 } satisfies InferSiteAdminModels<typeof config>['posts']
 
 void post
+
+type PublicPost = InferSiteAdminPublicModels<typeof config>['posts']
+const publicData = {
+    cover: { id: 'asset', url: '/api/content/_assets/asset' },
+    sections: [{ author: null, heading: 'Heading' }],
+    title: 'Public post',
+} satisfies PublicPost['data']
+const publicAuthorName = (value: PublicPost): string | undefined => value.data.sections?.[0]?.author?.data.name
+const nullablePublicItems: PublicPost['data']['sections'] = [null]
+const requireFullRelatedData = (value: PublicPost): void => {
+    const author = value.data.sections?.[0]?.author
+    if (author) {
+        // @ts-expect-error a relation cycle stub can omit the target's required fields
+        const name: string = author.data.name
+        void name
+    }
+}
+// @ts-expect-error public image projections always include a URL
+const invalidPublicCover: PublicPost['data']['cover'] = { id: 'asset' }
+void publicData
+void publicAuthorName
+void nullablePublicItems
+void requireFullRelatedData
+void invalidPublicCover
 
 const requiredConfig = defineSiteAdminConfig({
     models: {

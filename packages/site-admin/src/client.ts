@@ -1,4 +1,11 @@
 import type { SiteAdminDescriptor } from './descriptor'
+import type { PublicEntry } from './server/types'
+export type { PublicEntry } from './server/types'
+export type { PublicAsset } from './fields'
+export type { InferPublicModelData, InferSiteAdminPublicModels } from './config'
+
+export const managementAssetUrl = (id: string, base = '/api/site-admin'): string =>
+    `${base.replace(/\/$/u, '')}/assets/${encodeURIComponent(id)}/content`
 
 export interface SiteAdminClientOptions {
     basePath?: string
@@ -70,17 +77,13 @@ export const createSiteAdminClient = (options: SiteAdminClientOptions = {}) => {
     }
     return {
         assetUrl: (id: string): string => `${base}/_assets/${encodeURIComponent(id)}`,
-        get: <Value = Record<string, unknown>>(
-            model: string,
-            slugOrId: string,
-            requestOptions: PublicListOptions = {},
-        ) =>
+        get: <Value = PublicEntry>(model: string, slugOrId: string, requestOptions: PublicListOptions = {}) =>
             get<{ data: Record<string, unknown> }>(
                 `/${encodeURIComponent(model)}/${encodeURIComponent(slugOrId)}`,
                 { locale: requestOptions.locale },
                 true,
             ).then(entry<Value>),
-        list: <Value = Record<string, unknown>>(model: string, requestOptions: PublicListOptions = {}) =>
+        list: <Value = PublicEntry>(model: string, requestOptions: PublicListOptions = {}) =>
             get<Array<{ data: Record<string, unknown> }>>(`/${encodeURIComponent(model)}`, {
                 locale: requestOptions.locale,
             }).then((items) => (items ?? []).map((item) => entry<Value>(item)!)),

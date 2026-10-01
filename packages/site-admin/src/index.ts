@@ -1,7 +1,9 @@
 export { defineSiteAdminAuthorization, defineSiteAdminConfig } from './config'
 export type {
     InferModelData,
+    InferPublicModelData,
     InferSiteAdminModels,
+    InferSiteAdminPublicModels,
     ModelDefinition,
     ModelOptions,
     ModelDisplayFields,
@@ -33,4 +35,5 @@ export {
     textarea,
     url,
 } from './fields'
-export type { AnyField, AssetInput, AssetValue, FieldRecord, InferField, InferFields } from './fields'
+export type { AnyField, AssetInput, AssetValue, PublicAsset, FieldRecord, InferField, InferFields } from './fields'
+export type { PublicEntry, EntryMutationReceipt, EntryMutationResult, EntryPage } from './server/types'

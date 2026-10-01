@@ -32,7 +32,7 @@ export interface ModelDescriptor {
 }
 
 export interface SiteAdminDescriptor {
-    assets: false | { maxUploadSize?: number; storage: string }
+    assets: false | { maxUploadSize?: number; separateDrafts: boolean; storage: string }
     models: Record<string, ModelDescriptor>
 }
 
@@ -67,6 +67,7 @@ export const createSiteAdminDescriptor = (config: SiteAdminConfig): SiteAdminDes
         ? {
               ...(config.assets.maxUploadSize === undefined ? {} : { maxUploadSize: config.assets.maxUploadSize }),
               storage: config.assets.storage,
+              separateDrafts: config.assets.separateDrafts === true,
           }
         : false,
     models: Object.fromEntries(

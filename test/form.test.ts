@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { reactive } from 'vue'
 
-import { createSiteAdminDescriptor, defineSiteAdminConfig, text } from '../packages/site-admin/src'
+import {
+    array,
+    createSiteAdminDescriptor,
+    defineSiteAdminConfig,
+    file,
+    image,
+    images,
+    text,
+} from '../packages/site-admin/src'
 import { siteAdminFormDefaults, useSiteAdminForm } from '../packages/site-admin/src/form'
 import type { EntryRecord } from '../packages/site-admin/src/server'
 
@@ -33,6 +41,25 @@ const entry = (id: string, version: number, data: Record<string, unknown>): Entr
 })
 
 describe('form consumer', () => {
+    it('keeps submitted values and updates identity when a mutation-only actor receives a receipt', async () => {
+        const saved: unknown[] = []
+        const controller = useSiteAdminForm<{ title: string }>({
+            descriptor,
+            defaultValues: { title: 'Initial' },
+            modelName: 'posts',
+            fetch: async () => Response.json({ id: 'receipt', model: 'posts', version: 3, sortOrder: null }),
+            onSuccess: (result) => {
+                saved.push(result)
+            },
+        })
+        controller.form.setFieldValue('title', 'Submitted')
+        await controller.form.handleSubmit()
+        expect(controller.form.state.values).toEqual({ title: 'Submitted' })
+        expect(controller.entryId.value).toBe('receipt')
+        expect(controller.version.value).toBe(3)
+        expect(controller.form.state.isPristine).toBe(true)
+        expect(saved).toEqual([{ id: 'receipt', model: 'posts', version: 3, sortOrder: null }])
+    })
     it('clones defaults from Vue reactive descriptors without sharing arrays', () => {
         const reactiveDescriptor = reactive({
             ...descriptor,
@@ -110,7 +137,13 @@ describe('form consumer', () => {
             descriptor,
             fetch: async (input, _init) => {
                 calls.push(String(input))
-                if (String(input).includes('/entries?')) return Response.json([entry('author', 1, { title: 'Ada' })])
+                if (String(input).includes('/entries?'))
+                    return Response.json({
+                        items: [entry('author', 1, { title: 'Ada' })],
+                        total: 1,
+                        limit: 5,
+                        offset: 0,
+                    })
                 if (String(input).endsWith('/assets')) {
                     expect(_init?.body).toBeInstanceOf(File)
                     expect(new Headers(_init?.headers).get('x-filename')).toBe('asset.txt')
@@ -132,5 +165,43 @@ describe('form consumer', () => {
             '/api/site-admin/entries?model=authors&q=Ada&limit=5&locale=ja',
             '/api/site-admin/assets',
         ])
+    })
+
+    it('accepts Core AssetInput values and rejects malformed image references in nested arrays', async () => {
+        const assetDescriptor = createSiteAdminDescriptor(
+            defineSiteAdminConfig({
+                models: {
+                    assets: {
+                        fields: { cover: image(), attachment: file(), gallery: images(), nested: array(image()) },
+                    },
+                },
+            }),
+        ).models.assets!
+        const saved: Record<string, unknown>[] = []
+        const controller = useSiteAdminForm({
+            descriptor: assetDescriptor,
+            modelName: 'assets',
+            fetch: async (_input, init) => {
+                const data = JSON.parse(String(init?.body)).data as Record<string, unknown>
+                saved.push(data)
+                return Response.json(entry('asset-entry', saved.length, data))
+            },
+        })
+        for (const value of ['asset-id', { id: 'asset-id', alt: 'Cover' }, null]) {
+            controller.form.reset({
+                cover: value,
+                attachment: value,
+                gallery: ['asset-id', { id: 'asset-id' }],
+                nested: [value],
+            })
+            await controller.form.handleSubmit()
+        }
+        expect(saved).toHaveLength(3)
+        for (const invalid of [{ id: '' }, {}, 1]) {
+            controller.form.reset({ gallery: [invalid] })
+            await controller.form.handleSubmit()
+            expect(controller.form.state.isInvalid).toBe(true)
+        }
+        expect(saved).toHaveLength(3)
     })
 })
