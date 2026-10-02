@@ -1,8 +1,7 @@
-import { comarkContent, type ComarkContent, type Source } from 'comark-content'
-import json from 'comark-content/plugins/json'
-import markdownFields, { markdownField } from 'comark-content/plugins/markdown-fields'
-import type { JsonSchema } from 'comark-content'
-import summary from 'comark/plugins/summary'
+import type { ComarkContent } from 'comark-content'
+import { createMarkdownContent } from '../markdown/content'
+import { resolveMarkdownSource } from '../markdown/assets'
+import { astText, cleanText, collectMarkdown, markdownDocument, type MarkdownDocumentValue } from '../markdown/document'
 import { addRoute, createRouter, findRoute, type RouterContext } from 'rou3'
 import type { SiteAdminStorage } from '../adapter'
 import { prepareUpload } from './upload'
@@ -150,49 +149,8 @@ interface SqlGuard {
     params: Array<number | string>
 }
 
-interface MarkdownDocumentValue {
-    meta?: { summary?: unknown }
-    nodes: unknown[]
-}
-
 const isObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const markdownDocument = (value: unknown): MarkdownDocumentValue | undefined => {
-    if (!isObject(value) || !Array.isArray(value.nodes)) return undefined
-    const meta = isObject(value.meta) ? value.meta : undefined
-    return { ...(meta ? { meta } : {}), nodes: value.nodes }
-}
-
-const astText = (value: unknown): string => {
-    if (typeof value === 'string') return value
-    if (Array.isArray(value)) {
-        if ((typeof value[0] === 'string' || value[0] === null) && isObject(value[1])) {
-            return value.slice(2).map(astText).filter(Boolean).join(' ')
-        }
-        return value.map(astText).filter(Boolean).join(' ')
-    }
-    if (!isObject(value)) return ''
-    if (typeof value.value === 'string') return value.value
-    return astText(value.children ?? value.nodes)
-}
-
-const cleanText = (value: string): string => value.replace(/\s+/gu, ' ').trim()
-
-const collectMarkdown = (field: AnyField, value: unknown, output: MarkdownDocumentValue[]): void => {
-    if (field.kind === 'markdown') {
-        const document = markdownDocument(value)
-        if (document) output.push(document)
-        return
-    }
-    if (field.kind === 'object' && isObject(value)) {
-        for (const [name, child] of Object.entries(field.fields)) collectMarkdown(child, value[name], output)
-        return
-    }
-    if (field.kind === 'array' && Array.isArray(value)) {
-        for (const item of value) collectMarkdown(field.item, item, output)
-    }
-}
 
 const parseObject = (value: string): Record<string, unknown> => {
     const parsed: unknown = JSON.parse(value)
@@ -293,39 +251,6 @@ const detectedMime = (bytes: Uint8Array): string => {
     if (starts(0x25, 0x50, 0x44, 0x46)) return 'application/pdf'
     return 'application/octet-stream'
 }
-
-const fieldSchema = (field: AnyField): JsonSchema => {
-    switch (field.kind) {
-        case 'markdown':
-            return markdownField()
-        case 'text':
-        case 'textarea':
-        case 'url':
-        case 'datetime':
-        case 'select':
-            return { type: 'string' }
-        case 'number':
-            return { type: field.integer ? 'integer' : 'number' }
-        case 'boolean':
-            return { type: 'boolean' }
-        case 'object':
-            return fieldsSchema(field.fields)
-        case 'array':
-            return { items: fieldSchema(field.item), type: 'array' }
-        case 'images':
-            return { items: { type: 'object' }, type: 'array' }
-        case 'file':
-        case 'image':
-        case 'relation':
-            return { type: 'object' }
-    }
-    throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', 'Unsupported field type.')
-}
-
-const fieldsSchema = (fields: FieldRecord): JsonSchema => ({
-    properties: Object.fromEntries(Object.entries(fields).map(([name, field]) => [name, fieldSchema(field)])),
-    type: 'object',
-})
 
 export class SiteAdmin {
     readonly #storage: SiteAdminStorage
@@ -1821,11 +1746,15 @@ export class SiteAdmin {
         return candidates
     }
 
+    #assetUrl(id: string): string {
+        return `${this.#publicBase()}/_assets/${encodeURIComponent(id)}`
+    }
+
     #publicAsset(value: AssetInput): Record<string, unknown> {
         const reference = typeof value === 'string' ? { id: value } : { ...value }
         return {
             ...reference,
-            url: `${this.#publicBase()}/_assets/${encodeURIComponent(reference.id)}`,
+            url: this.#assetUrl(reference.id),
         }
     }
 
@@ -1835,6 +1764,7 @@ export class SiteAdmin {
         graph: Map<string, PublishedRow>,
         trail: Set<string>,
         budget: ProjectionBudget,
+        markdownSource: boolean,
     ): unknown {
         if (value === undefined || value === null) return value
         switch (field.kind) {
@@ -1842,6 +1772,7 @@ export class SiteAdmin {
                 if (typeof value !== 'string') return null
                 const target = graph.get(value)
                 if (!target) return null
+                // Related entries remain public projections; markdown-fields only parses this model's schema.
                 return this.#projectPublished(target, graph, trail, budget)
             }
             case 'file':
@@ -1858,17 +1789,15 @@ export class SiteAdmin {
                     graph,
                     trail,
                     budget,
+                    markdownSource,
                 )
             case 'array':
                 return Array.isArray(value)
-                    ? value.map((item) => this.#hydrateField(field.item, item, graph, trail, budget))
+                    ? value.map((item) => this.#hydrateField(field.item, item, graph, trail, budget, markdownSource))
                     : []
             case 'markdown':
-                return typeof value === 'string'
-                    ? value.replace(
-                          /site-admin:\/\/asset\/([A-Za-z0-9_-]+)/gu,
-                          (_, id: string) => `${this.#publicBase()}/_assets/${encodeURIComponent(id)}`,
-                      )
+                return typeof value === 'string' && !markdownSource
+                    ? resolveMarkdownSource(value, (id) => this.#assetUrl(id))
                     : value
             default:
                 return value
@@ -1881,11 +1810,12 @@ export class SiteAdmin {
         graph: Map<string, PublishedRow>,
         trail: Set<string>,
         budget: ProjectionBudget,
+        markdownSource: boolean,
     ): Record<string, unknown> {
         return Object.fromEntries(
             Object.entries(fields).map(([name, field]) => [
                 name,
-                this.#hydrateField(field, data[name], graph, trail, budget),
+                this.#hydrateField(field, data[name], graph, trail, budget, markdownSource),
             ]),
         )
     }
@@ -1895,6 +1825,7 @@ export class SiteAdmin {
         graph: Map<string, PublishedRow>,
         parentTrail = new Set<string>(),
         budget: ProjectionBudget = { nodes: 0 },
+        markdownSource = false,
     ): PublicEntry {
         if (parentTrail.size > 16 || ++budget.nodes > 10_000)
             throw new SiteAdminError(
@@ -1923,7 +1854,7 @@ export class SiteAdmin {
         }
         const trail = new Set(parentTrail).add(row.id)
         return {
-            data: this.#hydrateFields(definition.fields, parseObject(row.data), graph, trail, budget),
+            data: this.#hydrateFields(definition.fields, parseObject(row.data), graph, trail, budget, markdownSource),
             id: row.id,
             locale: row.locale,
             model: row.model,
@@ -1935,6 +1866,10 @@ export class SiteAdmin {
     }
 
     async listPublicEntries(modelName: string, locale?: string): Promise<PublicEntry[]> {
+        return this.#listPublicEntries(modelName, locale)
+    }
+
+    async #listPublicEntries(modelName: string, locale?: string, markdownSource = false): Promise<PublicEntry[]> {
         await this.initialize()
         const definition = this.#model(modelName)
         if (definition.public === false)
@@ -1945,7 +1880,7 @@ export class SiteAdmin {
         const budget = { nodes: 0 }
         return rows
             .filter((row) => graph.has(row.id))
-            .map((row) => this.#projectPublished(row, graph, new Set(), budget))
+            .map((row) => this.#projectPublished(row, graph, new Set(), budget, markdownSource))
     }
 
     async getPublicEntry(modelName: string, slugOrId: string, locale?: string): Promise<PublicEntry | null> {
@@ -1988,47 +1923,10 @@ export class SiteAdmin {
         const cacheKey = `${modelName}\0${normalizedLocale}`
         const cached = this.#content.get(cacheKey)
         if (cached?.generation === generation) return cached.content
-        const entries = await this.listPublicEntries(modelName, normalizedLocale)
-        const items = new Map(
-            entries.map((entry) => [
-                `${definition.route ? entry.slug : entry.id}.json`,
-                {
-                    ...entry.data,
-                    _siteAdmin: {
-                        id: entry.id,
-                        locale: entry.locale,
-                        model: entry.model,
-                        path: entry.path,
-                        publishedAt: entry.publishedAt,
-                        revisionId: entry.revisionId,
-                        slug: entry.slug,
-                    },
-                },
-            ]),
+        const entries = await this.#listPublicEntries(modelName, normalizedLocale, true)
+        const content = createMarkdownContent(modelName, definition, entries, this.config.markdown, (id) =>
+            this.#assetUrl(id),
         )
-        const source: Source = {
-            prefix: `/${modelName}`,
-            schema: {
-                ...fieldsSchema(definition.fields),
-                properties: {
-                    ...fieldsSchema(definition.fields).properties,
-                    _siteAdmin: { type: 'object' },
-                },
-            },
-            keys: async () => [...items.keys()],
-            getItem: async (key) => JSON.stringify(items.get(key)),
-            getItemRaw: async (key) => items.get(key),
-        }
-        const plugins = [...(this.config.markdown?.plugins ?? [])]
-        if (this.config.markdown?.summary?.enabled !== false) {
-            plugins.push(summary({ delimiter: this.config.markdown?.summary?.delimiter ?? '<!-- more -->' }))
-        }
-        const content = comarkContent(modelName, {
-            markdown: { plugins },
-            onError: 'throw',
-            plugins: [json(), markdownFields()],
-            source,
-        })
         this.#content.set(cacheKey, { content, generation })
         if (this.#content.size > 64) this.#content.delete(this.#content.keys().next().value!)
         return content

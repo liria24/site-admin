@@ -281,6 +281,8 @@ export default defineNuxtConfig({
 
 Only assets referenced by published entries in public models are publicly served. Draft previews require authentication. Markdown can reference an asset with `site-admin://asset/<id>`.
 
+`content()` resolves asset URLs in Markdown links, images and static `src`/`href`/`xlink:href` component props, preserving code and text examples. Public entry APIs retain their existing URL-resolved Markdown strings. Reference collection remains conservative to preserve retained-revision asset protection. See [internal Markdown processing](https://github.com/liria24/site-admin/blob/main/docs/internal-markdown.md) for plugin ordering, supported syntax and compatibility details.
+
 This API check does not make a public bucket private. For private originals, explicitly set `assets.separateDrafts: true` and configure a genuinely private Files SDK storage named `draft`, distinct from `assets.storage`. The default is `false`; defining a `draft` storage alone does not enable separation.
 
 In separated mode, originals stay in `draft`, including those retained by historical revisions. Valid public references get copies in the usual storage; the last public reference removes its copy. Draft edits keep the current published copy. Configuration errors never fall back to public storage. Existing originals or a changed storage mode require an explicit migration with old writers stopped before enabling the new configuration.
