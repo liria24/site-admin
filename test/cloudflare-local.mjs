@@ -135,7 +135,9 @@ try {
 } finally {
     if (worker.exitCode === null && worker.signalCode === null) {
         const exited = once(worker, 'exit')
+        const forceExit = setTimeout(() => worker.kill('SIGKILL'), 5000)
         worker.kill()
         await exited
+        clearTimeout(forceExit)
     }
 }
