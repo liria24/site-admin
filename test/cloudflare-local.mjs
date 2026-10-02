@@ -33,6 +33,10 @@ await writeFile(
 await run(
     process.execPath,
     [
+        '--input-type=module',
+        '-e',
+        // cf beta.7 leaves local runtime handles open on Linux after completing the command.
+        "await import('node:url').then(({ pathToFileURL }) => import(pathToFileURL(process.argv[1]).href)); process.exit(process.exitCode ?? 0)",
         cli,
         'd1',
         'migrations',
