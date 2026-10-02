@@ -227,6 +227,14 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 await import('@liria24/site-admin/server')
 await import('@liria24/site-admin/adapter')
+for (const module of ['assets', 'content', 'document', 'plugins']) {
+  try {
+    import.meta.resolve('@liria24/site-admin/markdown/' + module)
+    throw new Error('Internal Markdown module became a public export: ' + module)
+  } catch (error) {
+    if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error
+  }
+}
 `,
     ])
     run(process.execPath, ['form.ts'])

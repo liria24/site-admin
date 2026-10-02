@@ -301,6 +301,101 @@ it('keeps originals private and synchronizes all publication, revision, history,
     expect(await draft.exists(autoAsset.key)).toBe(true)
 })
 
+it('preserves populated Markdown ledgers, original revisions and asset policy across the AST projection', async () => {
+    const { admin, db, draft, publicFiles } = await separated()
+    const image = await admin.uploadAsset({ body: 'image', filename: 'image.txt' })
+    const example = await admin.uploadAsset({ body: 'example', filename: 'example.txt' })
+    const uri = `site-admin://asset/${image.id}`
+    const exampleUri = `site-admin://asset/${example.id}`
+    const body = `Intro ![image](${uri})\r\n\r\n<!-- more -->\r\n\r\n[download][asset]\r\n\r\n[asset]: ${uri}\r\n\r\n\`${exampleUri}\`\r\n`
+    const ledger = (revision: string) =>
+        db
+            .prepare(
+                'SELECT asset_id, field_path, position FROM site_admin_asset_refs WHERE revision_id = ? ORDER BY position',
+            )
+            .bind(revision)
+            .all()
+    let entry = await admin.createEntry('posts', { data: { body, title: 'Markdown' } })
+    const revision = entry.revisionId
+    const expectedLedger = [
+        { asset_id: image.id, field_path: 'body.$markdown', position: 0 },
+        { asset_id: image.id, field_path: 'body.$markdown', position: 1 },
+        { asset_id: example.id, field_path: 'body.$markdown', position: 2 },
+    ]
+    expect(await ledger(revision)).toEqual(expectedLedger)
+    expect(entry.data.body).toBe(body)
+    await expect(admin.downloadAsset(image.id)).rejects.toMatchObject({ code: 'SITE_ADMIN_NOT_PUBLIC' })
+    await expect(admin.createEntry('posts', { data: { body: '`site-admin://asset/missing`' } })).rejects.toMatchObject({
+        code: 'SITE_ADMIN_ASSET_NOT_READY',
+    })
+    await expect(
+        admin.createEntry('posts', { data: { body: '![missing](site-admin://asset/missing)' } }),
+    ).rejects.toMatchObject({ code: 'SITE_ADMIN_ASSET_NOT_READY' })
+
+    entry = await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+    expect(await ledger(revision)).toEqual(expectedLedger)
+    expect((await admin.getEntry(entry.id)).data.body).toBe(body)
+    expect((await admin.getPublicEntry('posts', entry.id))?.data.body).toBe(
+        body
+            .replaceAll(uri, `/api/content/_assets/${image.id}`)
+            .replaceAll(exampleUri, `/api/content/_assets/${example.id}`),
+    )
+    const content = await admin.content('posts')
+    expect(await admin.content('posts')).toBe(content)
+    const item = (await content.list())[0]!
+    expect(item.data.body).toMatchObject({
+        nodes: expect.arrayContaining([
+            ['p', {}, 'Intro ', ['img', { src: `/api/content/_assets/${image.id}`, alt: 'image' }]],
+            ['p', {}, ['code', {}, exampleUri]],
+        ]),
+        meta: { summary: [['p', {}, 'Intro ', ['img', { src: `/api/content/_assets/${image.id}`, alt: 'image' }]]] },
+    })
+    expect((await publicFiles.list()).items).toHaveLength(2)
+    expect(await (await admin.downloadAsset(example.id)).file.text()).toBe('example')
+    await expect(admin.deleteAsset(example.id)).rejects.toMatchObject({ code: 'SITE_ADMIN_ASSET_IN_USE' })
+
+    entry = await admin.updateEntry(entry.id, { expectedVersion: entry.version, data: { body: 'Next' } })
+    expect(await admin.content('posts')).toBe(content)
+    expect((await (await admin.content('posts')).list())[0]?.data.body).toEqual(item.data.body)
+    entry = await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+    expect(await admin.content('posts')).not.toBe(content)
+    expect((await publicFiles.list()).items).toHaveLength(0)
+    await expect(admin.deleteAsset(example.id)).rejects.toMatchObject({ code: 'SITE_ADMIN_ASSET_IN_USE' })
+    entry = await admin.restoreRevision(entry.id, revision, { expectedVersion: entry.version })
+    expect(entry.data.body).toBe(body)
+    expect(await ledger(entry.revisionId)).toEqual(expectedLedger)
+    entry = await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+    expect((await publicFiles.list()).items).toHaveLength(2)
+    expect(await draft.exists(image.key)).toBe(true)
+    await db.prepare("UPDATE site_admin_assets SET state = 'deleting' WHERE id = ?").bind(image.id).run()
+    expect(await admin.getPublicEntry('posts', entry.id)).toBeNull()
+    await expect(admin.publishEntry(entry.id, { expectedVersion: entry.version })).rejects.toMatchObject({
+        code: 'SITE_ADMIN_ASSET_NOT_READY',
+    })
+    await db.prepare("UPDATE site_admin_assets SET state = 'ready' WHERE id = ?").bind(image.id).run()
+    entry = await admin.unpublishEntry(entry.id, { expectedVersion: entry.version })
+    expect(await (await admin.content('posts')).list()).toEqual([])
+    await admin.deleteEntry(entry.id, { expectedVersion: entry.version })
+    expect((await admin.runAssetGC()).deleted.sort()).toEqual([image.id, example.id].sort())
+})
+
+it('keeps old untracked encoded destinations closed without changing saved Markdown or its ledger', async () => {
+    const { admin, db, publicFiles } = await separated()
+    const asset = await admin.uploadAsset({ body: 'untracked', filename: 'untracked.txt' })
+    const body = `![hidden](site-admin&colon;//asset/${asset.id})`
+    let entry = await admin.createEntry('posts', { data: { body } })
+    expect(
+        await db.prepare('SELECT * FROM site_admin_asset_refs WHERE revision_id = ?').bind(entry.revisionId).all(),
+    ).toEqual([])
+    entry = await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+    expect(entry.data.body).toBe(body)
+    expect((await (await admin.content('posts')).list())[0]?.data.body).toMatchObject({
+        nodes: [['p', {}, ['img', { alt: 'hidden' }]]],
+    })
+    expect((await publicFiles.list()).items).toHaveLength(0)
+    await expect(admin.downloadAsset(asset.id)).rejects.toMatchObject({ code: 'SITE_ADMIN_NOT_PUBLIC' })
+})
+
 it('does not opt in by the draft storage name and rejects missing, aliased and unmigrated storage', async () => {
     const shared = await separated(false)
     const asset = await shared.admin.uploadAsset({ body: 'shared', filename: 'shared.txt' })

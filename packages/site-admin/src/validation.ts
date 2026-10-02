@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
+import { markdownAssetReferences } from './markdown/assets'
 
 import type { ModelDefinition } from './config'
 import type { AnyField, AssetInput, FieldRecord } from './fields'
@@ -261,10 +262,8 @@ const collectFieldReferences = (
         return
     }
     if (field.kind === 'markdown' && typeof value === 'string') {
-        const matcher = /site-admin:\/\/asset\/([A-Za-z0-9_-]+)/gu
-        for (const [position, match] of Array.from(value.matchAll(matcher)).entries()) {
-            const id = match[1]
-            if (id) assets.push({ id, path: `${path}.$markdown`, position })
+        for (const reference of markdownAssetReferences(value)) {
+            assets.push({ ...reference, path: `${path}.$markdown` })
         }
     }
 }
