@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -8,10 +8,16 @@ import { defineSiteAdminConfig, file, text } from '../packages/site-admin/dist/i
 import { generateFixtureSQL } from './generate-fixture.mjs'
 
 const run = promisify(execFile)
-const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = fileURLToPath(new URL('./fixtures/cloudflare/', import.meta.url))
-const config = fileURLToPath(new URL('./fixtures/cloudflare/wrangler.jsonc', import.meta.url))
-const cli = fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url))
+const cli = fileURLToPath(new URL('../node_modules/cf/bin/cf', import.meta.url))
+// cf resolves the declared bundler within the fixture rather than its parent workspace.
+await symlink(
+    fileURLToPath(new URL('../node_modules/', import.meta.url)),
+    fixture + '/node_modules',
+    process.platform === 'win32' ? 'junction' : 'dir',
+).catch((error) => {
+    if (error.code !== 'EEXIST') throw error
+})
 await rm(fileURLToPath(new URL('./fixtures/cloudflare/.wrangler/', import.meta.url)), { force: true, recursive: true })
 const migrations = fixture + '/.data/wrangler-migrations'
 await mkdir(migrations, { recursive: true })
@@ -24,9 +30,24 @@ await writeFile(
         fixture + '/.data/schema',
     ),
 )
-await run(process.execPath, [cli, 'd1', 'migrations', 'apply', 'site-admin-test', '--local', '--config', config], {
-    cwd: root,
-})
+await run(
+    process.execPath,
+    [
+        cli,
+        'd1',
+        'migrations',
+        'apply',
+        '00000000-0000-4000-8000-000000000001',
+        '--local',
+        '--persist-to',
+        fixture + '/.wrangler/state',
+        '--dir',
+        migrations,
+    ],
+    {
+        cwd: fixture,
+    },
+)
 
 const port = await new Promise((resolve, reject) => {
     const probe = createServer()
@@ -38,7 +59,16 @@ const port = await new Promise((resolve, reject) => {
     })
 })
 const output = []
-const worker = spawn(process.execPath, [cli, 'dev', '--local', '--port', String(port), '--config', config], {
+// cf beta.7 directly spawns a .js delegate, which fails with EFTYPE on Windows.
+const dev =
+    process.platform === 'win32'
+        ? [
+              fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url)),
+              'dev',
+              '--experimental-new-config',
+          ]
+        : [cli, 'dev']
+const worker = spawn(process.execPath, [...dev, '--port', String(port)], {
     cwd: fixture,
     stdio: ['ignore', 'pipe', 'pipe'],
 })
@@ -103,6 +133,9 @@ try {
     console.error(output.join(''))
     throw error
 } finally {
-    worker.kill()
-    await once(worker, 'exit')
+    if (worker.exitCode === null && worker.signalCode === null) {
+        const exited = once(worker, 'exit')
+        worker.kill()
+        await exited
+    }
 }

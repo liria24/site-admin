@@ -5,6 +5,7 @@ dist
 .output
 .cache
 .wrangler
+.cloudflare
 .tmp
 coverage
 *.tgz

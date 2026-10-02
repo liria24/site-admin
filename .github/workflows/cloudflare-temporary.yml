@@ -23,6 +23,7 @@ jobs:
             - run: bun run build
             - run: bun run test:cloudflare
             - name: Deploy to an unclaimed temporary account
+              # cf has no unclaimed temporary-account flow; this job needs Wrangler's session.
               id: deploy
               env:
                   CLOUDFLARE_ACCOUNT_ID: ''

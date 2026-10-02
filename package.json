@@ -36,6 +36,7 @@
         "@types/node": "^26.6.3",
         "@vue/compiler-sfc": "3.6.0-rc.9",
         "better-auth": "^1.7.6",
+        "cf": "1.0.0-beta.7",
         "db0": "^0.4.1",
         "drizzle-orm": "1.0.0-rc.4",
         "files-sdk": "^2.6.2",
