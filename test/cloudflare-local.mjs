@@ -46,8 +46,10 @@ await run(
     ],
     {
         cwd: fixture,
+        timeout: 60000,
     },
 )
+console.log('Applied the local D1 fixture migration with cf.')
 
 const port = await new Promise((resolve, reject) => {
     const probe = createServer()
