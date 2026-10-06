@@ -14,21 +14,21 @@ export const transformNitroCloudflareRequest = (code: string, id: string) => {
 
 export const captureNitroRequest = (event: H3Event, managementBase: string, streamUploads: boolean): void => {
     events.set(event.context, event)
-    if (
-        !streamUploads ||
-        event.method !== 'POST' ||
-        !event.path
+    if (event.web?.request || ['GET', 'HEAD'].includes(event.method)) return
+    const raw = event.node.req as typeof event.node.req & { body?: unknown }
+    const upload =
+        streamUploads &&
+        event.method === 'POST' &&
+        event.path
             .split('?')[0]!
             .replace(/\/$/u, '')
-            .endsWith(managementBase + '/assets') ||
-        event.web?.request
-    )
-        return
-    const raw = event.node.req as typeof event.node.req & { body?: unknown }
+            .endsWith(managementBase + '/assets')
+    // Cloudflare's raw stream must be shared by every native wrapper, including JSON routes.
+    // Otherwise a header-reading middleware starts a second uncached H3 read of the same stream.
     const body =
         raw.body instanceof ReadableStream
             ? raw.body
-            : !('__unenv__' in raw)
+            : upload && !('__unenv__' in raw)
               ? (Readable.toWeb(raw) as ReadableStream<Uint8Array>)
               : undefined
     if (!body) return

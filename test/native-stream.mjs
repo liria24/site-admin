@@ -80,6 +80,13 @@ await writeFile(
         '})',
     ].join('\n'),
 )
+await writeFile(
+    join(fixture, 'server/api/json.post.ts'),
+    [
+        "import { defineEventHandler } from 'nuxt/server'",
+        'export default defineEventHandler(async (event) => Response.json(await event.req.json()))',
+    ].join('\n'),
+)
 const nuxt = await loadNuxt({ cwd: fixture, dev: false, ready: true })
 try {
     await buildNuxt(nuxt)
@@ -139,6 +146,13 @@ try {
         }
     }
     if (!ready) throw new Error('Native stream server did not start.\n' + output.join(''))
+    const json = await fetch(origin + '/api/json', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ value: 'native JSON' }),
+    })
+    if (!json.ok || (await json.json()).value !== 'native JSON')
+        throw new Error('Native JSON middleware/body regression.')
     const redirect = await fetch(origin + '/api/response', { redirect: 'manual' })
     if (
         redirect.status !== 302 ||
