@@ -1,6 +1,16 @@
 # @liria24/site-admin
 
-Content models, publishing, authentication, and file management for Nuxt 4 and Nitro 2. Build your own administration UI using the server APIs and headless forms.
+Content models, publishing, authentication, and file management for Nuxt 4.6 and its default Nitro 2 server builder. Build your own administration UI using the server APIs and headless forms.
+
+## Native server API
+
+The Nuxt module requires Nuxt 4.6 and its default Nitro 2 builder. Import handlers and server helpers explicitly from `nuxt/server`; Nuxt 4's auto-imported H3 helpers use a different event shape. Public Site Admin database/authorization hooks now use `RequestEvent`: `event.req` is a Web Request, `event.res.headers` is Headers, and `event.context` is request-local. Read authorization headers from `context.event.req.headers`; the former `context.request` field is removed.
+
+Register `site-admin:database` and `site-admin:authorize` through `useServerHooks()` from `nuxt/server`. Request middleware awaits DB injection before Better Auth routes. Intentional native authorization errors with status 401/403 retain their status; unexpected errors remain sanitized. Better Auth sessions, raw upload input and platform/LLM lifecycle hooks retain small internal Nitro 2 adapters. Nuxt 5 and other server builders have not been validated.
+
+Import `configureSiteAdminRuntime`, `useSiteAdmin` and `useSiteAdminRuntime` from `@liria24/site-admin/nuxt/server`, or use the generated `useSiteAdmin` auto-import. Pass a native event during HTTP requests; omit it only for background operations with application-provided bindings. These runtime helpers are removed from the framework-neutral `/server` entry.
+
+Standalone applications can still import `createSiteAdmin`, `handlePublicRequest` and `handleManagementRequest` from `@liria24/site-admin/server` without installing Nuxt. Their authorization context is generic and their HTTP APIs use Web Request/Response. The exported runtime handlers now require Nuxt; standalone Nitro applications should wrap the core HTTP functions in their own server adapter. Public H3Event hook compatibility and Nuxt versions below 4.6 are no longer supported.
 
 ## Install
 
@@ -174,7 +184,7 @@ bun x drizzle-kit migrate --config drizzle.config.ts
 
 Keep the generated schema and migrations under version control. After changing models, regenerate the schema and review the migration, including its effect on historical revisions. Site Admin does not apply migrations automatically. For D1, apply the generated SQL using your deployment tooling.
 
-Provide the database adapters through a Nitro plugin. Replace `useDB()` below with your application's Drizzle connection accessor:
+Provide the database adapters through the native Nuxt server hooks. Replace `useDB()` below with your application's Drizzle connection accessor:
 
 ```ts
 // server/plugins/site-admin-database.ts
@@ -182,8 +192,10 @@ import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
 import { drizzleAdapter as betterAuthAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import * as schema from '../../schema'
 
-export default defineNitroPlugin((app) => {
-    app.hooks.hook('site-admin:database', (context) => {
+import { useServerHooks } from 'nuxt/server'
+
+export default () => {
+    useServerHooks().hook('site-admin:database', (context) => {
         const db = useDB(context.event)
         context.database = drizzleAdapter(db, { schema })
         context.authDatabase = betterAuthAdapter(db, {
@@ -193,7 +205,7 @@ export default defineNitroPlugin((app) => {
             transaction: false,
         })
     })
-})
+}
 ```
 
 Keep `usePlural` consistent with the CLI's `--auth-use-plural` option. Both adapters should use the same connection. For D1 or other request-bound connections, resolve the connection from `context.event` rather than caching one request's binding globally. When authentication is disabled, omit `authDatabase`.

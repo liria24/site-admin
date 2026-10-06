@@ -252,17 +252,17 @@ const detectedMime = (bytes: Uint8Array): string => {
     return 'application/octet-stream'
 }
 
-export class SiteAdmin {
+export class SiteAdmin<Context = unknown> {
     readonly #storage: SiteAdminStorage
     readonly #revisionSource: string
     readonly diagnostics: SiteAdminDiagnostic[] = []
-    readonly #options: SiteAdminOptions
+    readonly #options: SiteAdminOptions<Context>
     readonly #descriptor: SiteAdminDescriptor
     readonly #content = new Map<string, { content: ComarkContent; generation: number }>()
     readonly #routes = new Map<string, { generation: number; router: RouterContext<RouteRow> }>()
     #initializer: Promise<void> | undefined
 
-    constructor(options: SiteAdminOptions) {
+    constructor(options: SiteAdminOptions<Context>) {
         if (
             options.database?.dialect !== 'sqlite' ||
             typeof options.database.bind !== 'function' ||
@@ -289,7 +289,7 @@ export class SiteAdmin {
         this.#descriptor = createSiteAdminDescriptor(options.config)
     }
 
-    get config(): SiteAdminOptions['config'] {
+    get config(): SiteAdminOptions<Context>['config'] {
         return this.#options.config
     }
 
@@ -306,7 +306,7 @@ export class SiteAdmin {
         return descriptor
     }
 
-    async authorizeRequest(request: Request, context?: unknown): Promise<import('./types').SiteAdminActor> {
+    async authorizeRequest(request: Request, context?: Context): Promise<import('./types').SiteAdminActor> {
         const actor = await this.#options.authorize?.(request, context)
         if (!actor?.id) throw new SiteAdminError('SITE_ADMIN_AUTH_REQUIRED', 'Authentication is required.')
         return actor
@@ -2629,4 +2629,5 @@ export class SiteAdmin {
     }
 }
 
-export const createSiteAdmin = (options: SiteAdminOptions): SiteAdmin => new SiteAdmin(options)
+export const createSiteAdmin = <Context = unknown>(options: SiteAdminOptions<Context>): SiteAdmin<Context> =>
+    new SiteAdmin(options)

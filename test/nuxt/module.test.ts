@@ -40,13 +40,21 @@ await writeFile(
 )
 await writeFile(
     join(fixture, 'server/types.ts'),
-    `export default defineNitroPlugin((app) => {
-  app.hooks.hook('site-admin:database', (context) => { const event = context.event; void event })
-  app.hooks.hook('site-admin:authorize', (context) => { const id: string = context.actor.id; void id })
+    `import { useServerHooks } from 'nuxt/server'
+export default () => {
+  useServerHooks().hook('site-admin:database', (context) => {
+    if (context.event) {
+      const request: Request = context.event.req
+      // @ts-expect-error Native events do not expose Node.
+      context.event.node
+      void request
+    }
+  })
+  useServerHooks().hook('site-admin:authorize', (context) => { const id: string = context.actor.id; void id })
   // @ts-expect-error Unknown Site Admin hook.
-  app.hooks.hook('site-admin:missing', () => {})
-})
-const admin: ReturnType<typeof import('@liria24/site-admin/server').useSiteAdmin> = useSiteAdmin()
+  useServerHooks().hook('site-admin:missing', () => {})
+}
+const admin: ReturnType<typeof import('@liria24/site-admin/nuxt/server').useSiteAdmin> = useSiteAdmin()
 void admin
 `,
 )

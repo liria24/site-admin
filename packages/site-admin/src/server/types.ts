@@ -12,10 +12,10 @@ export interface SiteAdminActor {
 
 export type FilesResolver = (storage: string) => Promise<Files>
 
-export interface SiteAdminOptions {
+export interface SiteAdminOptions<Context = unknown> {
     aiActions?: SiteAdminAIConfig
     aiEnabled?: boolean
-    authorize?: (request: Request, context?: unknown) => Promise<SiteAdminActor | null> | SiteAdminActor | null
+    authorize?: (request: Request, context?: Context) => Promise<SiteAdminActor | null> | SiteAdminActor | null
     config: SiteAdminConfig
     database: Database
     getFiles?: FilesResolver

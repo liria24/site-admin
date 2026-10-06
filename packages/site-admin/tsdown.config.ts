@@ -16,7 +16,7 @@ export default defineConfig([
             dts: { neverBundle: true },
             neverBundle: true,
             onlyImport: [
-                '@nuxt/kit',
+                'nuxt',
                 '@nuxt/schema',
                 '@nuxtjs/better-auth',
                 '@better-auth/drizzle-adapter',
@@ -57,6 +57,9 @@ export default defineConfig([
             form: 'src/form.ts',
             index: 'src/index.ts',
             nuxt: 'src/nuxt.ts',
+            'nuxt/server': 'src/nuxt/server.ts',
+            'runtime/nitro2': 'src/runtime/nitro2.ts',
+            'runtime/database-middleware': 'src/runtime/database-middleware.ts',
             'devtools/index': 'src/devtools/index.ts',
             'devtools/dock': 'src/devtools/dock.ts',
             'runtime/devtools-snapshot': 'src/runtime/devtools-snapshot.ts',

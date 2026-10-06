@@ -10,7 +10,7 @@ const kit = vi.hoisted(() => ({
     handlers: [] as Array<{ route: string }>,
     nitro: {} as import('nitropack/types').NitroConfig,
 }))
-vi.mock('@nuxt/kit', () => ({
+vi.mock('nuxt/kit', () => ({
     addImports: vi.fn(),
     addPlugin: vi.fn(),
     addRouteMiddleware: vi.fn(),
@@ -107,17 +107,21 @@ describe('native Better Auth integration', () => {
         const providers: Record<string, { buildDatabaseCode: () => string }> = {}
         providerHook(providers)
         const providerSource = providers.siteAdmin!.buildDatabaseCode()
-        const createDatabase = new Function(
-            `${providerSource.replace('export const db = undefined', '').replace('export function createDatabase', 'function createDatabase')}\nreturn createDatabase`,
-        )()
         const database = { kind: 'better-auth' }
-        const key = Symbol.for('@liria24/site-admin/request-databases')
-        expect(createDatabase({ context: { [key]: { authDatabase: database } } })).toBe(database)
+        const context = {}
+        const createDatabase = new Function(
+            'useSiteAdminRuntime',
+            `${providerSource
+                .replace(/import[^\n]+\n/u, '')
+                .replace('export const db = undefined', '')
+                .replace('export function createDatabase', 'function createDatabase')}\nreturn createDatabase`,
+        )(() => ({ authDatabase: (value: object) => (value === context ? database : undefined) }))
+        expect(createDatabase({ context })).toBe(database)
         expect(() => createDatabase({ context: {} })).toThrow('authDatabase')
 
         const runtime = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
-        expect(runtime).toContain("nitroApp.hooks.hook('request', resolveDatabases)")
-        expect(runtime).toContain('await getRequestSession(event)')
+        expect(kit.handlers.some((handler) => 'middleware' in handler && handler.middleware)).toBe(true)
+        expect(runtime).toContain('await getRequestSession(getNitroRequest(event))')
         expect(runtime).toContain('if (!session) return null')
         expect(kit.handlers.some(({ route }) => route === '/api/site-admin/**')).toBe(true)
     })

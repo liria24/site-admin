@@ -90,11 +90,11 @@ const assetResponse = (
     return new Response(request.method === 'HEAD' ? null : file.stream(), { headers })
 }
 
-const handleManagementRequestInner = async (
-    siteAdmin: SiteAdmin,
+const handleManagementRequestInner = async <Context>(
+    siteAdmin: SiteAdmin<Context>,
     request: Request,
     base = '/api/site-admin',
-    context?: unknown,
+    context?: Context,
 ): Promise<Response> => {
     let redactError = false
     try {
@@ -398,11 +398,11 @@ const handleManagementRequestInner = async (
     }
 }
 
-export const handleManagementRequest = async (
-    siteAdmin: SiteAdmin,
+export const handleManagementRequest = async <Context>(
+    siteAdmin: SiteAdmin<Context>,
     request: Request,
     base = '/api/site-admin',
-    context?: unknown,
+    context?: Context,
 ): Promise<Response> => {
     const response = await handleManagementRequestInner(siteAdmin, request, base, context)
     response.headers.set('cache-control', 'private, no-store')
@@ -410,14 +410,14 @@ export const handleManagementRequest = async (
     return response
 }
 
-const publicDescriptor = (siteAdmin: SiteAdmin): unknown => {
+const publicDescriptor = <Context>(siteAdmin: SiteAdmin<Context>): unknown => {
     const descriptor = siteAdmin.descriptor
     descriptor.models = Object.fromEntries(Object.entries(descriptor.models).filter(([, model]) => model.public))
     return descriptor
 }
 
-export const handlePublicRequest = async (
-    siteAdmin: SiteAdmin,
+export const handlePublicRequest = async <Context>(
+    siteAdmin: SiteAdmin<Context>,
     request: Request,
     base = '/api/content',
 ): Promise<Response> => {

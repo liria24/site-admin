@@ -1,7 +1,7 @@
-import { useSiteAdmin } from '@liria24/site-admin/server'
-import { eventHandler } from 'h3'
+import { useSiteAdmin } from '@liria24/site-admin/nuxt/server'
+import { defineEventHandler } from 'nuxt/server'
 
-export default eventHandler(async (event) => {
+export default defineEventHandler(async (event) => {
     const admin = await useSiteAdmin(event)
     if ((await admin.listEntries('posts')).length === 0) {
         const en = await admin.createEntry('posts', {
