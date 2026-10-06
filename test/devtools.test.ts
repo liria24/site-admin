@@ -1,10 +1,10 @@
 import { expect, it } from 'vitest'
-import { createApp, toWebHandler } from 'h3'
+import type { RequestEvent } from 'nuxt/server'
 import { createDatabase } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
 import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
 import snapshot from '../packages/site-admin/src/runtime/devtools-snapshot'
-import { configureSiteAdminRuntime } from '../packages/site-admin/src/server/runtime'
+import { configureSiteAdminRuntime } from '../packages/site-admin/src/nuxt/server'
 import { createSiteAdmin } from '../packages/site-admin/src/server'
 import { createMigratedTestAdmin, testAdapter } from './migrate'
 
@@ -28,8 +28,13 @@ it('protects runtime diagnostics and never returns content bodies or field defau
             managementBase: '/api/site-admin',
             development: { connector: 'sqlite', devDatabase: true },
         })
-        const app = createApp().use('/snapshot', snapshot)
-        const fetch = toWebHandler(app)
+        const fetch = (req: Request) =>
+            snapshot({
+                req,
+                url: new URL(req.url),
+                res: { headers: new Headers() },
+                context: {},
+            } satisfies RequestEvent)
         expect((await fetch(new Request('http://localhost/snapshot'))).status).toBe(401)
         expect(
             (await fetch(new Request('http://localhost/snapshot', { headers: { authorization: 'user' } }))).status,

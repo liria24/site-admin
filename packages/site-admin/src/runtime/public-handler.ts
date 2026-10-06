@@ -1,12 +1,8 @@
-import { eventHandler, sendWebResponse, toWebRequest } from 'h3'
-
+import { defineEventHandler } from 'nuxt/server'
 import { handlePublicRequest } from '../server/http'
-import { useSiteAdminRuntime } from '../server/runtime'
+import { useSiteAdminRuntime } from '../nuxt/server'
 
-export default eventHandler(async (event) => {
+export default defineEventHandler(async (event) => {
     const runtime = useSiteAdminRuntime()
-    return sendWebResponse(
-        event,
-        await handlePublicRequest(await runtime.getSiteAdmin(event), toWebRequest(event), runtime.publicBase),
-    )
+    return handlePublicRequest(await runtime.getSiteAdmin(event), event.req, runtime.publicBase)
 })

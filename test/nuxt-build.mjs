@@ -4,7 +4,7 @@ import { access, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 
-import { buildNuxt, loadNuxt } from '@nuxt/kit'
+import { buildNuxt, loadNuxt } from 'nuxt/kit'
 import domain from './fixtures/nuxt/site-admin.config.ts'
 import { createDatabase } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
@@ -112,6 +112,17 @@ try {
         headers: { cookie },
     })
     if (userOperation.status !== 403) throw new Error('The Better Auth user role received Site Admin permissions.')
+    const hookDenied = await fetch(`http://127.0.0.1:${port}/api/site-admin/models`, {
+        headers: { cookie, 'x-site-admin-test-deny': '1' },
+    })
+    const deniedBody = await hookDenied.text()
+    if (
+        hookDenied.status !== 403 ||
+        JSON.parse(deniedBody).error?.code !== 'SITE_ADMIN_FORBIDDEN' ||
+        deniedBody.includes('PRIVATE_DENIAL')
+    ) {
+        throw new Error('Native authorization hook status/redaction regression.')
+    }
     const editorModels = await fetch(`http://127.0.0.1:${port}/api/site-admin/models`, {
         headers: { cookie, 'x-site-admin-test-role': 'editor' },
     })
@@ -130,6 +141,19 @@ try {
     if (!routeProbe.ok || (await routeProbe.json()).entry?.locale !== 'ja') {
         throw new Error('Nuxt localized public route API probe failed.')
     }
+    const parallel = await Promise.all(
+        ['admin', 'user', 'editor', 'user'].map(async (role) => {
+            const parallelResponse = await fetch(`http://127.0.0.1:${port}/api/site-admin/models`, {
+                headers: { cookie, 'x-site-admin-test-role': role },
+            })
+            return Object.keys((await parallelResponse.json()).models).length
+        }),
+    )
+    if (String(parallel) !== '3,0,1,0')
+        throw new Error('Native authorization contexts leaked between concurrent requests.')
+    const background = await fetch(`http://127.0.0.1:${port}/api/__background`, { method: 'POST' })
+    if (!background.ok || !Array.isArray((await background.json()).failed))
+        throw new Error('Event-free native background runtime failed.')
     const page = await fetch(`http://127.0.0.1:${port}/ja/posts/%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF`)
     const html = await page.text()
     const pageChecks = {

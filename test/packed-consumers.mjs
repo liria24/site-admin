@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { verifyStandalone } from './standalone-consumer.mjs'
+
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
 if (!['bun', 'npm', 'pnpm'].includes(packageManager)) throw new Error('Unknown SITE_ADMIN_PACKAGE_MANAGER.')
@@ -118,6 +120,7 @@ try {
     }
     if (!(await stat(tarball)).isFile()) throw new Error('SITE_ADMIN_TARBALL must be a package file.')
     console.log(`Testing ${tarball} with ${packageManager}`)
+    if (packageManager === 'npm') await verifyStandalone(tarball)
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
     await writeFile(
         join(temporary, 'package.json'),
@@ -278,28 +281,37 @@ export default defineServerAuth({ emailAndPassword: { enabled: true } })
     await writeFile(
         join(temporary, 'server/server/plugins/database.ts'),
         `
-import { defineNitroPlugin } from 'nitropack/runtime'
+import { useServerHooks } from 'nuxt/server'
 import { drizzle } from 'drizzle-orm/node-sqlite'
 import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
 import { drizzleAdapter as authAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import * as schema from '../../schema'
-export default defineNitroPlugin((app) => {
+export default () => {
   const db = drizzle('./.data/content.sqlite3', { relations: schema.authRelations })
   const database = drizzleAdapter(db, { schema })
   const authDatabase = authAdapter(db, { provider: 'sqlite', schema, usePlural: true, transaction: false })
-  app.hooks.hook('site-admin:database', (context) => { context.database = database; context.authDatabase = authDatabase })
-})
+  useServerHooks().hook('site-admin:database', (context) => { context.database = database; context.authDatabase = authDatabase })
+}
 `,
     )
     await writeFile(
         join(temporary, 'server/server/types.ts'),
-        `export default defineNitroPlugin((app) => {
-  app.hooks.hook('site-admin:database', (context) => { const event = context.event; void event })
-  app.hooks.hook('site-admin:authorize', (context) => { const id: string = context.actor.id; void id })
+        `import { useServerHooks } from 'nuxt/server'
+export default () => {
+  useServerHooks().hook('site-admin:database', (context) => { const event = context.event; void event })
+  useServerHooks().hook('site-admin:authorize', (context) => {
+    const request: Request = context.event.req
+    context.event.res.headers.set('x-native-probe', '1')
+    // @ts-expect-error Native events do not expose Node.
+    context.event.node
+    // @ts-expect-error Use event.req; the legacy request alias is removed.
+    context.request
+    void request
+  })
   // @ts-expect-error Unknown Site Admin hook.
-  app.hooks.hook('site-admin:missing', () => {})
-})
-const admin: ReturnType<typeof import('@liria24/site-admin/server').useSiteAdmin> = useSiteAdmin()
+  useServerHooks().hook('site-admin:missing', () => {})
+}
+const admin: ReturnType<typeof import('@liria24/site-admin/nuxt/server').useSiteAdmin> = useSiteAdmin()
 void admin
 `,
     )

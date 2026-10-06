@@ -18,8 +18,8 @@
         "preview:package": "pkg-pr-new publish ./packages/site-admin --bun --no-compact --previewVersion --comment=update",
         "package:check": "publint packages/site-admin && attw --pack packages/site-admin --profile esm-only",
         "test": "vitest run",
-        "test:cloudflare": "node test/cloudflare-local.mjs",
-        "test:nuxt": "vitest run --config vitest.nuxt.config.ts && node test/nuxt-build.mjs",
+        "test:cloudflare": "node test/cloudflare-local.mjs && node test/native-stream.mjs cloudflare",
+        "test:nuxt": "vitest run --config vitest.nuxt.config.ts && node test/nuxt-build.mjs && node test/native-stream.mjs node",
         "test:packed": "node test/packed-consumers.mjs",
         "typecheck": "bun --filter @liria24/site-admin typecheck && tsc --noEmit -p test/tsconfig.json"
     },
@@ -27,7 +27,6 @@
         "@arethetypeswrong/cli": "^0.18.5",
         "@better-auth/drizzle-adapter": "^1.7.7",
         "@liria24/site-admin": "workspace:*",
-        "@nuxt/kit": "^4.6.0",
         "@nuxt/test-utils": "4.3.3",
         "@nuxtjs/better-auth": "^0.3.7",
         "@nuxtjs/i18n": "^10.6.0",

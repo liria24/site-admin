@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { NUXT_DEVTOOLS_GROUP_ID, onDevtoolsReady } from '@nuxt/devtools-kit'
-import type { Nuxt } from '@nuxt/schema'
+import type { Nuxt } from 'nuxt/schema'
 import { defineDevframe, defineRpcFunction } from 'devframe'
 import { createEmbedded } from 'devframe/adapters/embedded'
 import { DEVTOOLS_PATH } from './index'

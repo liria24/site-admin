@@ -59,7 +59,12 @@
         "./adapters/drizzle": {
             "types": "./dist/adapters/drizzle.d.ts",
             "import": "./dist/adapters/drizzle.js"
-        }
+        },
+        "./nuxt/server": {
+            "types": "./dist/nuxt/server.d.ts",
+            "import": "./dist/nuxt/server.js"
+        },
+        "./runtime/nitro2": "./dist/runtime/nitro2.js"
     },
     "publishConfig": {
         "access": "public",
@@ -99,7 +104,7 @@
     },
     "peerDependencies": {
         "@tanstack/vue-form": "2.0.0-alpha.2",
-        "nuxt": "^4.0.0",
+        "nuxt": "^4.6.0",
         "vue": "^3.6.0-rc.2"
     },
     "peerDependenciesMeta": {

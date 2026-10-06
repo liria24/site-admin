@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { addDevServerHandler, addServerHandler, getNuxtModuleVersion } from '@nuxt/kit'
-import type { Nuxt } from '@nuxt/schema'
+import { addDevServerHandler, addServerHandler, getNuxtModuleVersion } from 'nuxt/kit'
+import type { Nuxt } from 'nuxt/schema'
 import { eventHandler, setHeader } from 'h3'
 
 export const DEVTOOLS_PATH = '/__site-admin-devtools/'
