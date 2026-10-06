@@ -425,7 +425,8 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
 
         const nitro = (nuxt.options as unknown as { nitro: NitroConfig }).nitro
         nitro.externals ??= {}
-        ;(nitro.externals.inline ??= []).push('@liria24/site-admin')
+        // Nuxt 4.6's renderer subpaths must be bundled so Nitro replaces their build stubs.
+        ;(nitro.externals.inline ??= []).push('@liria24/site-admin', 'nuxt/internal')
 
         let domainConfig: SiteAdminConfig | undefined
         let configPath: string | undefined

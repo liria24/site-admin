@@ -125,10 +125,10 @@ try {
             dependencies: {
                 '@liria24/site-admin': `file:${tarball.replaceAll('\\', '/')}`,
                 '@better-auth/drizzle-adapter': '1.7.6',
-                '@nuxtjs/better-auth': '0.3.5',
+                '@nuxtjs/better-auth': '0.3.7',
                 '@tanstack/vue-form': '2.0.0-alpha.2',
                 'drizzle-orm': '1.0.0-rc.4',
-                nuxt: '4.5.2',
+                nuxt: '4.6.0',
                 nitropack: '2.13.4',
                 typescript: '7.0.2',
                 vue: '3.6.0-rc.9',
@@ -361,6 +361,8 @@ void route
     setupNuxt(false)
     await rm(satoriPath)
     exec(['nuxt', 'build', 'server'])
+    // CLI 4 relocates build artifacts; prepare restores the public generated type surface.
+    exec(['nuxt', 'prepare', 'server'])
     for (const context of ['node', 'app', 'server'])
         exec(['tsc', '--noEmit', '-p', `server/.nuxt/tsconfig.${context}.json`])
     const serverFiles = await filesUnder(join(temporary, 'server/.output'))
