@@ -23,6 +23,7 @@ import type { AppSession } from '@nuxtjs/better-auth'
 import type { BetterAuthOptions } from 'better-auth'
 import type { RequestEvent } from 'nuxt/server'
 import { transformNitroCloudflareRequest } from './runtime/nitro2'
+import { stopNitroDevReloadOnClose } from './nuxt/dev-close'
 import type { NitroConfig } from 'nitropack/types'
 import { createJiti } from 'jiti'
 import type { ModuleOptions as NuxtLLMsOptions } from 'nuxt-llms'
@@ -337,6 +338,9 @@ export default defineNuxtModule<ModuleConfig>({
             throw new Error(
                 '[site-admin] Nuxt 4.6 with the default Nitro 2 server builder is required for authentication and streaming adapters.',
             )
+        }
+        if (nuxt.options.dev) {
+            nuxt.hook('nitro:init', stopNitroDevReloadOnClose)
         }
         // Nuxt normally adds this after setup; our dependent modules need it during setup.
         const modulesDir = createResolver(import.meta.url).resolve('../node_modules')

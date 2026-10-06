@@ -31,6 +31,15 @@ const trace = (scope: string, phase: string, name: string) => appendFileSync(${J
 export default defineNuxtConfig({
   modules: [(options, nuxt) => {
     trace('nuxt', 'created', 'module')
+    trace('nuxt', 'option', 'watcher:' + nuxt.options.experimental.watcher)
+    nuxt.hook('vite:serverCreated', (server, context) => {
+      const name = context.isClient ? 'client:close' : 'server:close'
+      const close = server.close.bind(server)
+      server.close = async () => {
+        trace('vite', 'before', name)
+        try { return await close() } finally { trace('vite', 'after', name) }
+      }
+    })
     nuxt.hooks.beforeEach(({ name }) => trace('nuxt', 'before', name))
     nuxt.hooks.afterEach(({ name }) => trace('nuxt', 'after', name))
     nuxt.hook('nitro:init', (nitro) => {
