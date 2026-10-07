@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { $fetch, setup, getServerLogs, startServer, useTestContext } from '@nuxt/test-utils/e2e'
+import { $fetch, setup, getServerLogs, startServer, useTestContext, url } from '@nuxt/test-utils/e2e'
 import { beforeAll, expect, it } from 'vitest'
 
 const workspace = fileURLToPath(new URL('../../', import.meta.url))
@@ -103,6 +103,37 @@ beforeAll(async () => {
     await useTestContext().nuxt!.close()
     await startServer()
 }, 240_000)
+
+it('delivers Vue component updates through the live Vite HMR connection', async () => {
+    const client = await $fetch<string>('/_nuxt/@vite/client')
+    const token = client.match(/const wsToken = "([^"]+)"/u)?.[1]
+    expect(token, 'The Vite client must expose its local HMR connection token').toBeTruthy()
+    const socketUrl = new URL('/_nuxt/', url('/'))
+    socketUrl.protocol = 'ws:'
+    socketUrl.searchParams.set('token', token!)
+    const messages: Array<{ type: string; updates?: Array<{ path: string }> }> = []
+    const socket = new WebSocket(socketUrl, 'vite-hmr')
+    socket.addEventListener('message', (event) => messages.push(JSON.parse(String(event.data))))
+    try {
+        await expect.poll(() => messages.some(({ type }) => type === 'connected')).toBe(true)
+        expect(await $fetch<string>('/_nuxt/app.vue')).toContain('module integration')
+        await writeFile(join(fixture, 'app/app.vue'), '<template><div>component hot update</div></template>')
+        await expect
+            .poll(
+                () =>
+                    messages.some(
+                        ({ type, updates }) =>
+                            type === 'update' && updates?.some(({ path }) => path.includes('app.vue')),
+                    ),
+                { timeout: 20_000 },
+            )
+            .toBe(true)
+        expect(await $fetch<string>('/_nuxt/app.vue')).toContain('component hot update')
+        await expect.poll(async () => await $fetch<string>('/'), { timeout: 20_000 }).toContain('component hot update')
+    } finally {
+        socket.close()
+    }
+})
 
 it('reloads aliased domain and AI config and exposes generated Nuxt/Nitro types', async () => {
     const before = await $fetch<{ title: string; generation: string }>('/api/probe')
