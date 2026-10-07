@@ -347,3 +347,13 @@ During development, Nuxt DevTools includes a Site Admin inspector for models, ro
 ## Try a preview version
 
 When a PR has a package preview, install the tarball URL from its pkg.pr.new comment to try the change in your application.
+
+## Workspace development
+
+Use the supported Node runtime from `package.json` and Bun 1.4.2. Install with `bun ci`; the workspace pins Vite+ 1.1.0 and its Vite core through the Bun catalog. No global Vite+ installation is required.
+
+- `bun run format:check`, `bun run lint`, and `bun run test` use the local Vite+ toolchain.
+- `bun run build` runs `vp pack` for the library and its DevTools client.
+- `bun run check` runs all local gates, including Nuxt dev/HMR and production SSR, local Cloudflare, package validation, and packed consumers. Run `SITE_ADMIN_PACKAGE_MANAGER=npm bun run test:packed` and `SITE_ADMIN_PACKAGE_MANAGER=pnpm bun run test:packed` for the other CI consumer installers.
+
+Vitest imports stay on `vitest` for Nuxt test-utils compatibility; Vite+ provides the runner and pins the same Vitest version. Update Vite+, its core alias, and Vitest together using the target version's migrator, then rerun every gate.

@@ -71,8 +71,8 @@
         "provenance": true
     },
     "scripts": {
-        "build": "tsdown",
-        "dev": "tsdown --watch",
+        "build": "vp pack",
+        "dev": "vp pack --watch",
         "prepack": "bun run build",
         "typecheck": "tsc --noEmit"
     },

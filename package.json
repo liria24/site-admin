@@ -9,17 +9,17 @@
         "build": "bun --filter @liria24/site-admin build",
         "check": "bun run format:check && bun run lint && bun run workspace:check && bun run unused && bun run typecheck && bun run test && bun run build && bun run test:nuxt && bun run test:cloudflare && bun run package:check && bun run test:packed",
         "deps:update": "taze",
-        "format": "oxfmt . --write",
-        "format:check": "oxfmt . --check",
-        "lint": "oxlint .",
-        "lint:fix": "oxlint . --fix",
+        "format": "vp fmt . --write",
+        "format:check": "vp fmt . --check",
+        "lint": "vp lint .",
+        "lint:fix": "vp lint . --fix",
         "unused": "knip && knip --production",
         "workspace:check": "sherif",
         "preview:package": "pkg-pr-new publish ./packages/site-admin --bun --no-compact --previewVersion --comment=update",
         "package:check": "publint packages/site-admin && attw --pack packages/site-admin --profile esm-only",
-        "test": "vitest run",
+        "test": "vp test run",
         "test:cloudflare": "node test/cloudflare-local.mjs && node test/native-stream.mjs cloudflare",
-        "test:nuxt": "vitest run --config vitest.nuxt.config.ts && node test/nuxt-build.mjs && node test/native-stream.mjs node",
+        "test:nuxt": "vp test run --config vitest.nuxt.config.ts && node test/nuxt-build.mjs && node test/native-stream.mjs node",
         "test:packed": "node test/packed-consumers.mjs",
         "typecheck": "bun --filter @liria24/site-admin typecheck && tsc --noEmit -p test/tsconfig.json"
     },
@@ -46,22 +46,29 @@
         "nitropack": "2.13.4",
         "nuxt": "4.6.0",
         "nuxt-files-sdk": "^0.1.1",
-        "oxfmt": "^0.72.0",
-        "oxlint": "^1.87.0",
-        "oxlint-tsgolint": "7.0.2003",
         "pkg-pr-new": "0.0.90",
         "publint": "^0.3.25",
         "sherif": "1.13.0",
         "tailwindcss": "^4.3.3",
         "taze": "^21.3.0",
-        "tsdown": "^0.23.0",
         "typescript": "^7.0.2",
-        "vitest": "^5.0.3",
+        "vite": "catalog:",
+        "vite-plus": "catalog:",
+        "vitest": "catalog:",
         "vue": "3.6.0-rc.9",
         "wrangler": "^4.147.0"
+    },
+    "overrides": {
+        "vite": "catalog:",
+        "vitest": "catalog:"
     },
     "engines": {
         "node": "^24.11.0 || >=26.0.0"
     },
-    "packageManager": "bun@1.4.2"
+    "packageManager": "bun@1.4.2",
+    "catalog": {
+        "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
+        "vitest": "5.0.3",
+        "vite-plus": "1.1.0"
+    }
 }

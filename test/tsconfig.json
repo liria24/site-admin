@@ -7,5 +7,5 @@
             "@liria24/site-admin/server": ["../packages/site-admin/src/server/index.ts"]
         }
     },
-    "include": ["**/*.ts", "../vitest.config.ts"]
+    "include": ["**/*.ts", "../vite.config.ts"]
 }
