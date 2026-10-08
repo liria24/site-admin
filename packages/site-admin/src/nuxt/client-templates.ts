@@ -361,8 +361,8 @@ export const useSeo = (
     twitterImageAlt: clearImageDetails,
   }, priority)
   useHead(() => ({ titleTemplate: resolved.value.titleTemplate, link: [
-    ...(resolved.value.canonical ? [{ rel: 'canonical', href: new URL(resolved.value.canonical, origin).href }] : []),
-    ...(resolved.value.alternates ?? []).map(({ locale, path }) => ({ rel: 'alternate', hreflang: locale, href: new URL(path, origin).href })),
+    ...(resolved.value.canonical ? [{ rel: 'canonical' as const, href: new URL(resolved.value.canonical, origin).href }] : []),
+    ...(resolved.value.alternates ?? []).map(({ locale, path }) => ({ rel: 'alternate' as const, hreflang: locale, href: new URL(path, origin).href })),
   ] }), priority)
 }
 `

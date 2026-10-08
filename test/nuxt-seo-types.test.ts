@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, it } from 'vitest'
@@ -19,7 +20,7 @@ it('accepts shared reactive DTOs and validates native second overrides without r
   export const useRoute: () => { path: string }
   export const useNuxtApp: () => { runWithContext: <Value>(callback: () => Value) => Value }
   export const useSeoMeta: (input: unknown, options?: { tagPriority?: string }) => unknown
-  export const useHead: (input: unknown, options?: { tagPriority?: string }) => unknown
+  export { useHead } from '@unhead/vue'
   export const defineOgImage: (component: 'Default.takumi' | 'Home.takumi', props?: { title?: string | import('vue').Ref<string> }, options?: { width?: number; height?: number; key?: string } | Array<{ width?: number; height?: number; key?: string }>) => string[]
 }`,
     )
@@ -47,6 +48,7 @@ useSeoWithoutOg(dto, { image: false })
 useSeoWithoutOg(dto, { image: { component: 'Default.takumi' } })
 `,
     )
+    const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
     await writeFile(
         join(directory, 'tsconfig.json'),
         JSON.stringify({
@@ -56,6 +58,7 @@ useSeoWithoutOg(dto, { image: { component: 'Default.takumi' } })
                     '@liria24/site-admin': [resolve('packages/site-admin/src/index.ts')],
                     '@liria24/site-admin/seo': [resolve('packages/site-admin/src/seo.ts')],
                     vue: [resolve('node_modules/vue/dist/vue.d.ts')],
+                    '@unhead/vue': [requireNuxt.resolve('@unhead/vue')],
                 },
             },
             include: ['./*.ts'],
