@@ -127,8 +127,8 @@ test.each(['function', 'package', 'path'] as const)(
             ]) {
                 const { nuxt, source } = await start(root, order, kind, options)
                 expect(source).toBe(resolve(root, options.expected))
-                expect(await resolveSiteAdminFilesModulePath(nuxt)).toBe(
-                    fileURLToPath(import.meta.resolve('nuxt-files-sdk')),
+                expect((await resolveSiteAdminFilesModulePath(nuxt)).replaceAll('\\', '/')).toBe(
+                    fileURLToPath(import.meta.resolve('nuxt-files-sdk')).replaceAll('\\', '/'),
                 )
                 const selected = nuxt.options.build.templates.find(
                     (template) => template.filename === 'nuxt-files-sdk/selected.ts',

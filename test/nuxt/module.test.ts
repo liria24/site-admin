@@ -45,6 +45,7 @@ export default defineNuxtConfig({
     nuxt.hook('site-admin:config', (config) => { nuxt.options.runtimeConfig.probe.title = String(config.models.posts?.fields.title?.default) }) }, '@liria24/site-admin/nuxt'],
   devtools: { enabled: false },
   alias: { '#policy': fileURLToPath(new URL('./policy.ts', import.meta.url)) },
+  typescript: { nodeTsConfig: { compilerOptions: { paths: { '#policy': [fileURLToPath(new URL('./policy.ts', import.meta.url))] } } } },
   siteAdmin: { auth: false, i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false }, ai: true },
   runtimeConfig: { probe: { title: '', generation: randomUUID() } },
 })`,
