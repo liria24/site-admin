@@ -72,5 +72,8 @@
         "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
         "vitest": "5.0.3",
         "vite-plus": "1.1.0"
+    },
+    "patchedDependencies": {
+        "nuxt@4.6.0": "patches/nuxt@4.6.0.patch"
     }
 }

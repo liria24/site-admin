@@ -5,6 +5,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
 
 /** Strict packed consumer: only Site Admin owns the seven public dependency namespaces. */
 export const verifyOwnedDependencies = async (tarball) => {
@@ -47,6 +48,7 @@ export const verifyOwnedDependencies = async (tarball) => {
         )
         console.log('Owned consumer: isolated nested npm installation')
         run('npm', ['install', '--ignore-scripts', '--install-strategy=nested', '--no-audit', '--no-fund'])
+        await applyNuxt46VerificationPatch(directory)
         await put(
             'check-owned.mjs',
             `

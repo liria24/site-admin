@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
+import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
 
 const wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
 const listen = (server) =>
@@ -178,63 +179,6 @@ const chromiumProbe = async (origin, directory) => {
     }
 }
 
-// Temporary synthetic-fixture diagnostics: preserve the native statements and observe their ordering only.
-const nativeRuntimeTracePrefix = `const __saNativeContainers = new WeakMap();
-let __saNativeContainerId = 0;
-let __saNativeCallId = 0;
-const __saNativeTrace = (phase, call, key, previousKey, nuxtApp) => {
-  if (!import.meta.client) return;
-  const describe = (entry) => {
-    if (!entry) return null;
-    if (!__saNativeContainers.has(entry)) __saNativeContainers.set(entry, ++__saNativeContainerId);
-    return { id: __saNativeContainers.get(entry), initialized: entry._init, deps: entry._deps, hasAbortController: !!entry._abortController };
-  };
-  const events = globalThis.__siteAdminNativeTrace ??= [];
-  events.push({ phase, call, key, previousKey, current: describe(nuxtApp._asyncData[key]), previous: describe(nuxtApp._asyncData[previousKey]), pendingPromise: !!nuxtApp._asyncDataPromises[key] });
-  if (events.length > 120) events.shift();
-};
-`
-
-export const instrumentNativeSharedKeys = (source) => {
-    const replacements = [
-        ['function useAsyncData(...args) {', 'function useAsyncData(...args) { const __saCall = ++__saNativeCallId;'],
-        [
-            'const currentData = nuxtApp._asyncData[key.value];',
-            '__saNativeTrace("init", __saCall, key.value, undefined, nuxtApp); const currentData = nuxtApp._asyncData[key.value];',
-        ],
-        [
-            'watch(key, (newKey, oldKey) => {',
-            'watch(key, (newKey, oldKey) => { __saNativeTrace("enter", __saCall, newKey, oldKey, nuxtApp);',
-        ],
-        [
-            'if (!nuxtApp._asyncData[newKey]?._init) {',
-            'if (!nuxtApp._asyncData[newKey]?._init) { __saNativeTrace("before-build", __saCall, newKey, oldKey, nuxtApp);',
-        ],
-        [
-            'nuxtApp._asyncData[newKey] = buildAsyncData(nuxtApp, newKey, _handler, opts, initialValue);',
-            'nuxtApp._asyncData[newKey] = buildAsyncData(nuxtApp, newKey, _handler, opts, initialValue); __saNativeTrace("after-assign", __saCall, newKey, oldKey, nuxtApp);',
-        ],
-        [
-            'nuxtApp._asyncData[newKey]._deps++;',
-            'nuxtApp._asyncData[newKey]._deps++; __saNativeTrace("after-deps", __saCall, newKey, oldKey, nuxtApp);',
-        ],
-        [
-            'if (oldKey) unregister(oldKey);',
-            'if (oldKey) unregister(oldKey); __saNativeTrace("after-unregister", __saCall, newKey, oldKey, nuxtApp);',
-        ],
-        [
-            'if (opts._keyTriggersExecute !== false && (opts.immediate || hadData || wasRunning)) nuxtApp._asyncData[newKey].execute(initialFetchOptions);',
-            'if (opts._keyTriggersExecute !== false && (opts.immediate || hadData || wasRunning)) nuxtApp._asyncData[newKey].execute(initialFetchOptions); __saNativeTrace("after-execute", __saCall, newKey, oldKey, nuxtApp);',
-        ],
-    ]
-    let instrumented = source
-    for (const [original, observed] of replacements) {
-        if (!instrumented.includes(original)) throw new Error('Native key diagnostic statement changed: ' + original)
-        instrumented = instrumented.replace(original, observed)
-    }
-    return nativeRuntimeTracePrefix + instrumented
-}
-
 /** Real packed Nuxt macro transformation, SSR payloads and Chromium hydration, with synthetic content only. */
 export const verifyPublicDataConsumer = async (tarball, { browser = true } = {}) => {
     const directory = await mkdtemp(join(tmpdir(), 'site-admin-public-data-consumer-'))
@@ -326,17 +270,12 @@ export const verifyPublicDataConsumer = async (tarball, { browser = true } = {})
         )
         console.log('Public data consumer: isolated packed installation')
         run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'])
+        await applyNuxt46VerificationPatch(directory)
         await put(
             'nuxt.config.ts',
             `import { defineNuxtConfig } from 'nuxt/config'
-const nativeRuntimeTracePrefix = ${JSON.stringify(nativeRuntimeTracePrefix)}
-const instrumentNativeSharedKeys = ${instrumentNativeSharedKeys.toString()}
 export default defineNuxtConfig({
   devtools: false, modules: ['@liria24/site-admin/nuxt'],
-  vite: { plugins: [{ name: 'synthetic-native-key-trace', enforce: 'pre', transform(code: string, id: string) {
-    if (id.split('?')[0]?.replaceAll('\\\\', '/') !== ${JSON.stringify(join(directory, 'node_modules/nuxt/dist/app/composables/asyncData.js').replaceAll('\\', '/'))}) return
-    return { code: instrumentNativeSharedKeys(code), map: null }
-  } }] },
   siteAdmin: { auth: false, i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false }, client: { basePath: '/content', origin: ${JSON.stringify(backendOrigin)} } },
 })`,
         )
@@ -383,7 +322,6 @@ onMounted(async () => {
   const state = () => ({
     slug: slug.value, locale: locale.value, isHydrating: nuxtApp.isHydrating,
     nativeSingle: { status: nativeSingle.status.value, data: nativeSingle.data.value, error: nativeSingle.error.value?.message },
-    nativeTrace: (window as Window & { __siteAdminNativeTrace?: unknown[] }).__siteAdminNativeTrace?.slice(-120),
     nativeControl: { status: nativeControl.status.value, data: nativeControl.data.value, error: nativeControl.error.value?.message },
     nativeDuplicate: { status: nativeDuplicate.status.value, data: nativeDuplicate.data.value, error: nativeDuplicate.error.value?.message },
     // Read-only native lifecycle diagnostics belong to this synthetic test, not the public library contract.

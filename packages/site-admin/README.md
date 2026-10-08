@@ -110,6 +110,8 @@ Pages using explicit `useSeo()` can set `siteAdmin.routing.metadata: false` in `
 
 These composables return native Nuxt `AsyncData`: `data`, `error`, `status`, `refresh`, `execute` and `clear`. They accept native options such as `transform`, `pick`, `default`, `watch`, `server`, `lazy`, `dedupe` and `timeout`, plus a reactive `locale`. With `siteAdmin.i18n` enabled, an omitted locale follows the installed i18n locale; otherwise set `locale` explicitly when needed. Reactive slugs/locales update the request and SSR payload is reused during hydration.
 
+Nuxt 4.6.0 with Vue 3.6.0-rc.9/rc.10 needs the explicit application-owned [temporary compatibility patch](https://github.com/liria24/site-admin/blob/main/patches/nuxt%404.6.0.patch) for shared reactive keys. Site Admin does not apply it to consumers. Remove it after an upstream compatible release passes the [same native regression](https://github.com/liria24/site-admin/blob/main/test/nuxt-native-reentrancy.test.ts) and browser checks.
+
 Public entries have typed `entry.data.value?.data.title`; Markdown fields are parsed Comark documents; see [Markdown handling](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/markdown/content.ts). A batch preserves each named model's type and exposes its own `{ data, error }`, for example `batch.data.value?.featured.data?.data.title`. A missing entry is `null`; unknown/private model names are rejected by the generated types. See [public data examples and inference checks](https://github.com/liria24/site-admin/blob/main/test/nuxt-public-data-types.test.ts).
 
 Native transformations preserve their output type:

@@ -202,6 +202,8 @@ it.each(['completed', 'during', 'transition'] as const)(
             })
             componentApp.mount({ text: '' })
             await mounted.promise
+            // An ordinary error read registers the reactive error-map dependency behind the shared-key regression.
+            void entry.error.value
             app.isHydrating = hydration !== 'completed'
             expect(counts['ssr:ja']).toBe(1)
             expect(entry.data.value?.data.title).toBe('ssr:ja')

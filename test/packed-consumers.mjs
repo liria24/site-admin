@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { verifyStandalone } from './standalone-consumer.mjs'
 import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
 import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
+import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
@@ -38,7 +39,7 @@ const install = async (cwd = temporary, production = false) => {
         // npm cannot reify Nitro's traced links; install the generated production manifest into a clean tree.
         if (production) await rm(join(cwd, 'node_modules'), { force: true, recursive: true })
     }
-    return run(
+    const result = run(
         packageManager,
         [
             'install',
@@ -47,6 +48,8 @@ const install = async (cwd = temporary, production = false) => {
         ],
         cwd,
     )
+    if (!production) await applyNuxt46VerificationPatch(cwd)
+    return result
 }
 const exec = (args, cwd = temporary) =>
     run(
