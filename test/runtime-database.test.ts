@@ -49,7 +49,12 @@ describe('application-owned database resolution', () => {
         await writeFile(driver, 'export const drizzle = () => { throw new Error("Application driver requested") }\n')
         await writeFile(schema, 'export const authRelations = {}\n')
         const jiti = createJiti(import.meta.url, {
-            alias: { 'drizzle-orm/node-sqlite': driver, '../.data/schema/schema': schema },
+            alias: {
+                'drizzle-orm/node-sqlite': driver,
+                '../.data/schema/schema': schema,
+                // Unit tests run before package build; the fixture keeps its public app import.
+                '@liria24/site-admin/adapters/drizzle': resolve('packages/site-admin/src/adapters/drizzle.ts'),
+            },
             fsCache: false,
             moduleCache: false,
         })

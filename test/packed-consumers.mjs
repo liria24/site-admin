@@ -133,10 +133,11 @@ try {
         JSON.stringify({
             dependencies: {
                 '@liria24/site-admin': `file:${tarball.replaceAll('\\', '/')}`,
-                '@better-auth/drizzle-adapter': '1.7.6',
+                '@better-auth/drizzle-adapter': '1.7.7',
                 '@nuxtjs/better-auth': '0.3.7',
                 '@tanstack/vue-form': '2.0.0-alpha.2',
                 'drizzle-orm': '1.0.0-rc.4',
+                'drizzle-kit': '1.0.0-rc.4',
                 nuxt: '4.6.0',
                 nitropack: '2.13.4',
                 typescript: '7.0.2',
@@ -273,11 +274,11 @@ export default defineServerAuth({ emailAndPassword: { enabled: true } })
         `export default { dialect: 'sqlite', schema: './schema.ts', out: './migrations', dbCredentials: { url: './.data/content.sqlite3' } }`,
     )
     await mkdir(join(temporary, 'server/.data'), { recursive: true })
-    // Resolve from the installed package, not the workspace, including hoisted installs.
+    // Resolve the application's declared migration tool, never Site Admin's dependency directory.
     const kitBin = run(process.execPath, [
         '--input-type=module',
         '-e',
-        `import {createRequire} from 'node:module'; import {dirname,join} from 'node:path'; const require=createRequire(import.meta.resolve('@liria24/site-admin')); console.log(join(dirname(require.resolve('drizzle-kit')),'bin.cjs'))`,
+        `import {createRequire} from 'node:module'; import {dirname,join} from 'node:path'; const require=createRequire(import.meta.url); console.log(join(dirname(require.resolve('drizzle-kit')),'bin.cjs'))`,
     ])
     run(process.execPath, [kitBin, 'generate'], join(temporary, 'server'))
     run(process.execPath, [kitBin, 'migrate'], join(temporary, 'server'))

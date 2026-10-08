@@ -101,8 +101,33 @@ const chromiumProbe = async (origin, directory) => {
         })
         let id = 0
         const pending = new Map()
+        const diagnostics = []
+        const recordDiagnostic = (item) => {
+            diagnostics.push(item)
+            if (diagnostics.length > 20) diagnostics.shift()
+        }
         socket.addEventListener('message', (event) => {
             const message = JSON.parse(String(event.data))
+            if (message.method === 'Log.entryAdded')
+                recordDiagnostic({
+                    kind: 'browser-log',
+                    level: message.params.entry.level,
+                    text: message.params.entry.text,
+                })
+            if (message.method === 'Runtime.exceptionThrown')
+                recordDiagnostic({
+                    kind: 'exception',
+                    text:
+                        message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text,
+                })
+            if (message.method === 'Network.loadingFailed')
+                recordDiagnostic({
+                    kind: 'request-failed',
+                    error: message.params.errorText,
+                    canceled: message.params.canceled,
+                    blockedReason: message.params.blockedReason,
+                    cors: message.params.corsErrorStatus,
+                })
             if (!message.id) return
             const request = pending.get(message.id)
             pending.delete(message.id)
@@ -135,13 +160,15 @@ const chromiumProbe = async (origin, directory) => {
             })
         await send('Page.enable')
         await send('Runtime.enable')
+        await send('Log.enable')
+        await send('Network.enable')
         await send('Page.navigate', { url: origin })
         for (let attempt = 0; attempt < 600; attempt++) {
             const result = await send('Runtime.evaluate', {
                 expression: 'window.__siteAdminProbe',
                 returnByValue: true,
             })
-            if (result.result?.value?.done) return result.result.value
+            if (result.result?.value?.done) return { ...result.result.value, browserDiagnostics: diagnostics }
             await wait(100)
         }
         throw new Error('Public data browser probe did not complete.')
@@ -283,9 +310,21 @@ const initial = computed(() => ({ title: entry.data.value?.data.title, body: ent
 onMounted(async () => {
   const checks: Record<string, unknown> = {}
   const check = (condition: unknown, message: string) => { if (!condition) throw new Error(message) }
-  const until = async (predicate: () => boolean) => { for (let index = 0; index < 300; index++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 10)) } throw new Error('Condition did not settle.') }
+  const state = () => ({
+    slug: slug.value, locale: locale.value,
+    entry: { status: entry.status.value, data: entry.data.value, error: entry.error.value?.message },
+    duplicate: { status: duplicate.status.value, data: duplicate.data.value, error: duplicate.error.value?.message },
+    list: { status: list.status.value, data: list.data.value, error: list.error.value?.message },
+    batch: { slug: batchSlug.value, locale: batchLocale.value, status: batch.status.value, data: batch.data.value, error: batch.error.value?.message },
+  })
+  const until = async (stage: string, predicate: () => boolean) => {
+    checks.stage = stage
+    for (let index = 0; index < 300; index++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 10)) }
+    throw new Error('Condition did not settle at ' + stage + '. State: ' + JSON.stringify(state()))
+  }
   const getCounts = () => $fetch<Record<string, number>>(${JSON.stringify(`${backendOrigin}/counts`)})
   try {
+    checks.stage = 'hydration'
     checks.initial = initial.value
     checks.hydrationCounts = await getCounts()
     check(entry.data.value?.data.title === 'ssr:ja', 'SSR entry must hydrate.')
@@ -297,11 +336,11 @@ onMounted(async () => {
     await nextTick()
     await new Promise((resolve) => setTimeout(resolve, 30))
     slug.value = 'fast'
-    await until(() => entry.data.value?.slug === 'fast' && entry.status.value === 'success')
+    await until('entry slow-to-fast race', () => entry.data.value?.slug === 'fast' && entry.status.value === 'success')
     await new Promise((resolve) => setTimeout(resolve, 350))
     check(entry.data.value?.slug === 'fast', 'Slow slug response must not overwrite the latest entry.')
     locale.value = 'en'
-    await until(() => entry.data.value?.locale === 'en' && list.status.value === 'success')
+    await until('entry/list locale transition', () => entry.data.value?.locale === 'en' && list.status.value === 'success')
     checks.localeCounts = await getCounts()
     check(duplicate.data.value === entry.data.value, 'Identical native keys must share data.')
     const beforeRefresh = (await getCounts())['fast:en'] ?? 0
@@ -312,17 +351,17 @@ onMounted(async () => {
     await entry.execute()
     check(entry.data.value?.slug === 'fast', 'Execute must refetch after clear.')
     trigger.value += 1
-    await until(() => entry.status.value === 'success')
+    await until('native entry watch', () => entry.status.value === 'success')
     await new Promise((resolve) => setTimeout(resolve, 30))
     checks.watchCounts = await getCounts()
     slug.value = 'missing'
-    await until(() => entry.status.value === 'success' && entry.data.value === null)
+    await until('entry 404', () => entry.status.value === 'success' && entry.data.value === null)
     check(!entry.error.value, '404 must be nullable data rather than error.')
     slug.value = 'error'
-    await until(() => entry.status.value === 'error')
+    await until('entry HTTP error', () => entry.status.value === 'error')
     check(!!entry.error.value, 'A failed HTTP response must remain in native error state.')
     locale.value = 'empty'
-    await until(() => list.status.value === 'success' && list.data.value?.length === 0)
+    await until('empty locale list', () => list.status.value === 'success' && list.data.value?.length === 0)
     await timeout.execute()
     check(timeout.status.value === 'error' && !!timeout.error.value, 'Native timeout must report an error.')
     batchSlug.value = 'slow'
@@ -330,7 +369,7 @@ onMounted(async () => {
     await new Promise((resolve) => setTimeout(resolve, 30))
     batchSlug.value = 'batch-fast'
     batchLocale.value = 'batch-en'
-    await until(() => batch.status.value === 'success' && batch.data.value.featured.data?.slug === 'batch-fast' && batch.data.value.featured.data?.locale === 'batch-en')
+    await until('batch slug/locale race', () => batch.status.value === 'success' && batch.data.value.featured.data?.slug === 'batch-fast' && batch.data.value.featured.data?.locale === 'batch-en')
     await new Promise((resolve) => setTimeout(resolve, 350))
     check(batch.data.value.featured.data?.slug === 'batch-fast', 'Late batch request must not overwrite the latest composite key.')
     const beforeBatchRefresh = await getCounts()
@@ -343,9 +382,12 @@ onMounted(async () => {
     await batch.execute()
     check(batch.data.value.featured.data?.slug === 'batch-fast' && batch.data.value.count === 1, 'Batch execute must restore transformed named data.')
     checks.batchCounts = await getCounts()
+    checks.stage = 'complete'
     checks.done = true
     ;(window as Window & { __siteAdminProbe?: unknown }).__siteAdminProbe = { done: true, checks }
   } catch (error) {
+    checks.failureState = state()
+    checks.failureCounts = await getCounts().catch((countsError: unknown) => ({ error: String(countsError) }))
     ;(window as Window & { __siteAdminProbe?: unknown }).__siteAdminProbe = { done: true, error: String(error), checks }
   }
 })
@@ -414,7 +456,16 @@ void [title, nodes, titles, batchTitle, batchCount]`,
             return
         }
         const result = await chromiumProbe(origin, directory)
-        assert.equal(result.error, undefined, JSON.stringify(result))
+        assert.equal(
+            result.error,
+            undefined,
+            JSON.stringify({
+                result,
+                backendCounts: counts,
+                requests: requests.slice(-40),
+                serverLogs: logs.join('').slice(-16_384),
+            }),
+        )
         assert.equal(
             result.checks.hydrationCounts['ssr:ja'],
             2,
