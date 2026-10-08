@@ -15,6 +15,8 @@ describe('environment-resolved schema CLI', () => {
             await writeFile(
                 resolve(path, 'site-admin.config.ts'),
                 `import { text } from ${JSON.stringify(fields)}
+import { getProvider } from '#files-sdk/providers'
+if (!getProvider('memory')) throw new Error('CLI native Files alias failed')
 export default {
   database: () => { throw new Error('The CLI must not invoke the application database') },
   models: { posts: { fields: { title: text() } } },

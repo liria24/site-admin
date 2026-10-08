@@ -12,7 +12,7 @@ const fixture = await mkdtemp(join(workspace, '.tmp/nuxt-module-'))
 const lifecycleFile = `${fixture}-lifecycle.jsonl`
 const config = (title: string, aiChanged = false) => `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
 import { required } from '#policy'
-export default defineSiteAdminConfig({ ai: { models: { posts: ${aiChanged ? "{ suggest: () => ({ data: { title: 'AI server sentinel' } }) }" : '{}'} } }, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
+export default defineSiteAdminConfig({ ai: { models: { posts: ${aiChanged ? "{ suggest: () => ({ data: { title: 'AI server sentinel' } }) }" : '{}'} } }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
 await mkdir(join(fixture, 'server/api'), { recursive: true })
 await mkdir(join(fixture, 'app'), { recursive: true })
 await writeFile(join(fixture, 'policy.ts'), 'export const required = true\n')
@@ -52,7 +52,10 @@ export default defineNuxtConfig({
 await writeFile(join(fixture, 'app/app.vue'), '<template><div>module integration</div></template>')
 await writeFile(
     join(fixture, 'server/api/probe.get.ts'),
-    'export default defineEventHandler(() => useRuntimeConfig().probe)\n',
+    `import { useServerFiles as nativeFiles } from 'nuxt-files-sdk/runtime'
+import { useServerFiles as bridgedFiles } from '#nuxt-files-sdk/runtime'
+export default defineEventHandler(() => ({ ...useRuntimeConfig().probe, filesReady: nativeFiles() === bridgedFiles() && nativeFiles() === useServerFiles() }))
+`,
 )
 await writeFile(
     join(fixture, 'server/types.ts'),
@@ -157,8 +160,9 @@ it('delivers Vue component updates through the live Vite HMR connection', async 
 })
 
 it('reloads aliased domain and AI config and exposes generated Nuxt/Nitro types', async () => {
-    const before = await $fetch<{ title: string; generation: string }>('/api/probe')
+    const before = await $fetch<{ title: string; generation: string; filesReady: boolean }>('/api/probe')
     expect(before.title).toBe('Before')
+    expect(before.filesReady).toBe(true)
     await writeFile(join(fixture, 'site-admin.config.ts'), config('After'))
     try {
         await expect
@@ -194,6 +198,7 @@ it('reloads aliased domain and AI config and exposes generated Nuxt/Nitro types'
         } catch (error) {
             throw new Error(await readFile(lifecycleFile, 'utf8'), { cause: error })
         }
+        expect((await $fetch<{ filesReady: boolean }>('/api/probe')).filesReady).toBe(true)
     }
     const activeBuilders = new Set<number>()
     for (const line of (await readFile(lifecycleFile, 'utf8')).trim().split('\n')) {

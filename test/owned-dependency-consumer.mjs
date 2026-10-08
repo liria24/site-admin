@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -92,9 +92,11 @@ export default defineNuxtConfig({
             `
 import { defineSiteAdminConfig, text } from '@liria24/site-admin'
 import { defineFilesConfig } from '#nuxt-files-sdk/config'
+import { getProvider } from '#files-sdk/providers'
 import { parseMarkdown } from '#comark/parse'
 import type { BetterAuthOptions } from '#better-auth'
 import type { SiteAdminDatabase } from '@liria24/site-admin/adapter'
+if (!getProvider('memory')) throw new Error('Native owned provider alias failed')
 const files = defineFilesConfig({ storage: { adapter: 'memory' } })
 const auth: Pick<BetterAuthOptions, 'emailAndPassword'> = { emailAndPassword: { enabled: true } }
 void auth; void parseMarkdown
@@ -157,14 +159,17 @@ import { createFiles } from '#files-sdk'
 import { parseMarkdown } from '#comark/parse'
 import { generateText } from '#ai'
 import { defineEventHandler } from 'nuxt/server'
+import { useServerFiles as nativeFiles } from 'nuxt-files-sdk/runtime'
+import { useServerFiles as bridgedFiles } from '#nuxt-files-sdk/runtime'
 import { useSiteAdmin } from '@liria24/site-admin/nuxt/server'
 export default defineEventHandler(async (event) => {
   const files = createFiles({ adapter: memory() })
   void files
   const parsed = await parseMarkdown('Owned dependencies')
+  const sameRegistry = nativeFiles() === bridgedFiles() && nativeFiles() === useServerFiles()
   const siteAdmin = await useSiteAdmin(event)
   const entries = await siteAdmin.listPublicEntries('posts')
-  return { owned: Boolean(parsed), ai: typeof generateText, models: Object.keys(siteAdmin.descriptor.models), empty: entries.length === 0 }
+  return { sameRegistry, owned: Boolean(parsed), ai: typeof generateText, models: Object.keys(siteAdmin.descriptor.models), empty: entries.length === 0 }
 })
 `,
         )
@@ -217,6 +222,16 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
         console.log('Owned consumer: Nuxt production build')
         const env = { ...process.env, NUXT_BETTER_AUTH_SECRET: 'owned-consumer-test-secret-00000000000000000000' }
         run(process.execPath, ['node_modules/nuxt/bin/nuxt.mjs', 'build'], env)
+        for (const name of await readdir(join(directory, '.output/public'), { recursive: true })) {
+            if (!/\.(?:js|json|html)$/u.test(name)) continue
+            const source = await readFile(join(directory, '.output/public', name), 'utf8')
+            if (
+                source.includes('Owned consumer does not test database writes') ||
+                source.includes('owned_consumer_revisions')
+            ) {
+                throw new Error(`Server-only common configuration leaked into client output: ${name}`)
+            }
+        }
         const port = await new Promise((resolvePort, reject) => {
             const probe = createServer()
             probe.once('error', reject)
@@ -245,7 +260,13 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
         }
         if (!response?.ok) throw new Error(`Owned runtime probe failed.\n${logs.join('')}`)
         const result = await response.json()
-        if (!result.owned || result.ai !== 'function' || !result.models?.includes('posts') || result.empty !== true)
+        if (
+            !result.sameRegistry ||
+            !result.owned ||
+            result.ai !== 'function' ||
+            !result.models?.includes('posts') ||
+            result.empty !== true
+        )
             throw new Error('Owned native server imports returned unexpected result.')
         const descriptorResponse = await fetch(`http://127.0.0.1:${port}/api/content/models`)
         const descriptor = descriptorResponse.ok ? await descriptorResponse.json() : undefined

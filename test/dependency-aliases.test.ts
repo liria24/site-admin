@@ -15,6 +15,7 @@ import {
     removeSiteAdminDependencyAliases,
     siteAdminDependencyModules,
 } from '../packages/site-admin/src/dependency-aliases'
+import { nativeFilesConfigAliases } from '../packages/site-admin/src/nuxt/files-aliases'
 
 describe('Site Admin owned dependency namespaces', () => {
     it('provides only the intentional major namespaces and preserves native private IDs', async () => {
@@ -168,6 +169,68 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, parseMa
         expect(paths['#better-auth/dist/index.mjs']).toBeUndefined()
     })
 
+    it('delegates only verified native Files exports and generated runtime aliases', async () => {
+        const native = {
+            modulePath: fileURLToPath(import.meta.resolve('nuxt-files-sdk')),
+            buildDir: '/app/.nuxt',
+            dev: true,
+        }
+        const node = nativeFilesConfigAliases(native.modulePath)
+        const browser = nativeFilesConfigAliases(native.modulePath, ['browser', 'import'])
+        expect(node['#files-sdk/providers']).toBeTruthy()
+        expect(Object.keys(node).some((id) => id.includes('*'))).toBe(false)
+        const generated = {
+            '#nuxt-files-sdk/registry': '/app/.nuxt/nuxt-files-sdk/registry.dev.mjs',
+            'nuxt-files-sdk/runtime': '/app/.nuxt/nuxt-files-sdk/runtime.dev.mjs',
+        }
+        for (const aliases of [node, browser]) {
+            const owned = createSiteAdminDependencyAliases()
+            const combined = { ...owned, ...aliases, ...generated, '#app': '/app' }
+            expect(removeSiteAdminDependencyAliases(combined, owned, native)).toEqual({
+                ...aliases,
+                ...generated,
+                '#app': '/app',
+            })
+            const array = Object.entries(combined).map(([find, replacement]) => ({ find, replacement }))
+            expect(
+                Object.fromEntries(
+                    removeSiteAdminDependencyAliases(array, owned, native).map((entry) => [
+                        entry.find,
+                        entry.replacement,
+                    ]),
+                ),
+            ).toEqual({ ...aliases, ...generated, '#app': '/app' })
+        }
+        for (const aliases of [
+            { '#files-sdk/providers': '/foreign/files-sdk/providers.js' },
+            { '#files-sdk/private': node['#files-sdk'] },
+            { '#files-sdk/*': node['#files-sdk'] },
+            { '#nuxt-files-sdk/registry': '/other/.nuxt/nuxt-files-sdk/registry.dev.mjs' },
+            { 'nuxt-files-sdk/runtime': '/app/.nuxt/nuxt-files-sdk/runtime.mjs' },
+            { 'files-sdk/providers': node['#files-sdk/providers'] },
+            [{ find: /^#files-sdk\//u, replacement: node['#files-sdk']! }],
+            [{ find: /^#files-sdk\/providers$/u, replacement: node['#files-sdk/providers']! }],
+        ])
+            expect(() => assertSiteAdminDependencyAliasConflicts(aliases, native)).toThrow(
+                'conflicts with existing alias',
+            )
+        expect(() => assertSiteAdminDependencyAliasConflicts(node)).toThrow('conflicts with existing alias')
+        const plugin = createSiteAdminDependencyPlugin({ nativeFiles: () => native })
+        const calls: string[] = []
+        const context = {
+            resolve: async (id: string) => {
+                calls.push(id)
+                return { id: generated['nuxt-files-sdk/runtime'] }
+            },
+        }
+        expect(await plugin.resolveId.call(context, '#files-sdk/providers')).toBeNull()
+        await plugin.resolveId.call(context, '#nuxt-files-sdk/runtime')
+        expect(calls).toEqual(['nuxt-files-sdk/runtime'])
+        const types = createSiteAdminDependencyTypePaths({ nativeFiles: native })
+        expect(Object.keys(types).some((id) => id === '#files-sdk' || id.startsWith('#files-sdk/'))).toBe(false)
+        expect(types['#nuxt-files-sdk/runtime']?.[0]).toMatch(/runtime\.d\.ts$/u)
+    })
+
     it('keeps owner isolation and native import, require, browser and server export conditions', async () => {
         const root = await mkdtemp(resolve(tmpdir(), 'site-admin-owned-conditions-'))
         try {
@@ -183,7 +246,21 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, parseMa
             const exsolve = pathToFileURL(
                 createRequire(new URL('../packages/site-admin/package.json', import.meta.url)).resolve('exsolve'),
             ).href
-            await writeFile(helper, source.replace("from 'exsolve'", `from ${JSON.stringify(exsolve)}`))
+            await writeFile(
+                helper,
+                source
+                    .replace("from 'exsolve'", `from ${JSON.stringify(exsolve)}`)
+                    .replace("from './nuxt/files-aliases'", "from './nuxt/files-aliases.ts'"),
+            )
+            await mkdir(resolve(owner, 'nuxt'), { recursive: true })
+            const filesHelper = await readFile(
+                new URL('../packages/site-admin/src/nuxt/files-aliases.ts', import.meta.url),
+                'utf8',
+            )
+            await writeFile(
+                resolve(owner, 'nuxt/files-aliases.ts'),
+                filesHelper.replace("from 'exsolve'", `from ${JSON.stringify(exsolve)}`),
+            )
             await writeFile(resolve(owner, 'package.json'), '{"name":"owned-site-admin","type":"module"}')
             await writeFile(resolve(app, 'package.json'), '{"name":"isolated-app","type":"module"}')
             for (const name of Object.values(siteAdminDependencyModules)) {

@@ -2,6 +2,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveModulePath } from 'exsolve'
+import {
+    isNativeFilesAlias,
+    nativeFilesAliasTargets,
+    ownedFilesImporter,
+    type NativeFilesIntegration,
+} from './nuxt/files-aliases'
 
 /** Deliberate consumer-facing namespaces, backed by Site Admin's own dependencies. */
 export const siteAdminDependencyModules = {
@@ -45,9 +51,16 @@ type AliasEntries = Record<string, unknown> | ReadonlyArray<{ find: string | Reg
 const dependencySpecifier = (id: string): string | undefined => publicSpecifiers.get(id)
 
 /** Refuse namespace collisions rather than silently replacing application/module configuration. */
-export const assertSiteAdminDependencyAliasConflicts = (aliases: AliasEntries = {}): void => {
-    const keys = Array.isArray(aliases) ? aliases.map((entry) => entry.find) : Object.keys(aliases)
-    for (const key of keys) {
+export const assertSiteAdminDependencyAliasConflicts = (
+    aliases: AliasEntries = {},
+    native?: NativeFilesIntegration,
+): void => {
+    const entries = Array.isArray(aliases)
+        ? aliases.map((entry) => [entry.find, entry.replacement] as const)
+        : Object.entries(aliases)
+    const nativeTargets = native ? nativeFilesAliasTargets(native) : {}
+    for (const [key, value] of entries) {
+        if (typeof key === 'string' && isNativeFilesAlias(key, value, nativeTargets)) continue
         if (typeof key === 'string' && privateModuleIds.has(key)) continue
         for (const [namespace, name] of Object.entries(siteAdminDependencyModules)) {
             const roots = [namespace, name]
@@ -59,6 +72,11 @@ export const assertSiteAdminDependencyAliasConflicts = (aliases: AliasEntries = 
                           name,
                           `${namespace}/__site_admin_export__`,
                           `${name}/__site_admin_export__`,
+                          ...Object.keys(nativeTargets).flatMap((id) =>
+                              id === namespace || id.startsWith(`${namespace}/`)
+                                  ? [id, name + id.slice(namespace.length)]
+                                  : [],
+                          ),
                           ...[...publicSpecifiers]
                               .filter(([id]) => id.startsWith(`${namespace}/`))
                               .flatMap(([id, specifier]) => [id, specifier]),
@@ -77,15 +95,19 @@ export const assertSiteAdminDependencyAliasConflicts = (aliases: AliasEntries = 
 export const removeSiteAdminDependencyAliases = <T extends AliasEntries>(
     aliases: T,
     owned: Record<string, string>,
+    native?: NativeFilesIntegration,
 ): T => {
+    const nativeTargets = native ? nativeFilesAliasTargets(native) : {}
     const isOwned = (key: string, value: unknown): boolean =>
-        typeof value === 'string' && owned[key]?.replaceAll('\\', '/') === value.replaceAll('\\', '/')
+        !isNativeFilesAlias(key, value, nativeTargets) &&
+        typeof value === 'string' &&
+        owned[key]?.replaceAll('\\', '/') === value.replaceAll('\\', '/')
     const result = (
         Array.isArray(aliases)
             ? aliases.filter((entry) => typeof entry.find !== 'string' || !isOwned(entry.find, entry.replacement))
             : Object.fromEntries(Object.entries(aliases).filter(([key, value]) => !isOwned(key, value)))
     ) as T
-    assertSiteAdminDependencyAliasConflicts(result)
+    assertSiteAdminDependencyAliasConflicts(result, native)
     return result
 }
 
@@ -98,7 +120,9 @@ interface ResolverContext {
 }
 
 /** Vite, Vitest and Nitro/Rollup opt-in; the active bundler retains its native export conditions. */
-export const createSiteAdminDependencyPlugin = (options: { aliases?: () => AliasEntries } = {}) => ({
+export const createSiteAdminDependencyPlugin = (
+    options: { aliases?: () => AliasEntries; nativeFiles?: () => NativeFilesIntegration | undefined } = {},
+) => ({
     name: 'site-admin-owned-dependencies',
     enforce: 'pre' as const,
     // Bare SSR externals would be re-resolved from the consuming application at runtime.
@@ -106,7 +130,7 @@ export const createSiteAdminDependencyPlugin = (options: { aliases?: () => Alias
         return { ssr: { noExternal: Object.values(siteAdminDependencyModules) } }
     },
     configResolved(config: { resolve: { alias: AliasEntries; dedupe?: string[] } }) {
-        assertSiteAdminDependencyAliasConflicts(config.resolve.alias)
+        assertSiteAdminDependencyAliasConflicts(config.resolve.alias, options.nativeFiles?.())
         for (const [namespace, name] of Object.entries(siteAdminDependencyModules)) {
             if (config.resolve.dedupe?.includes(name)) {
                 throw new Error(`[site-admin] Dependency namespace ${namespace} conflicts with resolve.dedupe ${name}.`)
@@ -114,10 +138,14 @@ export const createSiteAdminDependencyPlugin = (options: { aliases?: () => Alias
         }
     },
     async resolveId(this: ResolverContext, id: string) {
+        const native = options.nativeFiles?.()
+        if (native && native.runtime !== false && (id === '#files-sdk' || id.startsWith('#files-sdk/'))) return null
         const specifier = dependencySpecifier(id)
         if (!specifier) return null
-        assertSiteAdminDependencyAliasConflicts(options.aliases?.())
-        const result = await this.resolve(specifier, owner, { skipSelf: true })
+        assertSiteAdminDependencyAliasConflicts(options.aliases?.(), native)
+        const importer =
+            native && (id === '#nuxt-files-sdk' || id.startsWith('#nuxt-files-sdk/')) ? native.modulePath : owner
+        const result = await this.resolve(specifier, importer, { skipSelf: true })
         if (!result) throw new Error(`[site-admin] Cannot resolve owned dependency export ${id} (${specifier}).`)
         return result
     },
@@ -133,10 +161,19 @@ const declarationPath = (path: string): string => {
     return declarations.map((suffix) => stem + suffix).find(existsSync) ?? path
 }
 
-const ownedExportPaths = (conditions: string[]): Record<string, string> => {
+const ownedExportPaths = (conditions: string[], filesModulePath?: string): Record<string, string> => {
     const paths: Record<string, string> = {}
     for (const [alias, specifier] of publicSpecifiers) {
-        const path = resolveModulePath(specifier, { from: import.meta.url, conditions, try: true })
+        const path = resolveModulePath(specifier, {
+            from:
+                alias === '#files-sdk' ||
+                alias.startsWith('#files-sdk/') ||
+                (filesModulePath && (alias === '#nuxt-files-sdk' || alias.startsWith('#nuxt-files-sdk/')))
+                    ? ownedFilesImporter(filesModulePath)
+                    : import.meta.url,
+            conditions,
+            try: true,
+        })
         if (path) paths[alias] = path
     }
     return paths
@@ -147,7 +184,7 @@ const ownedExportPaths = (conditions: string[]): Record<string, string> => {
  * Jiti treats alias keys as prefixes; only the curated names are public API.
  */
 export const createSiteAdminDependencyAliases = (
-    options: { conditions?: string[]; aliases?: AliasEntries; rootDir?: string } = {},
+    options: { conditions?: string[]; aliases?: AliasEntries; rootDir?: string; filesModulePath?: string } = {},
 ): Record<string, string> => {
     assertSiteAdminDependencyAliasConflicts(options.aliases)
     if (options.rootDir) {
@@ -157,17 +194,24 @@ export const createSiteAdminDependencyAliases = (
             assertSiteAdminDependencyAliasConflicts(data.imports)
         }
     }
-    return ownedExportPaths(options.conditions ?? ['node', 'import'])
+    return ownedExportPaths(options.conditions ?? ['node', 'import'], options.filesModulePath)
 }
 
 /** Resolve the curated public entries to their native declarations through package exports. */
 export const createSiteAdminDependencyTypePaths = (
-    options: { conditions?: string[]; paths?: Record<string, unknown> } = {},
+    options: {
+        conditions?: string[]
+        paths?: Record<string, unknown>
+        nativeFiles?: NativeFilesIntegration
+        filesModulePath?: string
+    } = {},
 ): Record<string, string[]> => {
     assertSiteAdminDependencyAliasConflicts(options.paths)
     return Object.fromEntries(
-        Object.entries(ownedExportPaths(['types', ...(options.conditions ?? ['node', 'import'])])).map(
-            ([alias, path]) => [alias, [declarationPath(path)]],
-        ),
+        Object.entries(
+            ownedExportPaths(['types', ...(options.conditions ?? ['node', 'import'])], options.filesModulePath),
+        )
+            .filter(([alias]) => !options.nativeFiles || !(alias === '#files-sdk' || alias.startsWith('#files-sdk/')))
+            .map(([alias, path]) => [alias, [declarationPath(path)]]),
     )
 }

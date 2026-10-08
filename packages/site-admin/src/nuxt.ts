@@ -29,6 +29,7 @@ import { stopNitroDevReloadOnClose } from './nuxt/dev-close'
 import {
     siteAdminFilesModuleDependencies,
     resolveSiteAdminFilesSource,
+    resolveSiteAdminFilesModulePath,
     allowGeneratedFilesConfig,
 } from './nuxt/files-source'
 import type { Nitro, NitroConfig } from 'nitropack/types'
@@ -47,6 +48,7 @@ import {
     createSiteAdminDependencyTypePaths,
     removeSiteAdminDependencyAliases,
 } from './dependency-aliases'
+import { nativeFilesConfigAliases } from './nuxt/files-aliases'
 import {
     siteAdminNuxtClientTemplate,
     siteAdminNuxtFormTemplate,
@@ -381,28 +383,58 @@ export default defineNuxtModule<ModuleConfig>({
         ]) {
             assertSiteAdminDependencyAliasConflicts(config?.compilerOptions?.paths)
         }
+        const filesModulePath = await resolveSiteAdminFilesModulePath(nuxt)
         const dependencyAliases = createSiteAdminDependencyAliases({
+            filesModulePath,
             aliases: nuxt.options.alias,
             rootDir: nuxt.options.rootDir,
         })
+        const filesConfigAliases = nativeFilesConfigAliases(filesModulePath)
+        const nativeFiles = () =>
+            hasNuxtModule('nuxt-files-sdk', nuxt) &&
+            Object.keys(filesConfigAliases).some((name) => !(name in dependencyAliases) && name in nuxt.options.alias)
+                ? {
+                      modulePath: filesModulePath,
+                      buildDir: nuxt.options.buildDir,
+                      dev: nuxt.options.dev,
+                      runtime: Boolean(
+                          nuxt.options.alias['#nuxt-files-sdk/registry'] ||
+                          nuxt.options.alias['nuxt-files-sdk/runtime'],
+                      ),
+                  }
+                : undefined
         Object.assign(nuxt.options.alias, dependencyAliases)
         const dependencyTypePaths = (conditions: string[] = ['node', 'import']) => {
-            const paths = createSiteAdminDependencyTypePaths({ conditions })
+            const paths = createSiteAdminDependencyTypePaths({
+                conditions,
+                filesModulePath,
+                ...(nativeFiles() && nuxt.options.alias['#nuxt-files-sdk/registry']
+                    ? { nativeFiles: nativeFiles()! }
+                    : {}),
+            })
             if (nuxt.options.alias['#auth/client'] || nuxt.options.alias['#auth/server']) {
                 // This exact public export is also referenced by the native SDK's declarations.
                 paths['@nuxtjs/better-auth/config'] = paths['#nuxtjs/better-auth/config']!
             }
             return paths
         }
-        addVitePlugin(createSiteAdminDependencyPlugin())
+        addVitePlugin(createSiteAdminDependencyPlugin({ nativeFiles }))
         nuxt.hook('vite:extendConfig', (config) => {
             if (config.resolve?.alias) {
-                config.resolve.alias = removeSiteAdminDependencyAliases(config.resolve.alias, dependencyAliases)
+                config.resolve.alias = removeSiteAdminDependencyAliases(
+                    config.resolve.alias,
+                    dependencyAliases,
+                    nativeFiles(),
+                )
             }
         })
         // Nitro invokes this before creating its alias plugin, for production and dev/watch alike.
         nuxt.hook('nitro:build:before', (instance) => {
-            instance.options.alias = removeSiteAdminDependencyAliases(instance.options.alias, dependencyAliases)
+            instance.options.alias = removeSiteAdminDependencyAliases(
+                instance.options.alias,
+                dependencyAliases,
+                nativeFiles(),
+            )
         })
         nuxt.hook('nitro:init', (nativeInstance) => {
             const instance = nativeInstance as unknown as Nitro
@@ -502,7 +534,7 @@ export default defineNuxtModule<ModuleConfig>({
         // Nuxt 4.6's renderer subpaths must be bundled so Nitro replaces their build stubs.
         ;(nitro.externals.inline ??= []).push('@liria24/site-admin', 'nuxt/internal')
         nitro.rollupConfig ??= {}
-        nitro.rollupConfig.plugins = [nitro.rollupConfig.plugins, createSiteAdminDependencyPlugin()]
+        nitro.rollupConfig.plugins = [nitro.rollupConfig.plugins, createSiteAdminDependencyPlugin({ nativeFiles })]
 
         let domainConfig: SiteAdminConfig | undefined
         let configPath: string | undefined
@@ -522,7 +554,11 @@ export default defineNuxtModule<ModuleConfig>({
                 // ponytail: watch the config entrypoints; imported helpers can use Nuxt's watch option.
                 nuxt.options.watch.push(...configFiles.map((path) => path.replaceAll('\\', '/')))
             }
-            const jiti = createJiti(import.meta.url, { alias: nuxt.options.alias, fsCache: false, moduleCache: false })
+            const jiti = createJiti(import.meta.url, {
+                alias: { ...nuxt.options.alias, ...filesConfigAliases },
+                fsCache: false,
+                moduleCache: false,
+            })
             const inputConfig = await jiti.import<SiteAdminConfigInput>(configPath, { default: true })
             domainConfig = resolveSiteAdminConfig(inputConfig, environments)
             // An existing standalone Files config owns all physical storage settings.
@@ -680,7 +716,7 @@ export default defineNuxtModule<ModuleConfig>({
       }
     }`
             : 'undefined'
-        const filesImport = domainConfig.assets ? `import { useServerFiles } from '#nuxt-files-sdk/runtime'` : ''
+        const filesImport = domainConfig.assets ? `import { useServerFiles } from 'nuxt-files-sdk/runtime'` : ''
         const filesOption = domainConfig.assets
             ? unnamedFilesStorage
                 ? `getFiles: async (name) => {

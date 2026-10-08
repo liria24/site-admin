@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('node:module', () => ({ findPackageJSON: () => '/consumer/package.json' }))
+vi.mock('node:module', async (importOriginal) => {
+    const original = await importOriginal<typeof import('node:module')>()
+    return {
+        findPackageJSON: (path: string | URL) =>
+            String(path).startsWith('file:///consumer/') ? '/consumer/package.json' : original.findPackageJSON(path),
+    }
+})
 
 const kit = vi.hoisted(() => ({
     install: vi.fn(),
@@ -35,6 +41,12 @@ vi.mock('nuxt/kit', () => ({
     installModule: kit.install,
 }))
 
+vi.mock('../packages/site-admin/src/nuxt/files-source', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../packages/site-admin/src/nuxt/files-source')>()
+    return { ...original, resolveSiteAdminFilesModulePath: () => fileURLToPath(import.meta.resolve('nuxt-files-sdk')) }
+})
+
+import { fileURLToPath } from 'node:url'
 import module from '../packages/site-admin/src/nuxt'
 
 const setup = async (

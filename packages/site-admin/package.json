@@ -127,7 +127,7 @@
         "h3": "^1.15.11",
         "jiti": "^2.7.0",
         "nitropack": "2.13.4",
-        "nuxt-files-sdk": "^0.1.1",
+        "nuxt-files-sdk": "^0.2.0",
         "nuxt-llms": "^0.2.0",
         "nuxt-og-image": "^6.10.3",
         "nuxt-schema-org": "^6.4.3",

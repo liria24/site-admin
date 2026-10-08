@@ -1,7 +1,8 @@
 import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { loadNuxtModuleInstance, resolveModuleWithOptions } from 'nuxt/kit'
+import { directoryToURL, loadNuxtModuleInstance, resolveModuleWithOptions, tryResolveModule } from 'nuxt/kit'
 import type { ModuleDependencies, Nuxt, NuxtModule } from 'nuxt/schema'
 
 import { moduleMeta } from '../meta'
@@ -26,6 +27,7 @@ export const allowGeneratedFilesConfig = (exclude: unknown, directory: string): 
 interface ConfiguredModule {
     module: NuxtModule
     inline: Record<string, unknown>
+    modulePath?: string
 }
 
 /** Resolve metadata and tuple options with Nuxt's own public loader, including function/path entries. */
@@ -33,12 +35,36 @@ const configuredModule = async (nuxt: Nuxt, name: string): Promise<ConfiguredMod
     for (const entry of nuxt.options.modules ?? []) {
         const resolved = resolveModuleWithOptions(entry, nuxt)
         if (!resolved) continue
-        const { nuxtModule } = await loadNuxtModuleInstance(resolved.module, nuxt)
+        const { nuxtModule, resolvedModulePath } = await loadNuxtModuleInstance(resolved.module, nuxt)
         if ((await nuxtModule.getMeta?.())?.name === name) {
-            return { module: nuxtModule, inline: resolved.options }
+            return {
+                module: nuxtModule,
+                inline: resolved.options,
+                ...(resolvedModulePath ? { modulePath: resolvedModulePath } : {}),
+            }
         }
     }
     return undefined
+}
+
+/** Use the actual configured native module owner, including a directly imported function. */
+export const resolveSiteAdminFilesModulePath = async (nuxt: Nuxt): Promise<string> => {
+    const configured = await configuredModule(nuxt, 'nuxt-files-sdk')
+    if (configured?.modulePath) return configured.modulePath
+    const roots = [nuxt.options.rootDir, ...nuxt.options.modulesDir.map((dir) => resolve(dir, '..'))]
+    const candidates = await Promise.all(
+        roots.map((root) => tryResolveModule('nuxt-files-sdk', [directoryToURL(root)])),
+    )
+    for (const path of [
+        ...new Set(
+            [...candidates, fileURLToPath(import.meta.resolve('nuxt-files-sdk'))].filter(
+                (candidate): candidate is string => Boolean(candidate),
+            ),
+        ),
+    ]) {
+        if (!configured || (await loadNuxtModuleInstance(path, nuxt)).nuxtModule === configured.module) return path
+    }
+    throw new Error('[site-admin] Cannot verify the configured native Files module owner.')
 }
 
 const topLevelFiles = (nuxt: Nuxt): { config?: unknown } | undefined =>

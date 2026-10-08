@@ -84,3 +84,25 @@ const productionImage: true = resolvedImage.seo.image.props.replacement
 void productionImage
 // @ts-expect-error An environment image override must be a complete component descriptor.
 defineSiteAdminConfig({ models: {}, $production: { seo: { image: { props: { title: 'Incomplete' } } } } })
+
+// Native 0.2 gateway callbacks use the public Nuxt RequestEvent, including inherited common storage.
+const gateway = defineSiteAdminConfig({
+    models: {},
+    storage: { content: { adapter: 'memory' } },
+    $production: {
+        routes: [
+            {
+                path: '/files',
+                storage: 'content',
+                authorize: ({ event }) => {
+                    const request: Request = event.req
+                    // @ts-expect-error Native request events do not expose H3 Node adapters.
+                    void event.node
+                    void request
+                    return undefined
+                },
+            },
+        ],
+    },
+})
+void gateway

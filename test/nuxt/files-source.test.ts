@@ -3,13 +3,15 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { defineNuxtModule, hasNuxtModule, loadNuxt } from 'nuxt/kit'
+import { defineNuxtModule, hasNuxtModule, loadNuxt, writeTypes } from 'nuxt/kit'
 import type { Nuxt } from 'nuxt/schema'
 import filesModule from 'nuxt-files-sdk'
+import siteAdminModule from '../../packages/site-admin/src/nuxt'
 import { afterEach, expect, test } from 'vite-plus/test'
 
 import {
     resolveSiteAdminFilesSource,
+    resolveSiteAdminFilesModulePath,
     siteAdminFilesModuleDependencies,
 } from '../../packages/site-admin/src/nuxt/files-source'
 
@@ -125,8 +127,16 @@ test.each(['function', 'package', 'path'] as const)(
             ]) {
                 const { nuxt, source } = await start(root, order, kind, options)
                 expect(source).toBe(resolve(root, options.expected))
-                const selected = await readFile(resolve(nuxt.options.buildDir, 'nuxt-files-sdk/selected.ts'), 'utf8')
-                expect(selected).toContain(JSON.stringify(options.expected))
+                expect(await resolveSiteAdminFilesModulePath(nuxt)).toBe(
+                    fileURLToPath(import.meta.resolve('nuxt-files-sdk')),
+                )
+                const selected = nuxt.options.build.templates.find(
+                    (template) => template.filename === 'nuxt-files-sdk/selected.ts',
+                )
+                expect(selected?.getContents).toBeTypeOf('function')
+                const getContents = selected!.getContents!
+                const contents = await getContents({} as Parameters<typeof getContents>[0])
+                expect(contents).toContain(JSON.stringify(options.expected))
                 await nuxt.close()
                 instances.splice(instances.indexOf(nuxt), 1)
             }
@@ -162,9 +172,9 @@ test('optional Files defaults never install or activate Files by themselves', as
 test('optional Files defaults preserve an explicitly disabled Files module', async () => {
     const root = await fixture()
     const { nuxt } = await start(root, 'before', 'function', { filesDisabled: true })
-    await expect(readFile(resolve(nuxt.options.buildDir, 'nuxt-files-sdk/selected.ts'), 'utf8')).rejects.toMatchObject({
-        code: 'ENOENT',
-    })
+    expect(
+        nuxt.options.build.templates.find((template) => template.filename === 'nuxt-files-sdk/selected.ts'),
+    ).toBeUndefined()
 })
 
 test('disabled SiteAdmin contributes no Files filename defaults', async () => {
@@ -188,3 +198,64 @@ test.each(['inline', 'top-level'] as const)(
         ).rejects.toThrow('Files configuration file does not exist')
     },
 )
+
+test.each(['disabled', 'inactive'] as const)(
+    'full Site Admin retains curated Files types when native Files is %s',
+    async (mode) => {
+        const root = await fixture()
+        await writeFile(resolve(root, 'site-admin.config.ts'), 'export default { models: {} }')
+        await writeFile(
+            resolve(root, 'files.config.ts'),
+            "export default { $development: { storage: { adapter: 'memory' } } }",
+        )
+        const overrides = {
+            modules: [filesModule, siteAdminModule],
+            files: mode === 'disabled' ? false : { devtools: false },
+            devtools: { enabled: false },
+            telemetry: false,
+            siteAdmin: {
+                auth: false,
+                devtools: false,
+                i18n: false,
+                llms: false,
+                ogImage: false,
+                robots: false,
+                schemaOrg: false,
+                seo: false,
+                sitemap: false,
+                routing: { enabled: false },
+            },
+        }
+        const nuxt = await loadNuxt({ cwd: root, dev: false, ready: false, overrides })
+        instances.push(nuxt)
+        await nuxt.ready()
+        expect(nuxt.options.alias['#nuxt-files-sdk/registry']).toBeUndefined()
+        expect(nuxt.options.alias['nuxt-files-sdk/runtime']).toBeUndefined()
+        await writeTypes(nuxt)
+        const config = JSON.parse(await readFile(resolve(nuxt.options.buildDir, 'tsconfig.server.json'), 'utf8')) as {
+            compilerOptions: { paths: Record<string, string[]> }
+        }
+        expect(config.compilerOptions.paths['#files-sdk/memory']?.[0]).toMatch(/index\.d\.ts$/u)
+    },
+)
+
+test('native common config template prunes inactive storage and keeps named environment overrides', async () => {
+    const root = await fixture()
+    await writeFile(
+        resolve(root, 'site-admin.config.ts'),
+        `export default {
+        storage: { content: { adapter: 'memory', prefix: 'active' } },
+        models: { secret: { fields: {} } },
+        database: () => { throw new Error('DOMAIN_SERVER_ONLY_SENTINEL') },
+        ai: { models: { secret: { suggest: () => 'AI_SERVER_ONLY_SENTINEL' } } },
+        $development: { storage: { content: { adapter: 'fs', config: { root: 'INACTIVE_FILES_SECRET_SENTINEL' } } } },
+        $env: { production: { storage: { content: { prefix: 'named-production' } } } },
+    }`,
+    )
+    const { nuxt } = await start(root, 'after', 'function')
+    const template = nuxt.options.build.templates.find((item) => item.filename === 'nuxt-files-sdk/selected.ts')!
+    const getContents = template.getContents!
+    const contents = await getContents({} as Parameters<typeof getContents>[0])
+    expect(contents).toContain('named-production')
+    expect(contents).not.toContain('INACTIVE_FILES_SECRET_SENTINEL')
+})
