@@ -14,6 +14,9 @@ const listen = (server) =>
         server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`))
     })
 const close = (server) => new Promise((resolve) => server.close(resolve))
+// Chromium descendants can finish profile writes after the owned process exits.
+export const removePublicDataConsumer = (directory) =>
+    rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 const stop = async (child) => {
     if (!child || child.exitCode !== null || child.signalCode !== null || !child.pid) return
     const exited = once(child, 'exit')
@@ -532,8 +535,7 @@ void [title, nodes, titles, batchTitle, batchCount]`,
     } finally {
         await stop(server)
         await close(backend)
-        if (process.env.SITE_ADMIN_KEEP_PUBLIC_DATA_CONSUMER !== '1')
-            await rm(directory, { recursive: true, force: true })
+        if (process.env.SITE_ADMIN_KEEP_PUBLIC_DATA_CONSUMER !== '1') await removePublicDataConsumer(directory)
         else console.log(`Public data consumer retained: ${directory}`)
     }
 }
