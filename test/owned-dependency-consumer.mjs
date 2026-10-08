@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/** Strict packed consumer: only Site Admin owns the eight public dependency namespaces. */
+/** Strict packed consumer: only Site Admin owns the seven public dependency namespaces. */
 export const verifyOwnedDependencies = async (tarball) => {
     const directory = await mkdtemp(join(tmpdir(), 'site-admin-owned-consumer-'))
     const run = (command, args, env = process.env) => {
@@ -57,11 +57,19 @@ const require = createRequire(import.meta.url)
 for (const name of Object.values(siteAdminDependencyModules)) assert.throws(() => require.resolve(name), { code: 'MODULE_NOT_FOUND' })
 const aliases = createSiteAdminDependencyAliases()
 const paths = createSiteAdminDependencyTypePaths()
-for (const id of ['#better-auth', '#better-auth/plugins', '#better-auth/client/plugins', '#nuxtjs/better-auth/config', '#nuxt-files-sdk/config', '#files-sdk/client', '#files-sdk/memory', '#drizzle-orm/sqlite-core', '#comark/parse', '#comark-content/client', '#ai']) {
+assert.equal(Object.keys(siteAdminDependencyModules).length, 7)
+assert.equal(Object.keys(aliases).length, 24)
+assert.deepEqual(Object.keys(paths), Object.keys(aliases))
+assert.equal(aliases['#drizzle-orm'], undefined)
+assert.equal(aliases['#drizzle-orm/sqlite-core'], undefined)
+assert.equal(paths['#drizzle-orm'], undefined)
+for (const id of ['#better-auth', '#better-auth/plugins', '#better-auth/client/plugins', '#nuxtjs/better-auth/config', '#nuxt-files-sdk/config', '#files-sdk/client', '#files-sdk/memory', '#comark/parse', '#comark-content/client', '#ai']) {
   assert.ok(aliases[id], id)
   assert.ok(paths[id], id)
 }
-assert.equal(aliases['#better-auth/nitro-compat'], undefined)
+for (const id of ['#better-auth/nitro-compat', '#better-auth/app-secret', '#nuxt-files-sdk/snapshot', '#nuxt-files-sdk/files']) assert.equal(aliases[id], undefined)
+assert.equal(aliases['#comark/plugins/emoji'], undefined)
+assert.equal(aliases['#comark/vue'], undefined)
 assert.equal(aliases['#better-auth/dist/index.mjs'], undefined)
 `,
         )
@@ -73,7 +81,7 @@ import { defineNuxtConfig } from 'nuxt/config'
 export default defineNuxtConfig({
   devtools: { enabled: false },
   modules: ['@liria24/site-admin/nuxt'],
-  siteAdmin: { i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false } },
+  siteAdmin: { auth: false, i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false } },
 })
 `,
         )
@@ -84,22 +92,29 @@ import { defineSiteAdminConfig, text } from '@liria24/site-admin'
 import { defineFilesConfig } from '#nuxt-files-sdk/config'
 import { parseMarkdown } from '#comark/parse'
 import type { BetterAuthOptions } from '#better-auth'
+import type { SiteAdminDatabase } from '@liria24/site-admin/adapter'
 const files = defineFilesConfig({ storage: { adapter: 'memory' } })
 const auth: Pick<BetterAuthOptions, 'emailAndPassword'> = { emailAndPassword: { enabled: true } }
 void auth; void parseMarkdown
+// Read-only empty protocol fixture, without an ORM, driver, connection or migration.
+const database: SiteAdminDatabase = {
+  dialect: 'sqlite',
+  async query() { return [] },
+  async atomic() { throw new Error('Owned consumer does not test database writes.') },
+  bind() {
+    return {
+      revisionSource: 'owned_consumer_revisions',
+      async assertSchema() {},
+      insertRevisionData() { throw new Error('Owned consumer does not test revision writes.') },
+    }
+  },
+}
 export default defineSiteAdminConfig({
   ...files, assets: {},
-  database: { connector: 'sqlite', schema: './schema.ts', filename: './.data/probe.sqlite' },
+  database,
   tasks: { publishDue: false, syncAssets: false, assetGC: false },
   models: { posts: { fields: { title: text({ required: true }) } } },
 })
-`,
-        )
-        await put(
-            'schema.ts',
-            `
-import { sqliteTable, text } from '#drizzle-orm/sqlite-core'
-export const probe = sqliteTable('owned_probe', { id: text('id').primaryKey() })
 `,
         )
         await put(
@@ -140,11 +155,14 @@ import { createFiles } from '#files-sdk'
 import { parseMarkdown } from '#comark/parse'
 import { generateText } from '#ai'
 import { defineEventHandler } from 'nuxt/server'
-export default defineEventHandler(async () => {
+import { useSiteAdmin } from '@liria24/site-admin/nuxt/server'
+export default defineEventHandler(async (event) => {
   const files = createFiles({ adapter: memory() })
   void files
   const parsed = await parseMarkdown('Owned dependencies')
-  return { owned: Boolean(parsed), ai: typeof generateText }
+  const siteAdmin = await useSiteAdmin(event)
+  const entries = await siteAdmin.listPublicEntries('posts')
+  return { owned: Boolean(parsed), ai: typeof generateText, models: Object.keys(siteAdmin.descriptor.models), empty: entries.length === 0 }
 })
 `,
         )
@@ -155,14 +173,12 @@ import type { BetterAuthOptions } from '#better-auth'
 import { defineServerAuth } from '#nuxtjs/better-auth/config'
 import { defineFilesConfig } from '#nuxt-files-sdk/config'
 import { createFilesClient } from '#files-sdk/client'
-import { sqliteTable, text } from '#drizzle-orm/sqlite-core'
 import { parseMarkdown } from '#comark/parse'
 import type { ContentClient } from '#comark-content/client'
 import { generateText } from '#ai'
 const auth: BetterAuthOptions = { emailAndPassword: { enabled: true } }
 const files = defineFilesConfig({ storage: { adapter: 'memory' } })
-const table = sqliteTable('type_probe', { id: text('id') })
-void auth; void files; void table; void defineServerAuth; void createFilesClient; void parseMarkdown; void generateText
+void auth; void files; void defineServerAuth; void createFilesClient; void parseMarkdown; void generateText
 export type ContentProbe = ContentClient
 `,
         )
@@ -178,8 +194,6 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
         run(process.execPath, [
             'node_modules/@liria24/site-admin/dist/cli.js',
             'generate',
-            '--auth',
-            'server/auth.config.ts',
             '--out',
             '.generated/schema.ts',
         ])
@@ -229,10 +243,21 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
         }
         if (!response?.ok) throw new Error(`Owned runtime probe failed.\n${logs.join('')}`)
         const result = await response.json()
-        if (!result.owned || result.ai !== 'function')
+        if (!result.owned || result.ai !== 'function' || !result.models?.includes('posts') || result.empty !== true)
             throw new Error('Owned native server imports returned unexpected result.')
+        const descriptorResponse = await fetch(`http://127.0.0.1:${port}/api/content/models`)
+        const descriptor = descriptorResponse.ok ? await descriptorResponse.json() : undefined
+        if (!descriptor?.models?.posts) throw new Error('Application-owned core adapter descriptor failed.')
+        const entriesResponse = await fetch(`http://127.0.0.1:${port}/api/content/posts`)
+        if (!entriesResponse.ok || JSON.stringify(await entriesResponse.json()) !== '[]') {
+            throw new Error('Application-owned empty core adapter list failed.')
+        }
+        const page = await fetch(`http://127.0.0.1:${port}/`)
+        if (!page.ok || !(await page.text()).includes('Owned dependencies')) {
+            throw new Error('Owned client imports did not render the SSR page.')
+        }
         console.log(
-            'Owned dependency packed consumer passed: nested install, CLI, native types, Nuxt app/server/node, browser/server build and runtime.',
+            'Owned dependency packed consumer passed: nested install, CLI, native types, Nuxt app/server/node, browser/server build and empty core-adapter runtime (auth sessions and database writes excluded).',
         )
     } finally {
         if (server && server.exitCode === null && server.signalCode === null) {

@@ -41,6 +41,22 @@ describe('Site Admin clients', () => {
         ])
     })
 
+    it('forwards caller AbortSignals through the public get/list/route transport', async () => {
+        const controller = new AbortController()
+        const signals: Array<AbortSignal | null | undefined> = []
+        const client = createSiteAdminClient<Record<string, PublicEntry>>({
+            fetch: async (input, init) => {
+                signals.push(init?.signal)
+                if (String(input).endsWith('/posts')) return Response.json([])
+                return Response.json(null, { status: 404 })
+            },
+        })
+        await client.get('posts', 'missing', { signal: controller.signal })
+        await client.list('posts', { signal: controller.signal })
+        await client.resolveRoute('/missing', { signal: controller.signal })
+        expect(signals).toEqual([controller.signal, controller.signal, controller.signal])
+    })
+
     it('matches management CRUD, publication, sort and revision HTTP routes without assuming mutation data', async () => {
         const calls: Array<{ body?: unknown; headers: Headers; method: string; url: string }> = []
         const client = createSiteAdminManagementClient<Record<string, Record<string, unknown>>>({
@@ -297,6 +313,13 @@ describe('Site Admin clients', () => {
         expect(source).toContain('useSiteAdminManagementClient')
         expect(source).toContain('useRequestFetch()')
         expect(source).not.toContain('@liria24/site-admin/form')
+        expect(source).toContain("import { createUseAsyncData } from '#app/composables/asyncData'")
+        expect(source).toContain('export const siteAdminAsyncData = createUseAsyncData()')
+        expect(source).toContain('return siteAdminAsyncData(() => key.value')
+        expect(source).not.toContain('async function useSiteAdminEntry')
+        expect(source).not.toContain('async function useSiteAdminList')
+        expect(source).not.toContain('__nuxt_factory')
+        expect(source).not.toContain('_createUseAsyncData')
         const form = siteAdminNuxtFormTemplate()
         expect(form).toContain("from '@liria24/site-admin/form'")
         expect(form).toContain('modelName: modelOrOptions')

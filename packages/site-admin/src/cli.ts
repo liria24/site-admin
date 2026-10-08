@@ -47,10 +47,10 @@ const auth = values.auth
     : undefined
 const source = auth
         ? await generateCombinedSchema(config, auth, {
-              usePlural: values['auth-use-plural'] ?? config.database?.authUsePlural ?? false,
+              usePlural: values['auth-use-plural'] ?? false,
           })
         : generateSiteAdminSchema(config),
-    output = resolve(values.out ?? config.database?.schema ?? 'schema.ts')
+    output = resolve(values.out ?? 'schema.ts')
 await mkdir(dirname(output), { recursive: true })
 await writeFile(output, source)
 console.log(`Generated ${output}. Run drizzle-kit generate to create SQL migrations; no database was modified.`)

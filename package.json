@@ -25,6 +25,7 @@
     },
     "devDependencies": {
         "@arethetypeswrong/cli": "^0.18.5",
+        "@better-auth/drizzle-adapter": "^1.7.7",
         "@liria24/site-admin": "workspace:*",
         "@nuxt/test-utils": "4.3.3",
         "@nuxtjs/better-auth": "^0.3.7",
@@ -37,6 +38,7 @@
         "cf": "1.0.0-beta.12",
         "comark": "^0.7.0",
         "db0": "^0.4.1",
+        "drizzle-kit": "1.0.0-rc.4",
         "drizzle-orm": "1.0.0-rc.4",
         "files-sdk": "^2.6.2",
         "h3": "^1.15.11",

@@ -8,7 +8,7 @@ const jiti = resolve('node_modules/jiti/lib/jiti-cli.mjs')
 const fields = resolve('packages/site-admin/src/fields.ts')
 
 describe('environment-resolved schema CLI', () => {
-    it('uses the common environment resolver and configured schema path without opening SQLite or D1', async () => {
+    it('resolves domain environments and explicit output without invoking the application database', async () => {
         await mkdir(resolve('.tmp'), { recursive: true })
         const path = await mkdtemp(resolve('.tmp/cli-generate-'))
         try {
@@ -16,18 +16,16 @@ describe('environment-resolved schema CLI', () => {
                 resolve(path, 'site-admin.config.ts'),
                 `import { text } from ${JSON.stringify(fields)}
 export default {
-  database: { connector: 'sqlite', schema: 'schema-base.ts', filename: 'never-open.sqlite' },
+  database: () => { throw new Error('The CLI must not invoke the application database') },
   models: { posts: { fields: { title: text() } } },
-  $development: { database: { schema: 'schema-development.ts' } },
   $production: {
-    database: { connector: 'd1', schema: 'schema-production.ts', binding: 'NEVER_RESOLVE', authUsePlural: true },
+    database: () => { throw new Error('The CLI must not resolve a production database') },
     models: { posts: { fields: { title: text({ required: true }) } } },
   },
   $env: { preview: {
-    database: { schema: 'schema-preview.ts' },
     models: { previews: { fields: { note: text() } } },
   } },
-  $prerender: { database: { schema: 'schema-prerender.ts' } },
+  $prerender: { models: { prerenders: { fields: { note: text() } } } },
 }
 `,
             )
@@ -38,26 +36,28 @@ export default {
                     encoding: 'utf8',
                 })
             expect(run('development')).toContain('no database was modified')
-            expect(await readFile(resolve(path, 'schema-development.ts'), 'utf8')).not.toContain(
-                'text("field_title").notNull()',
-            )
-            run('production')
+            expect(await readFile(resolve(path, 'schema.ts'), 'utf8')).not.toContain('text("field_title").notNull()')
+            run('production', ['--out', 'schema-production.ts'])
             expect(await readFile(resolve(path, 'schema-production.ts'), 'utf8')).toContain(
                 'text("field_title").notNull()',
             )
-            run('production', ['--env', 'preview'])
+            run('production', ['--env', 'preview', '--out', 'schema-preview.ts'])
             const preview = await readFile(resolve(path, 'schema-preview.ts'), 'utf8')
             expect(preview).toContain('site_admin_content_previews')
             expect(preview).toContain('text("field_title").notNull()')
-            run('production', ['--env', 'preview', '--prerender'])
-            expect(await readFile(resolve(path, 'schema-prerender.ts'), 'utf8')).toBe(preview)
+            run('production', ['--env', 'preview', '--prerender', '--out', 'schema-prerender.ts'])
+            expect(await readFile(resolve(path, 'schema-prerender.ts'), 'utf8')).toContain(
+                'site_admin_content_prerenders',
+            )
             run('production', ['--out', 'explicit/schema.ts'])
             expect(await readFile(resolve(path, 'explicit/schema.ts'), 'utf8')).toContain(
                 'text("field_title").notNull()',
             )
             await writeFile(resolve(path, 'auth.config.ts'), 'export default {}\n')
             run('production', ['--auth', 'auth.config.ts', '--out', 'schema-auth.ts'])
-            expect(await readFile(resolve(path, 'schema-auth.ts'), 'utf8')).toContain(
+            expect(await readFile(resolve(path, 'schema-auth.ts'), 'utf8')).toContain('export const user = sqliteTable')
+            run('production', ['--auth', 'auth.config.ts', '--auth-use-plural', '--out', 'schema-auth-plural.ts'])
+            expect(await readFile(resolve(path, 'schema-auth-plural.ts'), 'utf8')).toContain(
                 'export const users = sqliteTable',
             )
             expect(await readdir(path)).not.toContain('never-open.sqlite')

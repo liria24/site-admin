@@ -11,6 +11,7 @@ import nodeSqlite from 'db0/connectors/node-sqlite'
 import { generateFixtureSQL } from './generate-fixture.mjs'
 
 const fixture = fileURLToPath(new URL('./fixtures/nuxt/', import.meta.url))
+process.env.SITE_ADMIN_TEST_DATABASE = fixture + '/.data/content.sqlite3'
 const authSecret = 'site-admin-integration-test-secret-0000000000000000'
 process.env.NUXT_BETTER_AUTH_SECRET = authSecret
 process.env.NUXT_PUBLIC_SITE_URL = 'http://127.0.0.1:3000'
@@ -20,6 +21,8 @@ await Promise.all([
     rm(fileURLToPath(new URL('./fixtures/nuxt/.data/', import.meta.url)), { force: true, recursive: true }),
 ])
 
+// Generate source before native auth config inspection; applying SQL remains a separate application step.
+const migrationSQL = await generateFixtureSQL(domain, fixture + '/.data/schema')
 const devNuxt = await loadNuxt({ cwd: fixture, dev: true, ready: true })
 try {
     if (
@@ -34,7 +37,7 @@ try {
 }
 await rm(fileURLToPath(new URL('./fixtures/nuxt/.nuxt/', import.meta.url)), { force: true, recursive: true })
 const database = createDatabase(nodeSqlite({ path: fixture + '/.data/content.sqlite3' }))
-await database.exec(await generateFixtureSQL(domain, fixture + '/.data/schema'))
+await database.exec(migrationSQL)
 await database.dispose()
 
 const nuxt = await loadNuxt({ cwd: fixture, dev: false, ready: true })
@@ -185,7 +188,33 @@ try {
         !/property="og:type"[^>]+content="article"/u.test(seoHtml) ||
         !/name="twitter:card"[^>]+content="summary"/u.test(seoHtml)
     ) {
-        throw new Error(`Shared defineSeo SSR probe failed: ${seoResponse.status} ${seoHtml.slice(0, 1000)}`)
+        throw new Error(`Shared useSeo SSR probe failed: ${seoResponse.status} ${seoHtml.slice(0, 1000)}`)
+    }
+    const localizedSeoResponse = await fetch(`http://127.0.0.1:${port}/ja/seo-probe`)
+    const localizedSeoHtml = await localizedSeoResponse.text()
+    if (
+        !localizedSeoResponse.ok ||
+        !localizedSeoHtml.includes('<title>SEO helper probe</title>') ||
+        !/name="robots"[^>]+content="noindex, follow"/u.test(localizedSeoHtml) ||
+        localizedSeoHtml.includes('property="og:image"') ||
+        localizedSeoHtml.includes('name="twitter:image"')
+    ) {
+        throw new Error(
+            `Localized route useSeo clearing probe failed: ${localizedSeoResponse.status} ${localizedSeoHtml.slice(0, 1000)}`,
+        )
+    }
+    const publicDataResponse = await fetch(`http://127.0.0.1:${port}/public-data-probe`)
+    const publicDataHtml = await publicDataResponse.text()
+    if (
+        !publicDataResponse.ok ||
+        !publicDataHtml.includes('id="entry-title">こんにちは') ||
+        !publicDataHtml.includes('id="list-size">1') ||
+        !publicDataHtml.includes('id="transformed-title">Hello') ||
+        !publicDataHtml.includes('id="missing-entry">true')
+    ) {
+        throw new Error(
+            `Native public AsyncData SSR probe failed: ${publicDataResponse.status} ${publicDataHtml.slice(0, 1000)}`,
+        )
     }
     const redirect = await fetch(`http://127.0.0.1:${port}/go/external`, { redirect: 'manual' })
     if (redirect.status !== 302 || redirect.headers.get('location') !== 'https://example.com/destination') {

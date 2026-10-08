@@ -1,8 +1,7 @@
 import type { SiteAdminConfig } from './config'
-import { contentTableName, fieldStorage, validateContentNames } from './adapters/drizzle-tables'
+import { contentTableName, fieldStorage, validateContentNames } from './schema-model'
 import { commonSchemaSource } from './schema-template'
 import type { BetterAuthOptions } from 'better-auth'
-import { drizzleAdapter as authAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import { admin } from 'better-auth/plugins'
 
 type NativeAuthConfig =
@@ -15,6 +14,8 @@ export async function generateCombinedSchema(
     auth: NativeAuthConfig,
     options: { usePlural?: boolean } = {},
 ): Promise<string> {
+    // Optional schema tooling is loaded only by combined auth generation.
+    const { drizzleAdapter: authAdapter } = await import('@better-auth/drizzle-adapter/relations-v2')
     const resolved = typeof auth === 'function' ? auth({ db: undefined, runtimeConfig: {} }) : auth
     const authOptions: BetterAuthOptions = {
         ...resolved,

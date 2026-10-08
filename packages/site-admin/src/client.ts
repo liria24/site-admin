@@ -19,7 +19,7 @@ import type {
     SiteAdminInspection,
     UpdateEntryInput,
 } from './server/types'
-export type { PublicEntry } from './server/types'
+export type { PublicEntry, PublicEntrySeo, PublicEntrySeoImage, PublicEntrySeoValue } from './server/types'
 export type { PublicAsset } from './fields'
 export type { InferPublicModelData, InferSiteAdminModels, InferSiteAdminPublicModels } from './config'
 
@@ -76,6 +76,7 @@ export interface SiteAdminManagementClientOptions extends SiteAdminClientOptions
 
 export interface PublicListOptions {
     locale?: string
+    signal?: AbortSignal
 }
 
 export interface PublicRouteResult {
@@ -245,19 +246,24 @@ export const createSiteAdminClient = <
         get: (model: ModelName<Models>, slugOrId: string, requestOptions: PublicListOptions = {}) =>
             json<{ data: Record<string, unknown> }>(
                 `/${encodeURIComponent(model)}/${encodeURIComponent(slugOrId)}`,
-                { method: 'GET' },
+                { method: 'GET', ...(requestOptions.signal ? { signal: requestOptions.signal } : {}) },
                 { locale: requestOptions.locale },
                 true,
             ).then(entry),
         list: (model: ModelName<Models>, requestOptions: PublicListOptions = {}) =>
             json<Array<{ data: Record<string, unknown> }>>(
                 `/${encodeURIComponent(model)}`,
-                { method: 'GET' },
+                { method: 'GET', ...(requestOptions.signal ? { signal: requestOptions.signal } : {}) },
                 { locale: requestOptions.locale },
             ).then((items) => (items ?? []).map((item) => entry(item)!)),
         models: () => json<SiteAdminDescriptor>('/models', { method: 'GET' }) as Promise<SiteAdminDescriptor>,
         resolveRoute: (path, requestOptions = {}) =>
-            json<PublicRouteResult>('/_route', { method: 'GET' }, { locale: requestOptions.locale, path }, true),
+            json<PublicRouteResult>(
+                '/_route',
+                { method: 'GET', ...(requestOptions.signal ? { signal: requestOptions.signal } : {}) },
+                { locale: requestOptions.locale, path },
+                true,
+            ),
     } as SiteAdminClient<Models>
 }
 

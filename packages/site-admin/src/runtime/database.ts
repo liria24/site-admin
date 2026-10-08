@@ -1,73 +1,40 @@
-import { drizzleAdapter as authAdapter } from '@better-auth/drizzle-adapter/relations-v2'
-import type { BetterAuthOptions } from 'better-auth'
-import type { AnyRelations } from 'drizzle-orm'
-import { drizzleAdapter } from '../adapters/drizzle'
 import type { SiteAdminDatabase } from '../adapter'
 import { SiteAdminError } from '../errors'
 
+/** Structural native request shape, without a dependency on Nuxt or an ORM. */
+export interface SiteAdminDatabaseRequestEvent {
+    req: Request
+    context: Record<string, unknown>
+}
+
+export interface SiteAdminDatabaseContext {
+    request?: Request
+    event?: SiteAdminDatabaseRequestEvent
+    /** Explicit native task/platform context for work without an HTTP request. */
+    platformContext?: object
+}
+
+/** Applications own connections, drivers, schema, migrations, caching, and disposal. */
 export type SiteAdminDatabaseConfig =
-    | { connector: 'sqlite'; schema: string; filename?: string; authUsePlural?: boolean }
-    | { connector: 'd1'; schema: string; binding: string; authUsePlural?: boolean }
+    | SiteAdminDatabase
+    | ((context: SiteAdminDatabaseContext) => SiteAdminDatabase | Promise<SiteAdminDatabase>)
 
-export interface SiteAdminResolvedDatabases {
-    database: SiteAdminDatabase
-    authDatabase?: BetterAuthOptions['database']
-}
-
-export interface SiteAdminDatabaseResolver {
-    resolve(context?: object): Promise<SiteAdminResolvedDatabases>
-    /** Close only connections opened by the module, never application-owned bindings. */
-    close(): void
-}
-
-export interface SiteAdminDatabaseResolverOptions {
-    schema: Record<string, unknown>
-    auth?: boolean
-    authUsePlural?: boolean
-}
-
-/** Finalize the advanced hook result without mixing adapters from different connections. */
-export const finalizeSiteAdminDatabases = async <Context extends Partial<SiteAdminResolvedDatabases>>(
-    context: Context,
-    resolver?: SiteAdminDatabaseResolver,
-    options: { platformContext?: object; requireAuth?: boolean } = {},
-): Promise<Context & SiteAdminResolvedDatabases> => {
-    if (!context.database && context.authDatabase)
+/** Invoke the application adapter only; never open, close, or migrate its database. */
+export const resolveSiteAdminDatabase = async (
+    config: SiteAdminDatabaseConfig | undefined,
+    context: SiteAdminDatabaseContext = {},
+): Promise<SiteAdminDatabase> => {
+    const database = typeof config === 'function' ? await config(context) : config
+    if (
+        !database ||
+        database.dialect !== 'sqlite' ||
+        typeof database.query !== 'function' ||
+        typeof database.atomic !== 'function' ||
+        typeof database.bind !== 'function'
+    )
         throw new SiteAdminError(
             'SITE_ADMIN_DATABASE_UNSUPPORTED',
-            '[site-admin] A site-admin:database hook that provides authDatabase must also provide database.',
+            '[site-admin] Provide an application-owned SiteAdminDatabase adapter in database or the site-admin:database hook.',
         )
-    if (!context.database && resolver) Object.assign(context, await resolver.resolve(options.platformContext))
-    if (!context.database)
-        throw new SiteAdminError(
-            'SITE_ADMIN_DATABASE_UNSUPPORTED',
-            '[site-admin] Configure a SQLite/D1 database or provide an adapter through the site-admin:database hook.',
-        )
-    if (options.requireAuth && !context.authDatabase)
-        throw new SiteAdminError(
-            'SITE_ADMIN_DATABASE_UNSUPPORTED',
-            '[site-admin] The site-admin:database hook must provide authDatabase from the same connection when authentication is enabled.',
-        )
-    return context as Context & SiteAdminResolvedDatabases
+    return database
 }
-
-/** Generated Better Auth relations belong to the application's combined schema. */
-export const authRelations = (schema: Record<string, unknown>): AnyRelations =>
-    (schema.authRelations ?? {}) as AnyRelations
-
-export const resolveDrizzleDatabases = (
-    database: Parameters<typeof drizzleAdapter>[0],
-    options: SiteAdminDatabaseResolverOptions,
-): SiteAdminResolvedDatabases => ({
-    database: drizzleAdapter(database, { schema: options.schema }),
-    ...(options.auth
-        ? {
-              authDatabase: authAdapter(database, {
-                  provider: 'sqlite',
-                  schema: options.schema,
-                  transaction: false,
-                  usePlural: options.authUsePlural ?? false,
-              }),
-          }
-        : {}),
-})

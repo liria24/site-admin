@@ -23,7 +23,6 @@ describe('Site Admin owned dependency namespaces', () => {
             '#nuxtjs/better-auth',
             '#nuxt-files-sdk',
             '#files-sdk',
-            '#drizzle-orm',
             '#comark',
             '#comark-content',
             '#ai',
@@ -32,6 +31,11 @@ describe('Site Admin owned dependency namespaces', () => {
         const context = { resolve: async () => ({ id: '/owned/entry.mjs', external: false }) }
         for (const id of [
             '#auth/server',
+            '#drizzle-orm',
+            '#drizzle-orm/sqlite-core',
+            '#better-auth/plugins/username',
+            '#comark/plugins/emoji',
+            '#comark/vue',
             '#better-auth/nitro-compat',
             '#better-auth/app-secret',
             '#nuxt-files-sdk/snapshot',
@@ -64,10 +68,10 @@ describe('Site Admin owned dependency namespaces', () => {
             { '#nuxtjs': '/app/modules' },
             { '#files-sdk/*': ['/app/types/*'] },
             [{ find: /^#ai(?:\/|$)/u, replacement: '/app/ai' }],
-            [{ find: /^#files-sdk\/s3$/u, replacement: '/app/s3' }],
+            [{ find: /^#files-sdk\/r2$/u, replacement: '/app/s3' }],
             { 'better-auth': '/app/other-auth.ts' },
             { '@nuxtjs/better-auth/config': '/app/config.ts' },
-            [{ find: /^files-sdk\/s3$/u, replacement: '/app/s3' }],
+            [{ find: /^files-sdk\/r2$/u, replacement: '/app/s3' }],
         ])
             expect(() => assertSiteAdminDependencyAliasConflicts(aliases)).toThrow('conflicts with existing alias')
         expect(() =>
@@ -77,6 +81,8 @@ describe('Site Admin owned dependency namespaces', () => {
                 '#nuxt-files-sdk/snapshot': '/native/snapshot',
                 '#auth/client': '/app/auth.ts',
                 '#ai-tools': '/app/ai-tools.ts',
+                '#drizzle-orm': '/app/drizzle.ts',
+                'drizzle-orm/sqlite-core': '/app/schema.ts',
             }),
         ).not.toThrow()
         expect(() =>
@@ -102,9 +108,8 @@ import { adminClient } from '#better-auth/client/plugins'
 import { admin } from '#better-auth/plugins'
 import { defineServerAuth } from '#nuxtjs/better-auth/config'
 import { defineFilesConfig } from '#nuxt-files-sdk/config'
-import { sqliteTable } from '#drizzle-orm/sqlite-core'
 import { parseMarkdown } from '#comark/parse'
-export default [adminClient, admin, defineServerAuth, defineFilesConfig, sqliteTable, parseMarkdown].map(value => typeof value)
+export default [adminClient, admin, defineServerAuth, defineFilesConfig, parseMarkdown].map(value => typeof value)
 `,
             )
             expect(
@@ -114,7 +119,10 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, sqliteT
                         default: true,
                     },
                 ),
-            ).toEqual(Array.from({ length: 6 }, () => 'function'))
+            ).toEqual(Array.from({ length: 5 }, () => 'function'))
+            for (const id of ['#better-auth/cookies', '#better-auth/dist/index.mjs', '#comark/plugins/emoji']) {
+                expect(() => createJiti(import.meta.url, { alias: aliases })(id)).toThrow()
+            }
         } finally {
             await rm(root, { recursive: true, force: true })
         }
@@ -138,14 +146,22 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, sqliteT
         ).toEqual({})
     })
 
-    it('derives declarations and wildcard subpaths from installed exports instead of wrapper types', () => {
+    it('exposes only the 24 curated entries with native declaration types', () => {
+        const aliases = createSiteAdminDependencyAliases()
         const paths = createSiteAdminDependencyTypePaths()
+        expect(Object.keys(aliases)).toHaveLength(24)
+        expect(Object.keys(paths)).toEqual(Object.keys(aliases))
+        expect(Object.keys(aliases).some((id) => id.includes('*'))).toBe(false)
         expect(paths['#better-auth']?.[0]).toMatch(/\/better-auth\/dist\/index\.d\.mts$/u)
         expect(paths['#better-auth/client/plugins']?.[0]).toMatch(/\/client\/plugins\/index\.d\.mts$/u)
         expect(paths['#nuxtjs/better-auth/config']?.[0]).toMatch(/\.d\.ts$/u)
         expect(paths['#files-sdk/r2']?.[0]).toMatch(/\.d\.ts$/u)
-        expect(paths['#drizzle-orm/sqlite-core']?.[0]).toMatch(/\.d\.ts$/u)
-        expect(paths['#comark/plugins/emoji']?.[0]).toMatch(/\.d\.ts$/u)
+        expect(paths['#drizzle-orm']).toBeUndefined()
+        expect(paths['#drizzle-orm/sqlite-core']).toBeUndefined()
+        expect(paths['#comark/plugins/security']?.[0]).toMatch(/\.d\.ts$/u)
+        expect(paths['#comark/plugins/summary']?.[0]).toMatch(/\.d\.ts$/u)
+        expect(paths['#comark/plugins/emoji']).toBeUndefined()
+        expect(paths['#comark/vue']).toBeUndefined()
         expect(paths['#comark-content/client']?.[0]).toMatch(/\.d\.ts$/u)
         expect(paths['#ai']?.[0]).toMatch(/\.d\.ts$/u)
         expect(paths['#better-auth/nitro-compat']).toBeUndefined()
@@ -185,6 +201,7 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, sqliteT
                                 import: './import.js',
                                 require: './require.cjs',
                             },
+                            './plugins': './plugins/public.js',
                             './plugins/*': './plugins/*.js',
                             './plugins/private': null,
                         },
@@ -229,7 +246,7 @@ const required = await createJiti(${JSON.stringify(helper)}, { alias: createSite
   }
   let blocked = false
   try { createJiti(${JSON.stringify(helper)}, { alias: aliases })('#better-auth/plugins/private') } catch { blocked = true }
-  console.log(JSON.stringify({ imported, required, browser: results[0], server: results[1], publicType: types['#better-auth/plugins/public'], privateType: types['#better-auth/plugins/private'], blocked }))
+  console.log(JSON.stringify({ imported, required, browser: results[0], server: results[1], publicType: types['#better-auth/plugins'], privateType: types['#better-auth/plugins/private'], unlistedType: types['#better-auth/plugins/public'], blocked }))
 `,
                 ],
                 { encoding: 'utf8', cwd: app, timeout: 20_000 },
@@ -241,6 +258,7 @@ const required = await createJiti(${JSON.stringify(helper)}, { alias: createSite
                 server: string
                 publicType: string[]
                 privateType?: string[]
+                unlistedType?: string[]
                 blocked: boolean
             }
             expect(result.imported).toBe('owned-import')
@@ -250,6 +268,7 @@ const required = await createJiti(${JSON.stringify(helper)}, { alias: createSite
             expect(result.browser + result.server).not.toContain('consumer-version')
             expect(result.publicType[0]).toContain('/owner/node_modules/better-auth/plugins/public.d.ts')
             expect(result.privateType).toBeUndefined()
+            expect(result.unlistedType).toBeUndefined()
             expect(result.blocked).toBe(true)
         } finally {
             await rm(root, { recursive: true, force: true })

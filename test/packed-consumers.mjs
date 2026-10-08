@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 import { verifyStandalone } from './standalone-consumer.mjs'
 import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
+import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
@@ -124,6 +125,7 @@ try {
     if (packageManager === 'npm') {
         await verifyStandalone(tarball)
         await verifyOwnedDependencies(tarball)
+        await verifyPublicDataConsumer(tarball)
     }
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
     await writeFile(

@@ -9,6 +9,7 @@ const kit = vi.hoisted(() => ({
     templates: [] as Array<{ filename: string; getContents: () => string }>,
     handlers: [] as Array<{ route: string }>,
     nitro: {} as import('nitropack/types').NitroConfig,
+    publicConfig: {} as Record<string, unknown>,
     plugins: [] as Array<
         ReturnType<typeof import('../packages/site-admin/src/dependency-aliases').createSiteAdminDependencyPlugin>
     >,
@@ -69,6 +70,8 @@ const setup = async (
                 modulesDir: [],
                 alias: { '@liria24/site-admin': `${process.cwd()}/packages/site-admin/src/index.ts`, ...aliases },
                 typescript,
+                optimization: { keyedComposables: [] },
+                runtimeConfig: { public: kit.publicConfig },
                 nitro: kit.nitro,
                 dev: false,
             },
@@ -88,6 +91,7 @@ describe('native Better Auth integration', () => {
         kit.has.mockReset().mockReturnValue(true)
         kit.resolve.mockReset().mockResolvedValue(undefined)
         kit.nitro = {}
+        kit.publicConfig = {}
     })
 
     it('prefers consumer modules, falls back only on resolution failure, and preserves setup errors', async () => {
@@ -106,7 +110,9 @@ describe('native Better Auth integration', () => {
     })
 
     it('registers matching server/client permissions and a request-scoped database provider', async () => {
-        const hook = await setup(true)
+        const hook = await setup(true, undefined, (config) => {
+            delete config.database
+        })
         const filenames = kit.templates.map(({ filename }) => filename)
         expect(filenames).toContain('site-admin/better-auth-server-plugin.mjs')
         expect(filenames).toContain('site-admin/better-auth-client-plugin.mjs')
@@ -137,6 +143,29 @@ describe('native Better Auth integration', () => {
         expect(runtime).toContain('await getRequestSession(getNitroRequest(event))')
         expect(runtime).toContain('if (!session) return null')
         expect(kit.handlers.some(({ route }) => route === '/api/site-admin/**')).toBe(true)
+    })
+
+    it('leaves application-owned auth providers intact with a direct content adapter resolver', async () => {
+        const hook = await setup(true)
+        expect(hook.mock.calls.some(([name]) => name === 'better-auth:database:providers')).toBe(false)
+        const runtime = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
+        expect(runtime).toContain('resolveSiteAdminDatabase(context.database ?? domainConfig.database')
+        expect(runtime).not.toContain('database-sqlite')
+        expect(runtime).not.toContain('database-d1')
+    })
+
+    it('serializes only approved SEO defaults and rules into public config', async () => {
+        await setup(false, undefined, (config) => {
+            config.seo = { titleTemplate: '%s | Public', image: false }
+            config.routeRules = { '/ja/posts/**': { seo: { type: 'article' }, sitemap: false } }
+            Object.assign(config.seo, { secret: 'SERVER_ONLY_GLOBAL_SENTINEL', callback: () => 'PRIVATE' })
+            Object.assign(config.routeRules['/ja/posts/**']!, { database: 'SERVER_ONLY_RULE_SENTINEL' })
+        })
+        expect(kit.publicConfig.siteAdmin).toEqual({
+            seo: { titleTemplate: '%s | Public', image: false },
+            routeRules: { '/ja/posts/**': { seo: { type: 'article' }, sitemap: false } },
+        })
+        expect(JSON.stringify(kit.publicConfig)).not.toContain('SERVER_ONLY')
     })
 
     it('enables authentication and i18n by default', () => {

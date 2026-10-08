@@ -35,7 +35,9 @@ export const useSiteAdminRuntime = (): SiteAdminRuntime => {
     return runtime
 }
 
-/** Background tasks may omit the event; pass native platform context for D1 bindings. */
+/** Background database tasks may omit the event and pass native platform context for bindings.
+ * This context resolves the database only; AI operations receive their own explicit context.
+ */
 export const useSiteAdmin = async (event?: RequestEvent, platformContext?: object): Promise<SiteAdmin<RequestEvent>> =>
     useSiteAdminRuntime().getSiteAdmin(event, platformContext)
 

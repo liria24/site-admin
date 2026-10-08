@@ -1,7 +1,7 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import type { MarkdownDocument, ParserOptions } from 'comark'
 import type { FilesEnvironmentConfig, FilesConfigInput, defineFilesConfig } from 'nuxt-files-sdk/config'
-import type { SiteAdminAIAction, SiteAdminWorkersAIConfig } from './ai'
+import type { SiteAdminAIAction, SiteAdminAIModel } from './ai'
 import type { SiteAdminDatabaseConfig } from './runtime/database'
 import type { SiteAdminTaskOptions } from './runtime/tasks'
 
@@ -15,7 +15,23 @@ import type {
     PublicAsset,
     RelationField,
 } from './fields'
-import type { PublicEntry } from './server/types'
+import type { PublicEntry, PublicEntrySeo } from './server/types'
+import type { SiteAdminRouteRules } from './seo'
+
+export type SiteAdminSeoOptions = PublicEntrySeo
+
+/** Resolvers run synchronously on the server's public projection, before Markdown parsing. */
+export type ModelSeoOptions<Fields extends FieldRecord = FieldRecord> =
+    | PublicEntrySeo
+    | {
+          resolve(
+              entry: PublicEntry<
+                  string extends keyof Fields
+                      ? Record<string, unknown>
+                      : PublicFields<Fields, Record<string, ModelDefinition>, false>
+              >,
+          ): PublicEntrySeo
+      }['resolve']
 
 export interface ModelRouteOptions {
     /** Concrete paths are produced by replacing `:slug`. Defaults to `/<model>/:slug`. */
@@ -45,6 +61,7 @@ export interface ModelOptions<Fields extends FieldRecord = FieldRecord> {
     /** Public projection is independent from whether the model owns routes. */
     public?: boolean
     route?: boolean | ModelRouteOptions | string
+    seo?: ModelSeoOptions<Fields>
     sortable?: boolean
     validate?: StandardSchemaV1<unknown, InferFields<Fields>>
 }
@@ -59,11 +76,13 @@ export interface SiteAdminLifecycleEvent {
     type: 'create' | 'delete' | 'publish' | 'restore' | 'schedule' | 'unpublish' | 'update'
 }
 
-export type SiteAdminAIConfig = {
-    /** Server-only custom suggestion actions. Provider and model instances stay in this config. */
+export interface SiteAdminAIConfig {
+    /** Application-owned SDK model or request/task resolver. Never exposed to the client. */
+    model?: SiteAdminAIModel
+    /** Server-only custom suggestion actions. */
     models?: Record<string, Record<string, SiteAdminAIAction>>
     slug?: (input: { data: Record<string, unknown>; model: string }) => Promise<string | null> | string | null
-} & (SiteAdminWorkersAIConfig | { provider?: never; model?: never; binding?: never })
+}
 
 export type SiteAdminModelAction =
     | 'ai'
@@ -111,7 +130,7 @@ export interface SiteAdminConfig<
         storage?: string
     }
     authorization?: SiteAdminAuthorization
-    /** Connection only. Generating and applying migrations remains the application's responsibility. */
+    /** Application-owned adapter or resolver. Site Admin never owns the connection or migrations. */
     database?: SiteAdminDatabaseConfig
     hooks?: {
         afterCommit?: (event: SiteAdminLifecycleEvent) => Promise<void> | void
@@ -129,17 +148,30 @@ export interface SiteAdminConfig<
         slug?: { maxLength?: number }
     }
     models: Models
+    /** Published route options matched against actual localized paths, from broad to specific. */
+    routeRules?: SiteAdminRouteRules
+    /** Shared page defaults. Model resolvers are server-only and are never exposed as configuration. */
+    seo?: SiteAdminSeoOptions
     /** Explicit opt-in: true permits manual invocation; a cron string also schedules the task. */
     tasks?: SiteAdminTaskOptions
 }
 
-type EnvironmentOverride<Value> = Value extends (...args: never[]) => unknown
+type OpaqueConfigPath =
+    | readonly ['database']
+    | readonly ['ai', 'model']
+    | readonly ['seo', 'image']
+    | readonly ['models', PropertyKey, 'seo', 'image']
+    | readonly ['routeRules', PropertyKey, 'seo', 'image']
+
+type EnvironmentOverride<Value, Path extends readonly PropertyKey[] = []> = Path extends OpaqueConfigPath
     ? Value
-    : Value extends readonly unknown[]
+    : Value extends (...args: never[]) => unknown
       ? Value
-      : Value extends object
-        ? { [Key in keyof Value]?: EnvironmentOverride<Value[Key]> }
-        : Value
+      : Value extends readonly unknown[]
+        ? Value
+        : Value extends object
+          ? { [Key in keyof Value]?: EnvironmentOverride<Value[Key], [...Path, Key]> }
+          : Value
 
 export type SiteAdminConfigInput<Models extends Record<string, ModelDefinition> = Record<string, ModelDefinition>> =
     SiteAdminConfig<Models> & {
@@ -173,23 +205,34 @@ type FilesInputCheck<Config> = Omit<NativeFilesCheck<Config>, '$env'> &
           }
         : unknown)
 
-export const defineSiteAdminConfig = <const Config extends SiteAdminConfigInput>(
-    config: Config & (Config extends FilesInputCheck<NoInfer<Config>> ? unknown : FilesInputCheck<NoInfer<Config>>),
-): Config => config
+type ConfigModels<Fields extends Record<string, FieldRecord>> = {
+    [Name in keyof Fields]: ModelOptions<Fields[Name]>
+}
 
-type MergeEnvironment<Base, Override> = Override extends (...args: never[]) => unknown
+export const defineSiteAdminConfig = <const Fields extends Record<string, FieldRecord>, const Config extends object>(
+    config: Config &
+        Omit<SiteAdminConfigInput, 'models'> & { models: ConfigModels<Fields> } & (Config extends FilesInputCheck<
+            NoInfer<Config>
+        >
+            ? unknown
+            : FilesInputCheck<NoInfer<Config>>),
+): Config & { models: ConfigModels<Fields> } => config
+
+type MergeEnvironment<Base, Override, Path extends readonly PropertyKey[] = []> = Path extends OpaqueConfigPath
     ? Override
-    : Override extends readonly unknown[]
+    : Override extends (...args: never[]) => unknown
       ? Override
-      : Override extends object
-        ? Base extends object
-            ? Omit<Base, keyof Override> & {
-                  [Key in keyof Override]: Key extends keyof Base
-                      ? MergeEnvironment<Base[Key], Override[Key]>
-                      : Override[Key]
-              }
-            : Override
-        : Override
+      : Override extends readonly unknown[]
+        ? Override
+        : Override extends object
+          ? Base extends object
+              ? Omit<Base, keyof Override> & {
+                    [Key in keyof Override]: Key extends keyof Base
+                        ? MergeEnvironment<Base[Key], Override[Key], [...Path, Key]>
+                        : Override[Key]
+                }
+              : Override
+          : Override
 
 type EnvironmentBranch<Config, Name extends string> =
     ConfigProperty<Config, `$${Name}`> extends infer Branch ? (Branch extends object ? Branch : {}) : {}

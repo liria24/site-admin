@@ -55,6 +55,27 @@ describe('common Site Admin configuration', () => {
         expect(resolved.markdown?.plugins).toEqual([])
     })
 
+    it('replaces complete SEO image descriptors across environment layers without mixing component props', () => {
+        const base = { component: 'Development', props: { old: true }, options: { width: 800 } }
+        const replacement = { component: 'Production', props: { fresh: true } }
+        const resolved = resolveSiteAdminConfig(
+            defineSiteAdminConfig({
+                models: { posts: { fields: {}, seo: { image: base } } },
+                seo: { image: base },
+                routeRules: { '/posts/**': { seo: { image: base } } },
+                $production: {
+                    seo: { image: replacement },
+                    models: { posts: { seo: { image: replacement } } },
+                    routeRules: { '/posts/**': { seo: { image: replacement } } },
+                },
+            }),
+            ['production'],
+        )
+        expect(resolved.seo.image).toEqual(replacement)
+        expect(resolved.models.posts.seo.image).toEqual(replacement)
+        expect(resolved.routeRules['/posts/**'].seo.image).toEqual(replacement)
+    })
+
     it('infers a sole storage while requiring an explicit reference for multiple storages', () => {
         expect(resolveSiteAdminAssets(config.assets, config)?.storage).toBe('content')
         expect(resolveSiteAdminAssets({}, { storage: { adapter: 'fs', config: { root: '/tmp/test' } } })?.storage).toBe(

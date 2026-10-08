@@ -8,11 +8,20 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 // Domain values merge recursively; arrays replace, functions and instances keep identity.
 // Files SDK independently resolves physical storage/providers from its selected source file.
-const mergeDomainValues = (override: unknown, base: unknown): unknown => {
+const mergeDomainValues = (override: unknown, base: unknown, path: string[] = []): unknown => {
     if (override === undefined) return base
+    // Adapters and SDK models are application-owned opaque values, never method bags to merge.
+    const seoImage =
+        (path.length === 2 && path[0] === 'seo' && path[1] === 'image') ||
+        (path.length === 4 &&
+            (path[0] === 'models' || path[0] === 'routeRules') &&
+            path[2] === 'seo' &&
+            path[3] === 'image')
+    if (path[0] === 'database' || (path[0] === 'ai' && path[1] === 'model') || seoImage) return override
     if (!isRecord(override) || !isRecord(base)) return override
     const result: Record<string, unknown> = { ...base }
-    for (const [key, value] of Object.entries(override)) result[key] = mergeDomainValues(value, result[key])
+    for (const [key, value] of Object.entries(override))
+        result[key] = mergeDomainValues(value, result[key], [...path, key])
     return result
 }
 

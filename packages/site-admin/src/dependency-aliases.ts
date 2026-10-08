@@ -1,5 +1,5 @@
-import { existsSync, globSync, readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveModulePath } from 'exsolve'
 
@@ -9,11 +9,28 @@ export const siteAdminDependencyModules = {
     '#nuxtjs/better-auth': '@nuxtjs/better-auth',
     '#nuxt-files-sdk': 'nuxt-files-sdk',
     '#files-sdk': 'files-sdk',
-    '#drizzle-orm': 'drizzle-orm',
     '#comark': 'comark',
     '#comark-content': 'comark-content',
     '#ai': 'ai',
 } as const
+
+// Small public contract, limited to consumer configuration and integration entrypoints.
+const publicSubpaths: Record<keyof typeof siteAdminDependencyModules, readonly string[]> = {
+    '#better-auth': ['', '/api', '/plugins', '/client', '/client/plugins', '/vue'],
+    '#nuxtjs/better-auth': ['', '/config'],
+    '#nuxt-files-sdk': ['', '/config', '/runtime'],
+    '#files-sdk': ['', '/client', '/vue', '/memory', '/r2', '/fs'],
+    '#comark': ['', '/parse', '/plugins/security', '/plugins/summary'],
+    '#comark-content': ['', '/client'],
+    '#ai': [''],
+}
+const publicSpecifiers = new Map(
+    Object.entries(siteAdminDependencyModules).flatMap(([namespace, name]) =>
+        publicSubpaths[namespace as keyof typeof publicSubpaths].map(
+            (subpath) => [namespace + subpath, name + subpath] as const,
+        ),
+    ),
+)
 
 // These installed modules own exact private IDs inside otherwise public namespaces.
 const privateModuleIds = new Set([
@@ -24,14 +41,8 @@ const privateModuleIds = new Set([
 ])
 const owner = fileURLToPath(import.meta.url)
 type AliasEntries = Record<string, unknown> | ReadonlyArray<{ find: string | RegExp; replacement: string }>
-let exportedDependencyIds: string[] | undefined
 
-const dependencySpecifier = (id: string): string | undefined => {
-    if (privateModuleIds.has(id)) return
-    for (const [alias, name] of Object.entries(siteAdminDependencyModules)) {
-        if (id === alias || id.startsWith(`${alias}/`)) return name + id.slice(alias.length)
-    }
-}
+const dependencySpecifier = (id: string): string | undefined => publicSpecifiers.get(id)
 
 /** Refuse namespace collisions rather than silently replacing application/module configuration. */
 export const assertSiteAdminDependencyAliasConflicts = (aliases: AliasEntries = {}): void => {
@@ -48,9 +59,9 @@ export const assertSiteAdminDependencyAliasConflicts = (aliases: AliasEntries = 
                           name,
                           `${namespace}/__site_admin_export__`,
                           `${name}/__site_admin_export__`,
-                          ...(exportedDependencyIds ??= Object.keys(ownedExportPaths(['types', 'node', 'import'])))
-                              .filter((id) => id.startsWith(`${namespace}/`))
-                              .flatMap((id) => [id, name + id.slice(namespace.length)]),
+                          ...[...publicSpecifiers]
+                              .filter(([id]) => id.startsWith(`${namespace}/`))
+                              .flatMap(([id, specifier]) => [id, specifier]),
                       ].some((id) => {
                           key.lastIndex = 0
                           return key.test(id)
@@ -112,13 +123,6 @@ export const createSiteAdminDependencyPlugin = (options: { aliases?: () => Alias
     },
 })
 
-type ExportTarget = string | null | ExportTarget[] | { [condition: string]: ExportTarget }
-const targets = (target: ExportTarget): string[] => {
-    if (typeof target === 'string') return [target]
-    if (!target) return []
-    return Object.values(target).flatMap(targets)
-}
-
 const declarationPath = (path: string): string => {
     if (/\.d\.(?:ts|mts|cts)$/u.test(path)) return path
     const extension = /\.(?:js|mjs|cjs)$/u.exec(path)?.[0]
@@ -129,63 +133,19 @@ const declarationPath = (path: string): string => {
     return declarations.map((suffix) => stem + suffix).find(existsSync) ?? path
 }
 
-const dependencyManifest = (name: string): string => {
-    let directory = dirname(resolveModulePath(name, { from: import.meta.url }))
-    for (;;) {
-        const path = resolve(directory, 'package.json')
-        if (existsSync(path)) {
-            const manifest = JSON.parse(readFileSync(path, 'utf8')) as { name?: string }
-            if (manifest.name === name) return path
-        }
-        const parent = dirname(directory)
-        if (parent === directory) throw new Error(`[site-admin] Cannot find owned dependency manifest ${name}.`)
-        directory = parent
-    }
-}
-
 const ownedExportPaths = (conditions: string[]): Record<string, string> => {
     const paths: Record<string, string> = {}
-    for (const [namespace, name] of Object.entries(siteAdminDependencyModules)) {
-        const manifestPath = dependencyManifest(name)
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { exports: ExportTarget }
-        const exports =
-            manifest.exports &&
-            typeof manifest.exports === 'object' &&
-            !Array.isArray(manifest.exports) &&
-            Object.keys(manifest.exports).some((key) => key.startsWith('.'))
-                ? manifest.exports
-                : { '.': manifest.exports }
-        const root = dirname(manifestPath)
-        const subpaths = new Set<string>()
-        for (const [key, target] of Object.entries(exports)) {
-            if (!key.includes('*')) {
-                subpaths.add(key)
-                continue
-            }
-            for (const pattern of targets(target)) {
-                if (!pattern.startsWith('./') || !pattern.includes('*')) continue
-                const [prefix, suffix = ''] = pattern.split('*')
-                for (const file of globSync(pattern.replaceAll('*', '**/*'), { cwd: root })) {
-                    const path = `./${file.replaceAll('\\', '/')}`
-                    if (!path.startsWith(prefix!) || !path.endsWith(suffix)) continue
-                    const match = path.slice(prefix!.length, suffix ? -suffix.length : undefined)
-                    subpaths.add(key.replaceAll('*', match))
-                }
-            }
-        }
-        for (const subpath of subpaths) {
-            const suffix = subpath === '.' ? '' : subpath.slice(1)
-            const alias = namespace + suffix
-            if (privateModuleIds.has(alias)) continue
-            // Re-resolve even expanded wildcard candidates; blocked/conditional exports stay blocked.
-            const path = resolveModulePath(name + suffix, { from: import.meta.url, conditions, try: true })
-            if (path) paths[alias] = path
-        }
+    for (const [alias, specifier] of publicSpecifiers) {
+        const path = resolveModulePath(specifier, { from: import.meta.url, conditions, try: true })
+        if (path) paths[alias] = path
     }
     return paths
 }
 
-/** Exact exported Node/Jiti aliases for configuration loaders and standalone tests. */
+/**
+ * Export-resolved aliases for trusted configuration loaders and standalone tests.
+ * Jiti treats alias keys as prefixes; only the curated names are public API.
+ */
 export const createSiteAdminDependencyAliases = (
     options: { conditions?: string[]; aliases?: AliasEntries; rootDir?: string } = {},
 ): Record<string, string> => {
@@ -200,7 +160,7 @@ export const createSiteAdminDependencyAliases = (
     return ownedExportPaths(options.conditions ?? ['node', 'import'])
 }
 
-/** Generate exact TypeScript paths from installed exports, including exported wildcard subpaths. */
+/** Resolve the curated public entries to their native declarations through package exports. */
 export const createSiteAdminDependencyTypePaths = (
     options: { conditions?: string[]; paths?: Record<string, unknown> } = {},
 ): Record<string, string[]> => {

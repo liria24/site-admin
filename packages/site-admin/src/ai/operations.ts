@@ -2,6 +2,8 @@ import { generateText, jsonSchema, NoObjectGeneratedError, NoOutputGeneratedErro
 import type { LanguageModel } from 'ai'
 import type {
     SiteAdminAIDraftProposal,
+    SiteAdminAIModel,
+    SiteAdminAIModelContext,
     SiteAdminAIRuntime,
     SiteAdminMetadataInput,
     SiteAdminProofreadInput,
@@ -140,9 +142,20 @@ const proposal = async (
 
 /** Uses SDK-managed parsing and validation. Never persists or applies a proposal. */
 export const createSiteAdminAI = (
-    model: LanguageModel | (() => LanguageModel | Promise<LanguageModel>),
+    model: SiteAdminAIModel,
+    context: SiteAdminAIModelContext = {},
 ): SiteAdminAIRuntime => {
-    const languageModel = () => (typeof model === 'function' ? model() : model)
+    const languageModel = async (): Promise<LanguageModel> => {
+        try {
+            const resolved = await (typeof model === 'function' ? model(context) : model)
+            if (!resolved)
+                throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'An AI model is not available for this request.')
+            return resolved
+        } catch (error) {
+            if (error instanceof SiteAdminError) throw error
+            throw new SiteAdminError('SITE_ADMIN_AI_FAILED', 'AI could not generate a proposal. Please try again.')
+        }
+    }
     return {
         async generateMetadata(_modelName, definition, input: SiteAdminMetadataInput, slugMaxLength = 80) {
             const data = assertDraft(input)

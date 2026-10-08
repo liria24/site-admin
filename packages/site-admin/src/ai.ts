@@ -1,6 +1,7 @@
 import type { SiteAdminIssue } from './errors'
 import type { EntryRecord } from './server/types'
 import type { ModelDefinition } from './config'
+import type { LanguageModel } from 'ai'
 
 export interface SiteAdminAIActionInput {
     entry: EntryRecord
@@ -17,9 +18,12 @@ export type SiteAdminAIAction = (
     input: SiteAdminAIActionInput,
 ) => Promise<SiteAdminAIActionResult> | SiteAdminAIActionResult
 
-export interface SiteAdminAIConfig {
+export interface SiteAdminAIActionConfig {
     models: Record<string, Record<string, SiteAdminAIAction>>
 }
+
+export type { SiteAdminAIConfig } from './config'
+export { createSiteAdminAI } from './ai/operations'
 
 export interface SiteAdminAIProposal extends SiteAdminAIActionResult {
     baseRevisionId: string
@@ -28,13 +32,18 @@ export interface SiteAdminAIProposal extends SiteAdminAIActionResult {
     version: number
 }
 
-/** Selects the built-in, server-only Workers AI implementation. */
-export interface SiteAdminWorkersAIConfig {
-    provider: 'workers-ai'
-    model: string
-    /** Name of the binding in the current Cloudflare environment. Defaults to `AI`. */
-    binding?: string
+/** Explicit generation context; provider-specific bindings remain application-owned.
+ * Nuxt HTTP passes its request context. Background AI uses createSiteAdminAI(model, context).
+ */
+export interface SiteAdminAIModelContext {
+    request?: Request
+    platformContext?: object
 }
+
+/** An application-selected SDK model, optionally resolved from the current request/task. */
+export type SiteAdminAIModel =
+    | LanguageModel
+    | ((context: SiteAdminAIModelContext) => LanguageModel | Promise<LanguageModel>)
 
 export interface SiteAdminMetadataInput {
     data: Record<string, unknown>

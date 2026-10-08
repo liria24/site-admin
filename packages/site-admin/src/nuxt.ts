@@ -38,6 +38,7 @@ import type { SiteAdminDatabase } from './adapter'
 
 import type { SiteAdminConfig, SiteAdminConfigInput } from './config'
 import { resolveSiteAdminConfig } from './config-resolution'
+import { serializeSiteAdminSeo, serializeSiteAdminRouteRules } from './seo'
 import { resolveSiteAdminAssets } from './assets-config'
 import {
     assertSiteAdminDependencyAliasConflicts,
@@ -66,7 +67,7 @@ export interface ModuleOptions {
     llms: boolean
     ogImage: boolean
     robots: boolean
-    routing: { enabled: boolean; preserveHistory: boolean; redirects: boolean }
+    routing: { enabled: boolean; metadata: boolean; preserveHistory: boolean; redirects: boolean }
     schemaOrg: boolean
     seo: boolean
     server: { enabled: boolean; managementBase: string }
@@ -86,6 +87,7 @@ export interface SiteAdminAuthorizeContext {
 }
 
 export interface SiteAdminDatabaseContext {
+    request?: Request
     authDatabase?: BetterAuthOptions['database']
     database?: SiteAdminDatabase
     event?: RequestEvent
@@ -126,7 +128,7 @@ const defaults: ModuleOptions = {
     llms: true,
     ogImage: true,
     robots: true,
-    routing: { enabled: true, preserveHistory: true, redirects: true },
+    routing: { enabled: true, metadata: true, preserveHistory: true, redirects: true },
     schemaOrg: true,
     seo: true,
     server: { enabled: true, managementBase: '/api/site-admin' },
@@ -276,7 +278,7 @@ const routeMiddleware = (options: ModuleOptions, locales: ReturnType<typeof loca
   if (locale && locale !== currentLocale && typeof i18n?.locale === 'object') i18n.locale.value = locale`
         : 'const locale = undefined'
     const metadata =
-        options.seo || options.ogImage || options.schemaOrg
+        options.routing.metadata && (options.seo || options.ogImage || options.schemaOrg)
             ? `const entry = result.entry
   const models = await client.models()
   const displayFields = models.models[entry.model]?.displayFields
@@ -486,7 +488,7 @@ export default defineNuxtModule<ModuleConfig>({
             })
             addRouteMiddleware({ global: true, name: 'site-admin-public-route', path: middleware.dst })
         }
-        if (options.seo || options.ogImage || options.schemaOrg) {
+        if (options.routing.metadata && (options.seo || options.ogImage || options.schemaOrg)) {
             const plugin = addTemplate({
                 filename: 'site-admin/metadata-plugin.mjs',
                 getContents: () => metadataPlugin(options),
@@ -554,13 +556,17 @@ export default defineNuxtModule<ModuleConfig>({
                     sources.server = [...(sources.server ?? []), serverAuthPlugin.dst]
                     sources.client = [...(sources.client ?? []), clientAuthPlugin.dst]
                 })
-                nuxt.hook('better-auth:database:providers', (providers) => {
-                    providers.siteAdmin = {
-                        priority: 1_000,
-                        isEnabled: () => true,
-                        buildDatabaseCode: betterAuthDatabaseProvider,
-                    }
-                })
+                // Preserve the existing custom-hook bridge only for legacy hook-only apps.
+                // Direct adapter configurations leave Better Auth's app-owned provider intact.
+                if (!domainConfig.database) {
+                    nuxt.hook('better-auth:database:providers', (providers) => {
+                        providers.siteAdmin = {
+                            priority: 1_000,
+                            isEnabled: () => true,
+                            buildDatabaseCode: betterAuthDatabaseProvider,
+                        }
+                    })
+                }
                 await installOnce('@nuxtjs/better-auth', nuxt)
             }
             if (options.server.enabled && (domainConfig.assets || domainConfig.storage)) {
@@ -588,20 +594,38 @@ export default defineNuxtModule<ModuleConfig>({
             }
         }
 
+        // Only the explicitly serializable public presentation contract enters client config.
+        const publicConfig = nuxt.options.runtimeConfig.public as typeof nuxt.options.runtimeConfig.public & {
+            siteAdmin?: { seo?: unknown; routeRules?: unknown }
+        }
+        publicConfig.siteAdmin = {
+            seo: serializeSiteAdminSeo(domainConfig?.seo),
+            routeRules: serializeSiteAdminRouteRules(domainConfig?.routeRules),
+        }
+
         const clientTemplate = addTemplate({
             filename: 'site-admin/client.ts',
             getContents: () =>
                 siteAdminNuxtClientTemplate({
                     basePath: options.client.basePath,
                     managementBase: options.server.managementBase,
+                    i18n: options.i18n,
                     ...(options.client.origin ? { origin: options.client.origin } : {}),
                 }),
             write: true,
+        })
+        nuxt.options.optimization.keyedComposables.push({
+            name: 'siteAdminAsyncData',
+            source: clientTemplate.dst,
+            argumentLength: 3,
         })
         addImports([
             { from: clientTemplate.dst, name: 'useSiteAdminClient' },
             { from: clientTemplate.dst, name: 'useSiteAdminManagementClient' },
             { from: clientTemplate.dst, name: 'useSiteAdminRoute' },
+            { from: clientTemplate.dst, name: 'useSiteAdminEntry' },
+            { from: clientTemplate.dst, name: 'useSiteAdminList' },
+            { from: clientTemplate.dst, name: 'useSiteAdminBatch' },
         ])
         if (options.seo) {
             const seoTemplate = addTemplate({
@@ -609,7 +633,7 @@ export default defineNuxtModule<ModuleConfig>({
                 getContents: () => siteAdminNuxtSeoTemplate({ ogImage: options.ogImage }),
                 write: true,
             })
-            addImports({ from: seoTemplate.dst, name: 'defineSeo' })
+            addImports({ from: seoTemplate.dst, name: 'useSeo' })
         }
         if (domainConfig && configPath) {
             addTypeTemplate(
@@ -679,26 +703,12 @@ export default defineNuxtModule<ModuleConfig>({
             : ''
         const aiEnabled = options.ai ?? Boolean(domainConfig.ai)
         const aiOption =
-            aiEnabled && domainConfig.ai?.provider === 'workers-ai'
+            aiEnabled && domainConfig.ai?.model !== undefined
                 ? `aiRuntime: async (context) => {
-      const { resolveWorkersAISiteAdminAI } = await import('@liria24/site-admin/ai/workers-ai')
-      return resolveWorkersAISiteAdminAI(domainConfig.ai, context?.context)
+      const { createSiteAdminAI } = await import('@liria24/site-admin/ai')
+      return createSiteAdminAI(domainConfig.ai.model, context ? { request: context.req, platformContext: context.context } : {})
     },`
                 : ''
-        const databaseOptions = domainConfig.database
-        const databaseSchemaPath = databaseOptions ? resolve(nuxt.options.rootDir, databaseOptions.schema) : undefined
-        const databaseImport = databaseOptions
-            ? `import * as databaseSchema from ${JSON.stringify(databaseSchemaPath!.replaceAll('\\', '/'))}
-import { ${databaseOptions.connector === 'sqlite' ? 'createSQLiteDatabaseResolver' : 'createD1DatabaseResolver'} } from '@liria24/site-admin/runtime/database-${databaseOptions.connector}'`
-            : ''
-        const databaseResolver = databaseOptions
-            ? `${databaseOptions.connector === 'sqlite' ? 'createSQLiteDatabaseResolver' : 'createD1DatabaseResolver'}({
-  ${databaseOptions.connector === 'sqlite' ? `filename: ${JSON.stringify(databaseOptions.filename === ':memory:' ? ':memory:' : resolve(nuxt.options.rootDir, databaseOptions.filename ?? '.data/site-admin.sqlite'))},` : `binding: ${JSON.stringify(databaseOptions.binding)},`}
-  schema: databaseSchema,
-  auth: ${JSON.stringify(options.auth)},
-  authUsePlural: ${JSON.stringify(databaseOptions.authUsePlural ?? false)},
-})`
-            : 'undefined'
         nitro.experimental ??= {}
         nitro.experimental.tasks = true
         nitro.tasks ??= {}
@@ -728,8 +738,7 @@ import { ${databaseOptions.connector === 'sqlite' ? 'createSQLiteDatabaseResolve
 import { useServerHooks } from 'nuxt/server'
 ${authImport}
 ${filesImport}
-${databaseImport}
-import { finalizeSiteAdminDatabases } from '@liria24/site-admin/runtime/database'
+import { resolveSiteAdminDatabase } from '@liria24/site-admin/runtime/database'
 import inputConfig from ${JSON.stringify(configPath.replaceAll('\\', '/'))}
 import { resolveSiteAdminConfig } from '@liria24/site-admin/config-resolution'
 const domainConfig = resolveSiteAdminConfig(inputConfig, ${JSON.stringify(environments)})
@@ -741,8 +750,6 @@ import { captureNitroRequest, getNitroRequest } from '@liria24/site-admin/runtim
 
 export default defineNitroPlugin((nitroApp) => {
   const hooks = useServerHooks()
-  const builtInDatabase = ${databaseResolver}
-  if (builtInDatabase) nitroApp.hooks.hook('close', () => builtInDatabase.close())
   /** @type {WeakMap<import('@liria24/site-admin/server').SiteAdminDatabase, import('@liria24/site-admin/server').SiteAdmin<import('nuxt/server').RequestEvent>>} */
   const instances = new WeakMap()
   /** @type {WeakMap<object, Promise<import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>>} */
@@ -763,11 +770,11 @@ export default defineNitroPlugin((nitroApp) => {
     }
     const resolve = async () => {
       /** @type {import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext} */
-      const context = { ...(event ? { event } : {}), ...(platformContext ? { platformContext } : {}) }
+      const context = { ...(event ? { event, request: event.req } : {}), ...(platformContext ? { platformContext } : {}) }
       await hooks.callHook('site-admin:database', context)
-      await finalizeSiteAdminDatabases(context, builtInDatabase, {
-        platformContext: event?.context ?? platformContext,
-        requireAuth: ${JSON.stringify(options.auth)} && Boolean(event),
+      context.database = await resolveSiteAdminDatabase(context.database ?? domainConfig.database, {
+        ...(event ? { event, request: event.req, platformContext: event.context } : {}),
+        ...(platformContext ? { platformContext } : {}),
       })
       if (event) databases.set(event.context, context)
       return context

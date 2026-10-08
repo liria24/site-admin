@@ -11,7 +11,8 @@
                 "test/fixtures/**/*.{ts,vue}",
                 "test/client-types.ts",
                 "test/config-types.ts",
-                "test/ai-client-types.ts"
+                "test/ai-client-types.ts",
+                "test/seo-types.ts"
             ],
             "project": ["*.ts", "test/**/*.{ts,mjs,vue}"],
             "ignoreDependencies": ["@takumi-rs/core", "@vue/compiler-sfc", "tailwindcss"],
@@ -26,8 +27,9 @@
                 "src/adapters/drizzle.ts!",
                 "src/devtools/{index,dock,client/app}.ts!",
                 "src/runtime/tasks/*.ts!",
-                "src/ai/workers-ai.ts!",
-                "src/dependency-aliases.ts!"
+                "src/ai/operations.ts!",
+                "src/dependency-aliases.ts!",
+                "src/seo.ts!"
             ],
             "project": ["src/**/*.ts!", "*.config.ts"],
             "ignoreDependencies": [
