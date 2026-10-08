@@ -296,6 +296,12 @@ const duplicate = useSiteAdminEntry('posts', () => slug.value, { locale, dedupe:
 const list = useSiteAdminList('posts', { locale })
 const transformed = useSiteAdminList('posts', { locale: 'transformed', transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
 const timeout = useSiteAdminEntry('posts', 'timeout', { immediate: false, timeout: 25 })
+// Direct native control distinguishes adapter behavior from native shared-key ownership.
+const nuxtApp = useNuxtApp()
+const nativeClient = useSiteAdminClient()
+const nativeHandler = (_app: unknown, { signal }: { signal: AbortSignal }) => nativeClient.get('posts', slug.value, { signal, locale: 'native-ja' })
+const nativeControl = useAsyncData(() => 'native-control:' + slug.value, nativeHandler, { dedupe: 'defer' })
+const nativeDuplicate = useAsyncData(() => 'native-control:' + slug.value, nativeHandler, { dedupe: 'defer' })
 const batchSlug = ref('batch-first')
 const batchLocale = ref('batch-ja')
 const batch = useSiteAdminBatch(computed(() => ({
@@ -305,13 +311,23 @@ const batch = useSiteAdminBatch(computed(() => ({
   transform: (items) => ({ ...items, count: items.catalog.data.length }),
   default: () => ({ catalog: { data: [], error: null }, featured: { data: null, error: null }, failed: { data: null, error: null }, count: 0 }),
 })
-await Promise.all([entry, duplicate, list, transformed, batch])
+await Promise.all([entry, duplicate, list, transformed, batch, nativeControl, nativeDuplicate])
 const initial = computed(() => ({ title: entry.data.value?.data.title, body: entry.data.value?.data.body.nodes, list: list.data.value?.length, transformed: transformed.data.value, batch: batch.data.value }))
 onMounted(async () => {
   const checks: Record<string, unknown> = {}
   const check = (condition: unknown, message: string) => { if (!condition) throw new Error(message) }
   const state = () => ({
-    slug: slug.value, locale: locale.value,
+    slug: slug.value, locale: locale.value, isHydrating: nuxtApp.isHydrating,
+    nativeControl: { status: nativeControl.status.value, data: nativeControl.data.value, error: nativeControl.error.value?.message },
+    nativeDuplicate: { status: nativeDuplicate.status.value, data: nativeDuplicate.data.value, error: nativeDuplicate.error.value?.message },
+    // Read-only native lifecycle diagnostics belong to this synthetic test, not the public library contract.
+    nativeKeys: Object.entries(nuxtApp._asyncData).slice(-24).map(([key, item]) => {
+      const data = item?.data.value
+      return { key, deps: item?._deps, initialized: item?._init, status: item?.status.value,
+        slug: data && typeof data === 'object' && 'slug' in data ? data.slug : undefined, pendingPromise: !!nuxtApp._asyncDataPromises[key],
+        aborted: item?._abortController?.signal.aborted, abortReason: item?._abortController?.signal.reason ? String(item._abortController.signal.reason).slice(0, 512) : undefined,
+      }
+    }),
     entry: { status: entry.status.value, data: entry.data.value, error: entry.error.value?.message },
     duplicate: { status: duplicate.status.value, data: duplicate.data.value, error: duplicate.error.value?.message },
     list: { status: list.status.value, data: list.data.value, error: list.error.value?.message },
@@ -325,8 +341,10 @@ onMounted(async () => {
   const getCounts = () => $fetch<Record<string, number>>(${JSON.stringify(`${backendOrigin}/counts`)})
   try {
     checks.stage = 'hydration'
+    checks.versions = { nuxt: nuxtApp.versions.nuxt, vue: nuxtApp.versions.vue }
     checks.initial = initial.value
     checks.hydrationCounts = await getCounts()
+    checks.hydrationState = state()
     check(entry.data.value?.data.title === 'ssr:ja', 'SSR entry must hydrate.')
     check(transformed.data.value[0] === 'list:transformed', 'SSR transform must hydrate.')
     check(batch.data.value.featured.data?.slug === 'batch-first' && batch.data.value.catalog.data.length === 1 && batch.data.value.count === 1, 'One batch state must hydrate named success data and native transform.')
@@ -335,7 +353,10 @@ onMounted(async () => {
     slug.value = 'slow'
     await nextTick()
     await new Promise((resolve) => setTimeout(resolve, 30))
+    checks.slowState = state()
     slug.value = 'fast'
+    await nextTick()
+    checks.fastStartState = state()
     await until('entry slow-to-fast race', () => entry.data.value?.slug === 'fast' && entry.status.value === 'success')
     await new Promise((resolve) => setTimeout(resolve, 350))
     check(entry.data.value?.slug === 'fast', 'Slow slug response must not overwrite the latest entry.')
