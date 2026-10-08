@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
@@ -25,12 +25,22 @@ const stop = async (child) => {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
 }
 
-const chromiumProbe = async (origin, directory) => {
+export const chromiumProbe = async (origin, directory) => {
     const profile = join(directory, 'chromium-profile')
     const configHome = join(directory, 'chromium-config')
     await mkdir(configHome, { recursive: true })
+    const executable = process.env.CHROMIUM_PATH ?? 'chromium'
+    const version = spawnSync(executable, ['--version'], { encoding: 'utf8', timeout: 2_000, maxBuffer: 4_096 })
+    const versionDetails = {
+        output: version.stdout?.trim().slice(-300),
+        stderr: version.stderr?.trim().slice(-300),
+        exit: version.status,
+        signal: version.signal,
+        error: version.error?.code,
+    }
+    const started = performance.now()
     const browser = spawn(
-        process.env.CHROMIUM_PATH ?? 'chromium',
+        executable,
         [
             '--headless',
             '--no-sandbox',
@@ -39,14 +49,44 @@ const chromiumProbe = async (origin, directory) => {
             `--user-data-dir=${profile}`,
             'about:blank',
         ],
-        { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, XDG_CONFIG_HOME: configHome } },
+        { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, XDG_CONFIG_HOME: configHome } },
     )
     let browserLogs = ''
+    let browserOutput = ''
+    let portState = { error: 'not-read' }
+    browser.stdout.on('data', (chunk) => {
+        browserOutput = (browserOutput + String(chunk)).slice(-16_384)
+    })
     browser.stderr.on('data', (chunk) => {
         browserLogs = (browserLogs + String(chunk)).slice(-16_384)
     })
-    const browserFailure = (message, cause) =>
-        new Error(`${message}${browserLogs ? `\nChromium stderr (bounded tail):\n${browserLogs}` : ''}`, { cause })
+    const browserFailure = async (message, cause) => {
+        const [profileEntries, processStatus] = await Promise.all([
+            readdir(profile).then(
+                (entries) => entries.slice(0, 20),
+                (error) => ({ error: error.code }),
+            ),
+            readFile(`/proc/${browser.pid}/status`, 'utf8').then(
+                (status) => status.split('\n').filter((line) => /^(Name|State|Threads|VmRSS):/.test(line)),
+                (error) => ({ error: error.code }),
+            ),
+        ])
+        const state = {
+            executable,
+            version: versionDetails,
+            elapsedMs: Math.round(performance.now() - started),
+            pid: browser.pid,
+            exit: browser.exitCode,
+            signal: browser.signalCode,
+            portState,
+            profileEntries,
+            processStatus,
+        }
+        return new Error(
+            `${message}\nChromium startup state: ${JSON.stringify(state)}${browserOutput ? `\nChromium stdout (bounded tail):\n${browserOutput}` : ''}${browserLogs ? `\nChromium stderr (bounded tail):\n${browserLogs}` : ''}`,
+            { cause },
+        )
+    }
     let socket
     let browserError
     browser.on('error', (error) => {
@@ -55,23 +95,36 @@ const chromiumProbe = async (origin, directory) => {
     try {
         let debuggingPort
         for (let attempt = 0; attempt < 200; attempt++) {
-            const content = await readFile(join(profile, 'DevToolsActivePort'), 'utf8').catch(() => '')
+            const content = await readFile(join(profile, 'DevToolsActivePort'), 'utf8').then(
+                (value) => {
+                    portState = { content: value.slice(0, 300) }
+                    return value
+                },
+                (error) => {
+                    portState = { error: error.code }
+                    return ''
+                },
+            )
             if (content) {
                 debuggingPort = Number(content.split('\n')[0])
                 break
             }
             if (browserError)
-                throw browserFailure(
+                throw await browserFailure(
                     'Chromium is required for the browser probe; set CHROMIUM_PATH or use --ssr-only for explicitly limited coverage.',
                     browserError,
                 )
             if (browser.exitCode !== null || browser.signalCode !== null)
-                throw browserFailure(
+                throw await browserFailure(
                     `Chromium exited before its debugging endpoint started (exit=${browser.exitCode}, signal=${browser.signalCode}).`,
                 )
             await wait(50)
         }
-        if (!debuggingPort) throw browserFailure('Chromium debugging endpoint did not start.')
+        if (!debuggingPort) throw await browserFailure('Chromium debugging endpoint did not start.')
+        console.log(
+            'Public data Chromium ready:',
+            JSON.stringify({ version: versionDetails, elapsedMs: Math.round(performance.now() - started) }),
+        )
         const page = await fetch(`http://127.0.0.1:${debuggingPort}/json/new?about:blank`, {
             method: 'PUT',
             signal: AbortSignal.timeout(15_000),
@@ -80,8 +133,8 @@ const chromiumProbe = async (origin, directory) => {
                 if (!response.ok) throw new Error(`HTTP ${response.status}`)
                 return response.json()
             })
-            .catch((error) => {
-                throw browserFailure('Chromium debugging endpoint could not open a page.', error)
+            .catch(async (error) => {
+                throw await browserFailure('Chromium debugging endpoint could not open a page.', error)
             })
         socket = new WebSocket(page.webSocketDebuggerUrl)
         await new Promise((resolve, reject) => {
