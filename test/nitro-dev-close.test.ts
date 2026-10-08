@@ -12,7 +12,11 @@ it('closes active dev workers and ignores a build that completes after shutdown'
     const output = join(fixture, 'server')
     await mkdir(output)
     const pipe =
-        process.platform === 'win32' ? '\\\\.\\pipe\\site-admin-nitro-close-' + randomUUID() : join(fixture, 'socket')
+        process.platform === 'win32'
+            ? '\\\\.\\pipe\\site-admin-nitro-close-' + randomUUID()
+            : process.env.NITRO_NO_UNIX_SOCKET
+              ? undefined
+              : join(fixture, 'socket')
     let connections = 0
     const ipc = createServer((socket) => {
         connections++
@@ -20,14 +24,18 @@ it('closes active dev workers and ignores a build that completes after shutdown'
     })
     await new Promise<void>((resolve, reject) => {
         ipc.once('error', reject)
-        ipc.listen(pipe, resolve)
+        if (pipe) ipc.listen(pipe, resolve)
+        else ipc.listen(0, '127.0.0.1', resolve)
     })
+    const address = ipc.address()
+    if (!address) throw new Error('The IPC probe has no listening address.')
+    const connection = typeof address === 'string' ? address : { host: '127.0.0.1', port: address.port }
     await writeFile(
         join(output, 'index.mjs'),
         [
             "import { createConnection } from 'node:net'",
             "import { parentPort } from 'node:worker_threads'",
-            'const socket = createConnection(' + JSON.stringify(pipe) + ')',
+            'const socket = createConnection(' + JSON.stringify(connection) + ')',
             "socket.on('error', () => {})",
             "parentPort.on('message', message => { if (message.event === 'shutdown') socket.end() })",
         ].join('\n'),

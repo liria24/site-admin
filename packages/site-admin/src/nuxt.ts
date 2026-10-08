@@ -1,4 +1,5 @@
-import { dirname, resolve } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 
@@ -11,6 +12,7 @@ import {
     addServerPlugin,
     addTemplate,
     addTypeTemplate,
+    addVitePlugin,
     createResolver,
     defineNuxtModule,
     hasNuxtModule,
@@ -24,19 +26,38 @@ import type { BetterAuthOptions } from 'better-auth'
 import type { RequestEvent } from 'nuxt/server'
 import { transformNitroCloudflareRequest } from './runtime/nitro2'
 import { stopNitroDevReloadOnClose } from './nuxt/dev-close'
-import type { NitroConfig } from 'nitropack/types'
+import {
+    siteAdminFilesModuleDependencies,
+    resolveSiteAdminFilesSource,
+    allowGeneratedFilesConfig,
+} from './nuxt/files-source'
+import type { Nitro, NitroConfig } from 'nitropack/types'
 import { createJiti } from 'jiti'
 import type { ModuleOptions as NuxtLLMsOptions } from 'nuxt-llms'
 import type { SiteAdminDatabase } from './adapter'
 
-import type { SiteAdminConfig } from './config'
+import type { SiteAdminConfig, SiteAdminConfigInput } from './config'
+import { resolveSiteAdminConfig } from './config-resolution'
+import { resolveSiteAdminAssets } from './assets-config'
+import {
+    assertSiteAdminDependencyAliasConflicts,
+    createSiteAdminDependencyAliases,
+    createSiteAdminDependencyPlugin,
+    createSiteAdminDependencyTypePaths,
+    removeSiteAdminDependencyAliases,
+} from './dependency-aliases'
+import {
+    siteAdminNuxtClientTemplate,
+    siteAdminNuxtFormTemplate,
+    siteAdminNuxtModelTypes,
+    siteAdminNuxtSeoTemplate,
+} from './nuxt/client-templates'
 import type { SiteAdminActor } from './server/types'
 import { moduleMeta } from './meta'
 
 export interface ModuleOptions {
-    ai: false | { configFile?: string }
+    ai?: boolean
     auth: boolean
-    assets?: SiteAdminConfig['assets']
     client: { basePath: string; origin?: string }
     configFile: string
     devtools: boolean
@@ -68,6 +89,8 @@ export interface SiteAdminDatabaseContext {
     authDatabase?: BetterAuthOptions['database']
     database?: SiteAdminDatabase
     event?: RequestEvent
+    /** Native task context, including Cloudflare bindings, for event-free work. */
+    platformContext?: object
 }
 
 // Build-time registries live on @nuxt/schema and are bridged by nuxt/schema.
@@ -94,7 +117,6 @@ declare module 'nuxt/schema' {
 }
 
 const defaults: ModuleOptions = {
-    ai: false,
     auth: true,
     client: { basePath: '/api/content' },
     configFile: './site-admin.config.ts',
@@ -119,7 +141,7 @@ const normalizeBase = (value: string, name: string): string => {
     return normalized
 }
 
-const installOnce = async (name: string, nuxt: Nuxt): Promise<void> => {
+const installOnce = async (name: string, nuxt: Nuxt, options: Record<string, unknown> = {}): Promise<void> => {
     if (hasNuxtModule(name, nuxt)) return
     const candidate = await tryResolveModule(
         name,
@@ -132,7 +154,7 @@ const installOnce = async (name: string, nuxt: Nuxt): Promise<void> => {
         const modulesDir = resolve(dirname(manifest), 'node_modules')
         if (!nuxt.options.modulesDir.includes(modulesDir)) nuxt.options.modulesDir.push(modulesDir)
     }
-    await installModule(path, {}, nuxt)
+    await installModule(path, options, nuxt)
 }
 
 const localeOptions = (nuxt: Nuxt): { defaultLocale?: string; strategy: string; supported: string[] } => {
@@ -213,15 +235,15 @@ const roles = {
 
 const serverAccessPlugin = (
     config: SiteAdminConfig,
-): string => `import { admin, createAccessControl } from 'better-auth/plugins'
+): string => `import { admin, createAccessControl } from '#better-auth/plugins'
 ${accessControl(config)}
 export default admin({ ac, adminRoles: ['admin'], defaultRole: 'user', roles })
 `
 
 const clientAccessPlugin = (
     config: SiteAdminConfig,
-): string => `import { adminClient } from 'better-auth/client/plugins'
-import { createAccessControl } from 'better-auth/plugins'
+): string => `import { adminClient } from '#better-auth/client/plugins'
+import { createAccessControl } from '#better-auth/plugins'
 ${accessControl(config)}
 export default adminClient({ ac, roles })
 `
@@ -330,6 +352,7 @@ export default defineNuxtPlugin(() => {
 export default defineNuxtModule<ModuleConfig>({
     meta: moduleMeta,
     defaults,
+    moduleDependencies: siteAdminFilesModuleDependencies,
     async setup(input, nuxt) {
         // Nuxt merges defaults before setup; the public input type allows nested partial options.
         const options = input as ModuleOptions
@@ -345,6 +368,72 @@ export default defineNuxtModule<ModuleConfig>({
         // Nuxt normally adds this after setup; our dependent modules need it during setup.
         const modulesDir = createResolver(import.meta.url).resolve('../node_modules')
         if (!nuxt.options.modulesDir.includes(modulesDir)) nuxt.options.modulesDir.push(modulesDir)
+        // Configuration loaders need exact Node exports; runtime bundlers select their own conditions.
+        for (const config of [
+            nuxt.options.typescript.tsConfig,
+            nuxt.options.typescript.appTsConfig,
+            nuxt.options.typescript.nodeTsConfig,
+            nuxt.options.typescript.sharedTsConfig,
+            nuxt.options.typescript.serverTsConfig,
+            nuxt.options.nitro.typescript?.tsConfig,
+        ]) {
+            assertSiteAdminDependencyAliasConflicts(config?.compilerOptions?.paths)
+        }
+        const dependencyAliases = createSiteAdminDependencyAliases({
+            aliases: nuxt.options.alias,
+            rootDir: nuxt.options.rootDir,
+        })
+        Object.assign(nuxt.options.alias, dependencyAliases)
+        const dependencyTypePaths = (conditions: string[] = ['node', 'import']) => {
+            const paths = createSiteAdminDependencyTypePaths({ conditions })
+            if (nuxt.options.alias['#auth/client'] || nuxt.options.alias['#auth/server']) {
+                // This exact public export is also referenced by the native SDK's declarations.
+                paths['@nuxtjs/better-auth/config'] = paths['#nuxtjs/better-auth/config']!
+            }
+            return paths
+        }
+        addVitePlugin(createSiteAdminDependencyPlugin())
+        nuxt.hook('vite:extendConfig', (config) => {
+            if (config.resolve?.alias) {
+                config.resolve.alias = removeSiteAdminDependencyAliases(config.resolve.alias, dependencyAliases)
+            }
+        })
+        // Nitro invokes this before creating its alias plugin, for production and dev/watch alike.
+        nuxt.hook('nitro:build:before', (instance) => {
+            instance.options.alias = removeSiteAdminDependencyAliases(instance.options.alias, dependencyAliases)
+        })
+        nuxt.hook('nitro:init', (nativeInstance) => {
+            const instance = nativeInstance as unknown as Nitro
+            instance.hooks.hook('types:extend', ({ tsConfig }) => {
+                if (!tsConfig) return
+                const directory = dirname(resolve(instance.options.buildDir, instance.options.typescript.tsconfigPath))
+                tsConfig.compilerOptions ??= {}
+                const paths = (tsConfig.compilerOptions.paths ??= {})
+                for (const [name, declarations] of Object.entries(
+                    dependencyTypePaths(instance.options.exportConditions),
+                )) {
+                    // Nitro normalizes absolute aliases before this hook and drops .mjs/.mts
+                    // extensions. Explicit relative declarations preserve .d.mts/.d.cts types.
+                    paths[name] = declarations.map((path) => {
+                        const target = relative(directory, path).replaceAll('\\', '/')
+                        return target.startsWith('.') ? target : `./${target}`
+                    })
+                }
+            })
+        })
+        nuxt.hook('prepare:types', ({ tsConfig, nodeTsConfig, sharedTsConfig, serverTsConfig }) => {
+            const nodePaths = dependencyTypePaths()
+            const appPaths = dependencyTypePaths(['browser', 'import'])
+            for (const [config, paths] of [
+                [tsConfig, appPaths],
+                [nodeTsConfig, nodePaths],
+                [sharedTsConfig, appPaths],
+                [serverTsConfig, nodePaths],
+            ] as const) {
+                config.compilerOptions ??= {}
+                Object.assign((config.compilerOptions.paths ??= {}), paths)
+            }
+        })
         addTypeTemplate(
             {
                 filename: 'types/site-admin.d.ts',
@@ -389,42 +478,6 @@ export default defineNuxtModule<ModuleConfig>({
 
         const publicLocales = options.i18n ? localeOptions(nuxt) : { strategy: 'no_prefix', supported: [] }
 
-        const clientTemplate = addTemplate({
-            filename: 'site-admin/client.ts',
-            getContents: () => `import { createSiteAdminClient } from '@liria24/site-admin/client'
-import type { SiteAdminClient, PublicRouteResult } from '@liria24/site-admin/client'
-import { useRequestFetch, useRequestURL, useState } from '#imports'
-export const useSiteAdminClient = (): SiteAdminClient => {
-  const requestFetch = import.meta.server ? useRequestFetch() : undefined
-  return createSiteAdminClient({ ...${JSON.stringify(options.client)}, origin: ${options.client.origin ? JSON.stringify(options.client.origin) : 'useRequestURL().origin'},
-    ${
-        options.client.origin
-            ? ''
-            : `fetch: requestFetch ? async (input, init) => {
-      const url = new URL(String(input))
-      const method = init?.method?.toLowerCase() ?? 'get'
-      if (method !== 'get' && method !== 'head' && method !== 'post' && method !== 'put' && method !== 'patch' && method !== 'delete' && method !== 'options') {
-        throw new TypeError('Unsupported Site Admin HTTP method: ' + method)
-      }
-      let response: Response | undefined
-      await requestFetch(url.pathname + url.search, {
-        ...init, method, responseType: 'stream', ignoreResponseError: true, retry: 0,
-        onResponse: (context) => { response = context.response },
-      })
-      if (!response) throw new Error('Site Admin internal fetch did not return a response.')
-      return response
-    } : globalThis.fetch,`
-    }
-  })
-}
-export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-admin-route', () => null)
-`,
-            write: true,
-        })
-        addImports([
-            { from: clientTemplate.dst, name: 'useSiteAdminClient' },
-            { from: clientTemplate.dst, name: 'useSiteAdminRoute' },
-        ])
         if (options.routing.enabled) {
             const middleware = addTemplate({
                 filename: 'site-admin/route-middleware.mjs',
@@ -446,15 +499,20 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
         nitro.externals ??= {}
         // Nuxt 4.6's renderer subpaths must be bundled so Nitro replaces their build stubs.
         ;(nitro.externals.inline ??= []).push('@liria24/site-admin', 'nuxt/internal')
+        nitro.rollupConfig ??= {}
+        nitro.rollupConfig.plugins = [nitro.rollupConfig.plugins, createSiteAdminDependencyPlugin()]
 
         let domainConfig: SiteAdminConfig | undefined
         let configPath: string | undefined
-        if (options.server.enabled) {
+        let unnamedFilesStorage = false
+        const environments = (nuxt.options as typeof nuxt.options & { nitro: NitroConfig }).nitro.static
+            ? ['production', 'prerender']
+            : [nuxt.options.envName || (nuxt.options.dev ? 'development' : 'production')]
+        const requestedConfigPath = resolve(nuxt.options.rootDir, options.configFile)
+        if (options.server.enabled || existsSync(requestedConfigPath)) {
             configPath = resolve(nuxt.options.rootDir, options.configFile)
-            const configFiles = [
-                configPath,
-                ...(options.ai ? [resolve(nuxt.options.rootDir, options.ai.configFile ?? './site-admin.ai.ts')] : []),
-            ]
+            const filesPath = await resolveSiteAdminFilesSource(nuxt, options.configFile)
+            const configFiles = [...new Set([configPath, filesPath, resolve(nuxt.options.rootDir, 'files.config.ts')])]
             nuxt.hook('prepare:types', ({ tsConfig }) => {
                 ;(tsConfig.include ??= []).push(...configFiles)
             })
@@ -463,16 +521,25 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
                 nuxt.options.watch.push(...configFiles.map((path) => path.replaceAll('\\', '/')))
             }
             const jiti = createJiti(import.meta.url, { alias: nuxt.options.alias, fsCache: false, moduleCache: false })
-            domainConfig = await jiti.import<SiteAdminConfig>(configPath, { default: true })
-            if (options.assets) domainConfig.assets = { ...domainConfig.assets, ...options.assets }
+            const inputConfig = await jiti.import<SiteAdminConfigInput>(configPath, { default: true })
+            domainConfig = resolveSiteAdminConfig(inputConfig, environments)
+            // An existing standalone Files config owns all physical storage settings.
+            // Otherwise the SDK reads the common config through its existing filename option.
+            const filesInput =
+                filesPath === configPath || !(domainConfig.assets || domainConfig.storage)
+                    ? inputConfig
+                    : await jiti.import<SiteAdminConfigInput>(filesPath, { default: true })
+            const filesConfig = resolveSiteAdminConfig(filesInput, environments)
+            unnamedFilesStorage = Boolean(filesConfig.storage && 'adapter' in filesConfig.storage)
+            if (domainConfig.assets) domainConfig.assets = resolveSiteAdminAssets(domainConfig.assets, filesConfig)!
             await nuxt.callHook('site-admin:config', domainConfig)
-            if (options.auth || options.llms) {
+            if (options.server.enabled && (options.auth || options.llms)) {
                 addServerHandler({
                     middleware: true,
                     handler: createResolver(import.meta.url).resolve('./runtime/database-middleware'),
                 })
             }
-            if (options.auth === true) {
+            if (options.server.enabled && options.auth === true) {
                 const serverAuthPlugin = addTemplate({
                     filename: 'site-admin/better-auth-server-plugin.mjs',
                     getContents: () => serverAccessPlugin(domainConfig!),
@@ -496,8 +563,19 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
                 })
                 await installOnce('@nuxtjs/better-auth', nuxt)
             }
-            if (domainConfig.assets) {
-                await installOnce('nuxt-files-sdk', nuxt)
+            if (options.server.enabled && (domainConfig.assets || domainConfig.storage)) {
+                // Optional dependency defaults cover configured module entries. Dynamic installs
+                // need the same resolved single filename passed through the SDK's public option.
+                await installOnce('nuxt-files-sdk', nuxt, { config: filesPath })
+                nuxt.hook('nitro:config', (nativeConfig) => {
+                    const config = nativeConfig as NitroConfig
+                    config.esbuild ??= {}
+                    config.esbuild.options ??= {}
+                    config.esbuild.options.exclude = allowGeneratedFilesConfig(
+                        config.esbuild.options.exclude,
+                        resolve(config.buildDir ?? nuxt.options.buildDir, 'nuxt-files-sdk'),
+                    )
+                })
                 nitro.rollupConfig ??= {}
                 const existing = nitro.rollupConfig.plugins
                 nitro.rollupConfig.plugins = [
@@ -510,6 +588,50 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
             }
         }
 
+        const clientTemplate = addTemplate({
+            filename: 'site-admin/client.ts',
+            getContents: () =>
+                siteAdminNuxtClientTemplate({
+                    basePath: options.client.basePath,
+                    managementBase: options.server.managementBase,
+                    ...(options.client.origin ? { origin: options.client.origin } : {}),
+                }),
+            write: true,
+        })
+        addImports([
+            { from: clientTemplate.dst, name: 'useSiteAdminClient' },
+            { from: clientTemplate.dst, name: 'useSiteAdminManagementClient' },
+            { from: clientTemplate.dst, name: 'useSiteAdminRoute' },
+        ])
+        if (options.seo) {
+            const seoTemplate = addTemplate({
+                filename: 'site-admin/seo.ts',
+                getContents: () => siteAdminNuxtSeoTemplate({ ogImage: options.ogImage }),
+                write: true,
+            })
+            addImports({ from: seoTemplate.dst, name: 'defineSeo' })
+        }
+        if (domainConfig && configPath) {
+            addTypeTemplate(
+                {
+                    filename: 'types/site-admin-models.d.ts',
+                    getContents: () => siteAdminNuxtModelTypes(configPath!, environments),
+                },
+                { nuxt: true, nitro: true, node: false },
+            )
+            const formPeer = await tryResolveModule(
+                '@tanstack/vue-form',
+                [nuxt.options.rootDir, ...nuxt.options.modulesDir.map((dir) => resolve(dir, '..'))].map(directoryToURL),
+            )
+            if (formPeer) {
+                const formTemplate = addTemplate({
+                    filename: 'site-admin/form.ts',
+                    getContents: () => siteAdminNuxtFormTemplate(),
+                    write: true,
+                })
+                addImports({ from: formTemplate.dst, name: 'useSiteAdminForm' })
+            }
+        }
         if (!options.server.enabled || !domainConfig || !configPath) return
         const locales = publicLocales
         const nuxtSite = (nuxt.options as typeof nuxt.options & { site?: { name?: string; url?: string } }).site
@@ -534,13 +656,15 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
       }
     }`
             : 'undefined'
-        const filesImport = domainConfig.assets ? `import { useServerFiles } from 'nuxt-files-sdk/runtime'` : ''
-        const filesOption = domainConfig.assets ? `getFiles: async (name) => useServerFiles(name),` : ''
-        const aiPath = options.ai
-            ? resolve(nuxt.options.rootDir, options.ai.configFile ?? './site-admin.ai.ts').replaceAll('\\', '/')
-            : undefined
-        const aiImport = aiPath ? `import aiActions from ${JSON.stringify(aiPath)}` : ''
-        const aiOption = aiPath ? 'aiActions,' : ''
+        const filesImport = domainConfig.assets ? `import { useServerFiles } from '#nuxt-files-sdk/runtime'` : ''
+        const filesOption = domainConfig.assets
+            ? unnamedFilesStorage
+                ? `getFiles: async (name) => {
+      if (name !== 'default') throw new Error('[site-admin] Unknown storage reference for an unnamed Files storage: ' + name)
+      return useServerFiles()
+    },`
+                : `getFiles: async (name) => useServerFiles(name),`
+            : ''
         const localizePath = options.i18n
             ? `locales: {
       defaultLocale: ${JSON.stringify(locales.defaultLocale)},
@@ -553,6 +677,49 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
       },
     },`
             : ''
+        const aiEnabled = options.ai ?? Boolean(domainConfig.ai)
+        const aiOption =
+            aiEnabled && domainConfig.ai?.provider === 'workers-ai'
+                ? `aiRuntime: async (context) => {
+      const { resolveWorkersAISiteAdminAI } = await import('@liria24/site-admin/ai/workers-ai')
+      return resolveWorkersAISiteAdminAI(domainConfig.ai, context?.context)
+    },`
+                : ''
+        const databaseOptions = domainConfig.database
+        const databaseSchemaPath = databaseOptions ? resolve(nuxt.options.rootDir, databaseOptions.schema) : undefined
+        const databaseImport = databaseOptions
+            ? `import * as databaseSchema from ${JSON.stringify(databaseSchemaPath!.replaceAll('\\', '/'))}
+import { ${databaseOptions.connector === 'sqlite' ? 'createSQLiteDatabaseResolver' : 'createD1DatabaseResolver'} } from '@liria24/site-admin/runtime/database-${databaseOptions.connector}'`
+            : ''
+        const databaseResolver = databaseOptions
+            ? `${databaseOptions.connector === 'sqlite' ? 'createSQLiteDatabaseResolver' : 'createD1DatabaseResolver'}({
+  ${databaseOptions.connector === 'sqlite' ? `filename: ${JSON.stringify(databaseOptions.filename === ':memory:' ? ':memory:' : resolve(nuxt.options.rootDir, databaseOptions.filename ?? '.data/site-admin.sqlite'))},` : `binding: ${JSON.stringify(databaseOptions.binding)},`}
+  schema: databaseSchema,
+  auth: ${JSON.stringify(options.auth)},
+  authUsePlural: ${JSON.stringify(databaseOptions.authUsePlural ?? false)},
+})`
+            : 'undefined'
+        nitro.experimental ??= {}
+        nitro.experimental.tasks = true
+        nitro.tasks ??= {}
+        const taskPaths = {
+            publishDue: 'publish-due',
+            assetGC: 'asset-gc',
+            syncAssets: 'sync-assets',
+        } as const
+        for (const [key, name] of Object.entries(taskPaths)) {
+            const task = `site-admin:${name}`
+            nitro.tasks[task] = { handler: createResolver(import.meta.url).resolve(`./runtime/tasks/${name}`) }
+            const schedule = domainConfig.tasks?.[key as keyof typeof taskPaths]
+            if (typeof schedule === 'string') {
+                if (!schedule.trim()) throw new Error(`[site-admin] ${task} requires a non-empty cron expression.`)
+                nitro.scheduledTasks ??= {}
+                const existing = nitro.scheduledTasks[schedule]
+                const scheduled = Array.isArray(existing) ? existing : existing ? [existing] : []
+                if (!scheduled.includes(task)) scheduled.push(task)
+                nitro.scheduledTasks[schedule] = scheduled
+            }
+        }
         // Nitro skips TypeScript transforms beneath node_modules/.cache (cf build).
         // Keep this generated plugin executable JavaScript, with JSDoc for the native types.
         const runtimeTemplate = addTemplate({
@@ -561,14 +728,21 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
 import { useServerHooks } from 'nuxt/server'
 ${authImport}
 ${filesImport}
-${aiImport}
-import domainConfig from ${JSON.stringify(configPath.replaceAll('\\', '/'))}
+${databaseImport}
+import { finalizeSiteAdminDatabases } from '@liria24/site-admin/runtime/database'
+import inputConfig from ${JSON.stringify(configPath.replaceAll('\\', '/'))}
+import { resolveSiteAdminConfig } from '@liria24/site-admin/config-resolution'
+const domainConfig = resolveSiteAdminConfig(inputConfig, ${JSON.stringify(environments)})
+delete domainConfig.storage
+delete domainConfig.routes
 import { createSiteAdmin } from '@liria24/site-admin/server'
 import { configureSiteAdminRuntime, normalizeSiteAdminAuthorizationError } from '@liria24/site-admin/nuxt/server'
 import { captureNitroRequest, getNitroRequest } from '@liria24/site-admin/runtime/nitro2'
 
 export default defineNitroPlugin((nitroApp) => {
   const hooks = useServerHooks()
+  const builtInDatabase = ${databaseResolver}
+  if (builtInDatabase) nitroApp.hooks.hook('close', () => builtInDatabase.close())
   /** @type {WeakMap<import('@liria24/site-admin/server').SiteAdminDatabase, import('@liria24/site-admin/server').SiteAdmin<import('nuxt/server').RequestEvent>>} */
   const instances = new WeakMap()
   /** @type {WeakMap<object, Promise<import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>>} */
@@ -581,7 +755,7 @@ export default defineNitroPlugin((nitroApp) => {
     captureNitroRequest(event, ${JSON.stringify(options.server.managementBase)}, ${JSON.stringify(Boolean(domainConfig.assets))})
   })
   /** @param {import('nuxt/server').RequestEvent} [event] @returns {Promise<import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>} */
-  const resolveDatabases = async (event) => {
+  const resolveDatabases = async (event, platformContext) => {
     if (event) {
       nativeEvents.set(event.context, event)
       const cached = pending.get(event.context)
@@ -589,10 +763,12 @@ export default defineNitroPlugin((nitroApp) => {
     }
     const resolve = async () => {
       /** @type {import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext} */
-      const context = { ...(event ? { event } : {}) }
+      const context = { ...(event ? { event } : {}), ...(platformContext ? { platformContext } : {}) }
       await hooks.callHook('site-admin:database', context)
-      if (!context.database) throw new Error('[site-admin] The site-admin:database hook must provide a database adapter.')
-      ${options.auth ? `if (event && !context.authDatabase) throw new Error('[site-admin] The site-admin:database hook must provide authDatabase when authentication is enabled.')` : ''}
+      await finalizeSiteAdminDatabases(context, builtInDatabase, {
+        platformContext: event?.context ?? platformContext,
+        requireAuth: ${JSON.stringify(options.auth)} && Boolean(event),
+      })
       if (event) databases.set(event.context, context)
       return context
     }
@@ -604,14 +780,14 @@ export default defineNitroPlugin((nitroApp) => {
     return result
   }
   /** @param {import('nuxt/server').RequestEvent} [event] @returns {Promise<import('@liria24/site-admin/server').SiteAdmin<import('nuxt/server').RequestEvent>>} */
-  const getSiteAdmin = async (event) => {
-    const context = await resolveDatabases(event)
+  const getSiteAdmin = async (event, platformContext) => {
+    const context = await resolveDatabases(event, platformContext)
     const database = context.database
     let siteAdmin = instances.get(database)
     if (siteAdmin) return siteAdmin
     siteAdmin = createSiteAdmin({
+    aiEnabled: ${JSON.stringify(aiEnabled)},
     ${aiOption}
-    aiEnabled: ${JSON.stringify(options.ai !== false)},
     authorize: ${authorize},
     config: { ...domainConfig, assets: ${JSON.stringify(domainConfig.assets)} },
     database,
@@ -647,6 +823,7 @@ export default defineNitroPlugin((nitroApp) => {
     ${nuxt.options.dev ? `development: ${JSON.stringify({ connector: 'application', devDatabase: false, locales })},` : ''}
     managementBase: ${JSON.stringify(options.server.managementBase)},
     publicBase: ${JSON.stringify(options.client.basePath)},
+    tasks: ${JSON.stringify(domainConfig.tasks ?? {})},
     getSiteAdmin,
     initializeRequest: async (event) => { await resolveDatabases(event) },
     authDatabase: (context) => context ? databases.get(context)?.authDatabase : undefined,
@@ -677,10 +854,6 @@ export default defineNitroPlugin((nitroApp) => {
             await setupSiteAdminDevtools(nuxt)
         }
         addServerImports({ from: '@liria24/site-admin/nuxt/server', name: 'useSiteAdmin' })
-        nitro.externals.inline!.push(
-            runtimeTemplate.dst.replaceAll('\\', '/'),
-            configPath.replaceAll('\\', '/'),
-            ...(aiPath ? [aiPath] : []),
-        )
+        nitro.externals.inline!.push(runtimeTemplate.dst.replaceAll('\\', '/'), configPath.replaceAll('\\', '/'))
     },
 })

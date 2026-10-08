@@ -1,4 +1,5 @@
 import { SiteAdminError } from '../errors'
+import type { SiteAdminMetadataInput, SiteAdminProofreadInput } from '../ai'
 import type { SiteAdmin } from './site-admin'
 
 const jsonResponse = (value: unknown, init: ResponseInit = {}): Response => {
@@ -124,6 +125,22 @@ const handleManagementRequestInner = async <Context>(
             return entry
         }
         if (method === 'GET' && path.length === 1 && path[0] === 'models') return json(siteAdmin.descriptorFor(actor))
+        if (
+            method === 'POST' &&
+            path.length === 4 &&
+            path[0] === 'models' &&
+            path[2] === 'ai' &&
+            (path[3] === 'metadata' || path[3] === 'proofread')
+        ) {
+            const model = requiredString(path[1], 'model')
+            siteAdmin.assertPermission(actor, 'model', 'ai', model)
+            const body = await bodyObject(request)
+            return json(
+                path[3] === 'metadata'
+                    ? await siteAdmin.generateMetadata(model, body as unknown as SiteAdminMetadataInput, context)
+                    : await siteAdmin.proofreadDraft(model, body as unknown as SiteAdminProofreadInput, context),
+            )
+        }
         if (method === 'GET' && path.length === 1 && path[0] === 'diagnostics') {
             siteAdmin.assertPermission(actor, 'system', 'diagnostics')
             return json(await siteAdmin.inspect())

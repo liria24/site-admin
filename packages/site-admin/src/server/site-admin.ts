@@ -5,6 +5,7 @@ import { astText, cleanText, collectMarkdown, markdownDocument, type MarkdownDoc
 import { addRoute, createRouter, findRoute, type RouterContext } from 'rou3'
 import type { SiteAdminStorage } from '../adapter'
 import { prepareUpload } from './upload'
+import { resolveSiteAdminAssets } from '../assets-config'
 import type { Files } from 'files-sdk'
 
 import type {
@@ -14,7 +15,13 @@ import type {
     SiteAdminModelAction,
     SiteAdminSystemAction,
 } from '../config'
-import type { SiteAdminAIProposal } from '../ai'
+import type {
+    SiteAdminAIDraftProposal,
+    SiteAdminAIProposal,
+    SiteAdminAIRuntime,
+    SiteAdminMetadataInput,
+    SiteAdminProofreadInput,
+} from '../ai'
 import { createSiteAdminDescriptor, type SiteAdminDescriptor } from '../descriptor'
 import { SiteAdminError, type SiteAdminIssue } from '../errors'
 import type { AnyField, AssetInput, FieldRecord } from '../fields'
@@ -263,6 +270,11 @@ export class SiteAdmin<Context = unknown> {
     #initializer: Promise<void> | undefined
 
     constructor(options: SiteAdminOptions<Context>) {
+        if (options.config.assets)
+            options = {
+                ...options,
+                config: { ...options.config, assets: resolveSiteAdminAssets(options.config.assets, options.config)! },
+            }
         if (
             options.database?.dialect !== 'sqlite' ||
             typeof options.database.bind !== 'function' ||
@@ -523,7 +535,7 @@ export class SiteAdmin<Context = unknown> {
     ): Promise<SiteAdminAIProposal> {
         await this.initialize()
         const entry = await this.getEntry(entryId)
-        const action = this.#options.aiActions?.models[entry.model]?.[actionName]
+        const action = (this.#options.aiActions?.models ?? this.config.ai?.models)?.[entry.model]?.[actionName]
         if (!action) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `AI action "${actionName}" does not exist.`)
         const output = await action({ entry, input })
         const definition = this.#model(entry.model)
@@ -541,6 +553,71 @@ export class SiteAdmin<Context = unknown> {
             issues,
             slug,
             version: entry.version,
+        }
+    }
+
+    /** Proposes changes to an unsaved draft without reading, saving, or publishing an entry. */
+    async generateMetadata(
+        modelName: string,
+        input: SiteAdminMetadataInput,
+        context?: Context,
+    ): Promise<SiteAdminAIDraftProposal> {
+        const definition = this.#model(modelName)
+        if (!isObject(input) || !isObject(input.data))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
+        if (!isObject(input.generate))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"generate" must be an object.')
+        for (const [field, value] of Object.entries(input.generate))
+            if (!['slug', 'excerpt'].includes(field) || typeof value !== 'boolean')
+                throw new SiteAdminError(
+                    'SITE_ADMIN_INVALID_INPUT',
+                    '"generate" may contain only boolean slug and excerpt flags.',
+                )
+        if (input.slug !== undefined && typeof input.slug !== 'string')
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"slug" must be a string.')
+        return this.#runDraftAI(context, (runtime) =>
+            runtime.generateMetadata(modelName, definition, input, this.config.modelDefaults?.slug?.maxLength ?? 80),
+        )
+    }
+
+    /** Proposes proofreading edits. The caller must explicitly apply and save the proposal. */
+    async proofreadDraft(
+        modelName: string,
+        input: SiteAdminProofreadInput,
+        context?: Context,
+    ): Promise<SiteAdminAIDraftProposal> {
+        const definition = this.#model(modelName)
+        if (!isObject(input) || !isObject(input.data))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
+        if (
+            input.fields !== undefined &&
+            (!Array.isArray(input.fields) || input.fields.some((field) => typeof field !== 'string'))
+        )
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"fields" must be an array of strings.')
+        return this.#runDraftAI(context, (runtime) => runtime.proofreadDraft(modelName, definition, input))
+    }
+
+    async #runDraftAI(
+        context: Context | undefined,
+        operation: (runtime: SiteAdminAIRuntime) => Promise<SiteAdminAIDraftProposal>,
+    ): Promise<SiteAdminAIDraftProposal> {
+        if (this.#options.aiEnabled === false || !this.#options.aiRuntime)
+            throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'AI operations are not available.')
+        try {
+            const runtime =
+                typeof this.#options.aiRuntime === 'function'
+                    ? await this.#options.aiRuntime(context)
+                    : this.#options.aiRuntime
+            return await operation(runtime)
+        } catch (error) {
+            if (error instanceof SiteAdminError) {
+                if (error.code === 'SITE_ADMIN_INVALID_INPUT') throw error
+                if (error.code === 'SITE_ADMIN_AI_UNAVAILABLE')
+                    throw new SiteAdminError(error.code, 'AI operations are not available.')
+                if (error.code === 'SITE_ADMIN_AI_OUTPUT_INVALID')
+                    throw new SiteAdminError(error.code, 'AI returned an invalid response.')
+            }
+            throw new SiteAdminError('SITE_ADMIN_AI_FAILED', 'AI operation failed.')
         }
     }
 
@@ -2147,7 +2224,7 @@ export class SiteAdmin<Context = unknown> {
         if (!assets || !this.#options.getFiles) {
             throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
         }
-        const storage = assets.separateDrafts === true ? 'draft' : assets.storage
+        const storage = assets.separateDrafts === true ? 'draft' : assets.storage!
         const files = await this.#options.getFiles(storage)
         const upload = await prepareUpload(input, assets.maxUploadSize)
         const id = this.#id()
@@ -2510,7 +2587,7 @@ export class SiteAdmin<Context = unknown> {
                     assetId: id,
                     key: `site-admin/public/${id}/${token}`,
                     state: 'copying',
-                    storage: this.config.assets.storage,
+                    storage: this.config.assets.storage!,
                 }
                 const guard = owner()
                 let recorded = false

@@ -7,6 +7,7 @@ import { join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { verifyStandalone } from './standalone-consumer.mjs'
+import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
@@ -120,7 +121,10 @@ try {
     }
     if (!(await stat(tarball)).isFile()) throw new Error('SITE_ADMIN_TARBALL must be a package file.')
     console.log(`Testing ${tarball} with ${packageManager}`)
-    if (packageManager === 'npm') await verifyStandalone(tarball)
+    if (packageManager === 'npm') {
+        await verifyStandalone(tarball)
+        await verifyOwnedDependencies(tarball)
+    }
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
     await writeFile(
         join(temporary, 'package.json'),
@@ -226,8 +230,11 @@ export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], siteAdm
 import { registerHooks } from 'node:module'
 registerHooks({ resolve(specifier, context, next) {
   if (specifier.includes('drizzle')) throw new Error('Core imported Drizzle: ' + specifier)
+  if (specifier === 'ai' || specifier.startsWith('ai/') || specifier.startsWith('@ai-sdk/') || specifier.startsWith('workers-ai-provider')) throw new Error('Core eagerly imported AI: ' + specifier)
   return next(specifier, context)
 } })
+await import('@liria24/site-admin')
+await import('@liria24/site-admin/client')
 await import('@liria24/site-admin/server')
 await import('@liria24/site-admin/adapter')
 for (const module of ['assets', 'content', 'document', 'plugins']) {

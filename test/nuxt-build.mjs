@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { access, rm } from 'node:fs/promises'
+import { access, rm, readdir, readFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 
@@ -11,7 +11,6 @@ import nodeSqlite from 'db0/connectors/node-sqlite'
 import { generateFixtureSQL } from './generate-fixture.mjs'
 
 const fixture = fileURLToPath(new URL('./fixtures/nuxt/', import.meta.url))
-process.env.SITE_ADMIN_TEST_DATABASE = fixture + '/.data/content.sqlite3'
 const authSecret = 'site-admin-integration-test-secret-0000000000000000'
 process.env.NUXT_BETTER_AUTH_SECRET = authSecret
 process.env.NUXT_PUBLIC_SITE_URL = 'http://127.0.0.1:3000'
@@ -24,12 +23,12 @@ await Promise.all([
 const devNuxt = await loadNuxt({ cwd: fixture, dev: true, ready: true })
 try {
     if (
-        'database' in devNuxt.options.siteAdmin ||
-        'devDatabase' in devNuxt.options.siteAdmin ||
-        devNuxt.options.nitro.experimental?.database === true
-    ) {
-        throw new Error('Site Admin must not configure or create application database connections.')
-    }
+        await access(fixture + '/.data/content.sqlite3').then(
+            () => true,
+            () => false,
+        )
+    )
+        throw new Error('Site Admin module setup must not open a SQLite database or apply migrations.')
 } finally {
     await devNuxt.close()
 }
@@ -43,6 +42,15 @@ try {
     await buildNuxt(nuxt)
 } finally {
     await nuxt.close()
+}
+
+// Type-only generated imports must never pull common server config or AI actions into app assets.
+const publicDirectory = fileURLToPath(new URL('./fixtures/nuxt/.output/public/', import.meta.url))
+for (const name of await readdir(publicDirectory, { recursive: true })) {
+    if (!/\.(?:js|json|html)$/u.test(name)) continue
+    const source = await readFile(publicDirectory + '/' + name, 'utf8')
+    if (source.includes('SITE_ADMIN_SERVER_ONLY_AI_SENTINEL') || source.includes('ignoredCommonStorage'))
+        throw new Error(`Server-only common configuration leaked into public output: ${name}`)
 }
 
 const entry = fileURLToPath(new URL('./fixtures/nuxt/.output/server/index.mjs', import.meta.url))
@@ -168,6 +176,17 @@ try {
     if (Object.values(pageChecks).includes(false)) {
         throw new Error(`Nuxt i18n/SEO/OG/Schema.org probe failed: ${JSON.stringify(pageChecks)}`)
     }
+    const seoResponse = await fetch(`http://127.0.0.1:${port}/seo-probe`)
+    const seoHtml = await seoResponse.text()
+    if (
+        !seoResponse.ok ||
+        !seoHtml.includes('<title>SEO helper probe | Test</title>') ||
+        !seoHtml.includes('content="Shared SEO description"') ||
+        !/property="og:type"[^>]+content="article"/u.test(seoHtml) ||
+        !/name="twitter:card"[^>]+content="summary"/u.test(seoHtml)
+    ) {
+        throw new Error(`Shared defineSeo SSR probe failed: ${seoResponse.status} ${seoHtml.slice(0, 1000)}`)
+    }
     const redirect = await fetch(`http://127.0.0.1:${port}/go/external`, { redirect: 'manual' })
     if (redirect.status !== 302 || redirect.headers.get('location') !== 'https://example.com/destination') {
         throw new Error('Nuxt route middleware redirect probe failed.')
@@ -187,6 +206,9 @@ try {
         throw new Error('Nuxt llms.txt probe failed.')
     }
 } finally {
-    server.kill()
-    await once(server, 'exit')
+    // A startup failure may have emitted exit before cleanup. Preserve its diagnostic.
+    if (server.exitCode === null && server.signalCode === null) {
+        server.kill()
+        await once(server, 'exit')
+    }
 }

@@ -2,6 +2,7 @@ import { isNuxtError, type RequestEvent } from 'nuxt/server'
 import type { BetterAuthOptions } from 'better-auth'
 import { SiteAdminError } from '../errors'
 import type { SiteAdmin } from '../server/site-admin'
+import type { SiteAdminTaskOptions } from '../runtime/tasks'
 
 export interface SiteAdminRuntime {
     development?: {
@@ -11,7 +12,11 @@ export interface SiteAdminRuntime {
     }
     managementBase: string
     publicBase: string
-    getSiteAdmin: (event?: RequestEvent) => SiteAdmin<RequestEvent> | Promise<SiteAdmin<RequestEvent>>
+    tasks?: SiteAdminTaskOptions
+    getSiteAdmin: (
+        event?: RequestEvent,
+        platformContext?: object,
+    ) => SiteAdmin<RequestEvent> | Promise<SiteAdmin<RequestEvent>>
     initializeRequest?: (event: RequestEvent) => void | Promise<void>
     authDatabase?: (context?: object) => BetterAuthOptions['database']
 }
@@ -30,9 +35,9 @@ export const useSiteAdminRuntime = (): SiteAdminRuntime => {
     return runtime
 }
 
-/** Omit the event only for background/platform operations with application-provided bindings. */
-export const useSiteAdmin = async (event?: RequestEvent): Promise<SiteAdmin<RequestEvent>> =>
-    useSiteAdminRuntime().getSiteAdmin(event)
+/** Background tasks may omit the event; pass native platform context for D1 bindings. */
+export const useSiteAdmin = async (event?: RequestEvent, platformContext?: object): Promise<SiteAdmin<RequestEvent>> =>
+    useSiteAdminRuntime().getSiteAdmin(event, platformContext)
 
 /** Normalize intentional authorization refusals before the framework-neutral HTTP error boundary. */
 export const normalizeSiteAdminAuthorizationError = (error: unknown): unknown => {

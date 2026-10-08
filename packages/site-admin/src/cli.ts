@@ -5,6 +5,8 @@ import { parseArgs } from 'node:util'
 import { createJiti } from 'jiti'
 import type { SiteAdminConfig } from './config'
 import { generateSiteAdminSchema, generateCombinedSchema } from './generate'
+import { resolveSiteAdminConfig } from './config-resolution'
+import { createSiteAdminDependencyAliases } from './dependency-aliases'
 import type { BetterAuthOptions } from 'better-auth'
 
 type NativeAuthConfig =
@@ -15,27 +17,40 @@ const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
         config: { type: 'string', default: 'site-admin.config.ts' },
-        out: { type: 'string', default: 'schema.ts' },
+        out: { type: 'string' },
         auth: { type: 'string' },
-        'auth-use-plural': { type: 'boolean', default: false },
+        'auth-use-plural': { type: 'boolean' },
+        env: { type: 'string', multiple: true },
+        prerender: { type: 'boolean', default: false },
     },
 })
 if (positionals.length !== 1 || positionals[0] !== 'generate')
     throw new Error(
-        'Usage: site-admin generate [--config site-admin.config.ts] [--auth server/auth.config.ts] [--auth-use-plural] [--out schema.ts]',
+        'Usage: site-admin generate [--config site-admin.config.ts] [--env production] [--prerender] [--auth server/auth.config.ts] [--auth-use-plural] [--out schema.ts]',
     )
-const config = await createJiti(import.meta.url, { fsCache: false }).import<SiteAdminConfig>(resolve(values.config), {
+const jiti = createJiti(import.meta.url, {
+    alias: createSiteAdminDependencyAliases({ rootDir: process.cwd() }),
+    fsCache: false,
+})
+const loaded = await jiti.import<SiteAdminConfig>(resolve(values.config), {
     default: true,
 })
+const config = resolveSiteAdminConfig(loaded, [
+    process.env.NODE_ENV ?? 'development',
+    ...(values.env ?? []),
+    ...(values.prerender ? ['prerender'] : []),
+])
 const auth = values.auth
-    ? await createJiti(import.meta.url, { fsCache: false }).import<NativeAuthConfig>(resolve(values.auth), {
+    ? await jiti.import<NativeAuthConfig>(resolve(values.auth), {
           default: true,
       })
     : undefined
 const source = auth
-        ? await generateCombinedSchema(config, auth, { usePlural: values['auth-use-plural'] })
+        ? await generateCombinedSchema(config, auth, {
+              usePlural: values['auth-use-plural'] ?? config.database?.authUsePlural ?? false,
+          })
         : generateSiteAdminSchema(config),
-    output = resolve(values.out)
+    output = resolve(values.out ?? config.database?.schema ?? 'schema.ts')
 await mkdir(dirname(output), { recursive: true })
 await writeFile(output, source)
 console.log(`Generated ${output}. Run drizzle-kit generate to create SQL migrations; no database was modified.`)

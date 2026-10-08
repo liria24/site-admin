@@ -2,7 +2,7 @@ import type { SiteAdminDatabase as Database } from '../adapter'
 import type { Body, Files, StoredFile } from 'files-sdk'
 
 import type { SiteAdminConfig } from '../config'
-import type { SiteAdminAIConfig } from '../ai'
+import type { SiteAdminAIConfig, SiteAdminAIRuntime } from '../ai'
 import type { SiteAdminIssue } from '../errors'
 
 export interface SiteAdminActor {
@@ -15,6 +15,8 @@ export type FilesResolver = (storage: string) => Promise<Files>
 export interface SiteAdminOptions<Context = unknown> {
     aiActions?: SiteAdminAIConfig
     aiEnabled?: boolean
+    /** Resolved for each operation so request-scoped provider bindings are never cached. */
+    aiRuntime?: SiteAdminAIRuntime | ((context?: Context) => Promise<SiteAdminAIRuntime>)
     authorize?: (request: Request, context?: Context) => Promise<SiteAdminActor | null> | SiteAdminActor | null
     config: SiteAdminConfig
     database: Database

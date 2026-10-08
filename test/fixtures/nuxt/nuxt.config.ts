@@ -16,7 +16,4 @@ export default defineNuxtConfig({
         title: 'Site content',
     },
     modules: [siteAdmin],
-    siteAdmin: {
-        assets: { storage: 'content' },
-    },
 })
