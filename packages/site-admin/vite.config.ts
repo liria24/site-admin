@@ -79,6 +79,7 @@ export default defineConfig({
                 server: 'src/server/index.ts',
                 seo: 'src/seo.ts',
                 'runtime/management-handler': 'src/runtime/management-handler.ts',
+                'runtime/ai-action-handler': 'src/runtime/ai-action-handler.ts',
                 'runtime/public-handler': 'src/runtime/public-handler.ts',
             },
             exports: false,

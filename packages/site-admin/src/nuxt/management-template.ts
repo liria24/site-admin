@@ -116,7 +116,7 @@ ${overloads('Entry')}
 export function useSiteAdminManagementEntry(model: ManagementModelName, id: MaybeRefOrGetter<string>, options: AsyncDataOptions<SiteAdminEntry<FormData<ManagementModelName>>> & SiteAdminManagementDataOptions = {}) {
   const connection = siteAdminManagementClientOptions()
   const auth = useSiteAdminAuthScope(options.authScope, connection)
-  const locale = useSiteAdminLocale(options.locale)
+  const locale = computed(() => toValue(options.locale))
   const client = createSiteAdminManagementClient(connection)
   const key = computed(() => siteAdminManagementKey(connection, auth.value, 'entry', model, toValue(id), locale.value))
   const { authScope: _auth, locale: _locale, limit: _limit, offset: _offset, q: _q, ...asyncOptions } = options
@@ -134,7 +134,7 @@ ${overloads('List')}
 export function useSiteAdminManagementList(model: ManagementModelName, options: AsyncDataOptions<SiteAdminEntryPage<FormData<ManagementModelName>>> & SiteAdminManagementDataOptions = {}) {
   const connection = siteAdminManagementClientOptions()
   const auth = useSiteAdminAuthScope(options.authScope, connection)
-  const locale = useSiteAdminLocale(options.locale)
+  const locale = computed(() => toValue(options.locale))
   const client = createSiteAdminManagementClient(connection)
   const query = computed(() => ({ ...(locale.value === undefined ? {} : { locale: locale.value }), ...(toValue(options.limit) === undefined ? {} : { limit: toValue(options.limit)! }), ...(toValue(options.offset) === undefined ? {} : { offset: toValue(options.offset)! }), ...(toValue(options.q) === undefined ? {} : { q: toValue(options.q)! }) }))
   const key = computed(() => siteAdminManagementKey(connection, auth.value, 'list', model, query.value, locale.value))

@@ -3,6 +3,7 @@ export type {
     InferModelData,
     InferPublicModelData,
     InferSiteAdminModels,
+    InferSiteAdminAIActions,
     InferSiteAdminFormModels,
     InferSiteAdminPublicModels,
     ModelDefinition,
@@ -22,6 +23,13 @@ export type {
     SiteAdminSystemAction,
 } from './config'
 export type { SiteAdminRouteRule, SiteAdminRouteRules } from './seo'
+export type {
+    InferSiteAdminNamedAiActions,
+    SiteAdminAiActionData,
+    SiteAdminAiActionProps,
+    SiteAdminNamedAiAction,
+    SiteAdminDecisionModel,
+} from './ai/actions'
 export { SiteAdminError } from './errors'
 export type { SiteAdminErrorCode, SiteAdminIssue } from './errors'
 export { createSiteAdminDescriptor } from './descriptor'

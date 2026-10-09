@@ -11,6 +11,36 @@ const config = defineSiteAdminConfig({
 
 const checkAIClientTypes = async (): Promise<void> => {
     const client = createSiteAdminManagementClient<InferSiteAdminModels<typeof config>>()
+    const candidate = { title: 'Typed publication', excerpt: 'Manual excerpt' }
+    const published = await client.publishEntry('id', { expectedVersion: 1, draft: { data: candidate, slug: 'typed' } })
+    if ('data' in published) {
+        const title: string = published.data.title
+        void title
+    }
+    const action = await client.runAIAction('id', 'application-action', {
+        expectedVersion: 1,
+        draft: { data: candidate },
+    })
+    const actionTitle: string = action.data.title
+    await client.schedulePublish('id', { at: '2099-01-01T00:00:00Z', expectedVersion: 1, draft: { data: candidate } })
+    // @ts-expect-error Schedule candidates and revision selection are mutually exclusive too.
+    await client.schedulePublish('id', {
+        at: '2099-01-01T00:00:00Z',
+        expectedVersion: 1,
+        revisionId: 'revision',
+        draft: { data: candidate },
+    })
+    // @ts-expect-error Public candidate and revision selection are mutually exclusive.
+    await client.publishEntry('id', { expectedVersion: 1, revisionId: 'revision', draft: { data: candidate } })
+    // @ts-expect-error Candidate data preserves configured field value types.
+    await client.publishEntry('id', { expectedVersion: 1, draft: { data: { title: 1, excerpt: '' } } })
+    // @ts-expect-error An unsaved action snapshot requires its expected version.
+    await client.runAIAction('id', 'application-action', { draft: { data: candidate } })
+    await client.runAIAction('id', 'application-action', {
+        expectedVersion: 1,
+        // @ts-expect-error An action snapshot preserves configured field types.
+        draft: { data: { title: 1, excerpt: '' } },
+    })
     const metadata = await client.generateMetadata('articles', {
         data: { title: 'Incomplete draft' },
         generate: { excerpt: true, slug: true },
@@ -33,6 +63,6 @@ const checkAIClientTypes = async (): Promise<void> => {
     await createSiteAdminManagementClient().generateMetadata('missing', { data: {}, generate: {} })
     // @ts-expect-error Unknown model names must also fail through the generated management registry.
     await createSiteAdminManagementClient().proofreadDraft('missing', { data: {} })
-    void [excerpt, slug, body, guaranteedTitle]
+    void [excerpt, slug, body, guaranteedTitle, actionTitle]
 }
 void checkAIClientTypes

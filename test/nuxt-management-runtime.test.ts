@@ -20,9 +20,14 @@ import { useSiteAdminForm } from '../packages/site-admin/src/form'
 
 interface State {
     data: Vue.Ref<unknown>
-    refresh(options?: { cachedData?: unknown }): Promise<void>
+    status: Vue.Ref<string>
+    error: Vue.Ref<unknown>
+    execute(options?: { signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
+    clear(): void
+    refresh(options?: { cachedData?: unknown; signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
 }
 interface Helpers {
+    useAiAction(name: string, options: Record<string, unknown>): State & Promise<State>
     useSiteAdminForm(
         model: string,
         options: Record<string, unknown>,
@@ -43,7 +48,7 @@ interface Helpers {
     ): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
 }
 
-const nativeEnvironment = async (request: typeof fetch) => {
+const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions = false) => {
     const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
     const root = dirname(requireNuxt.resolve('nuxt/package.json'))
     const script = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
@@ -63,9 +68,14 @@ const nativeEnvironment = async (request: typeof fetch) => {
         }
     }
     const app = {
+        $i18n: { locale: Vue.ref('ja') },
         _asyncData: Vue.shallowReactive({}),
         _asyncDataPromises: {},
-        payload: { data: Vue.shallowReactive({} as Record<string, unknown>), _errors: {}, serverRendered: false },
+        payload: {
+            data: Vue.shallowReactive({} as Record<string, unknown>),
+            _errors: Vue.shallowReactive({}),
+            serverRendered: false,
+        },
         static: { data: {} as Record<string, unknown> },
         isHydrating: false,
         hook,
@@ -95,13 +105,32 @@ const nativeEnvironment = async (request: typeof fetch) => {
         clientOnlySymbol: Symbol('client-only'),
         onNuxtReady: (callback: () => void) => callback(),
         toArray: (value: unknown) => (Array.isArray(value) ? value : [value]),
+        defineKeyedFunctionFactory: (options: { factory: unknown }) => options.factory,
+        hashKey: (await import(join(root, 'dist/app/utils/hash.js'))).hashKey as unknown,
+        isPlainObject: (value: unknown) => Object.prototype.toString.call(value) === '[object Object]',
+        alwaysRunFetchOnKeyChange: false,
+        fetchDefaults: {},
+        routeTypedFetch: false,
+        $fetch: async (url: string, options: RequestInit) => {
+            const response = await request(new URL(url, 'http://site.test'), {
+                ...options,
+                body: JSON.stringify(options.body),
+            })
+            if (!response.ok) throw createError({ statusCode: response.status, data: await response.json() })
+            return response.json()
+        },
     }
+    const fetchSource = script(await readFile(join(root, 'dist/app/composables/fetch.js'), 'utf8'))
+        .replaceAll('import.meta.client', 'true')
+        .replaceAll('import.meta.server', 'false')
+        .replaceAll('import.meta.dev', 'false')
+    const addonsSource = script(await readFile(join(root, 'dist/app/composables/addons.js'), 'utf8'))
     const runtime = new Function(
         ...Object.keys(nativeDependencies),
-        `${native}; return { useAsyncData, clearNuxtData, refreshNuxtData, useNuxtData }`,
+        `${native}\n${addonsSource}\n${fetchSource}; return { useAsyncData, clearNuxtData, refreshNuxtData, useNuxtData, createUseFetch, defineUseFetchAddon }`,
     )(...Object.values(nativeDependencies)) as Record<string, unknown>
     const generated = stripTypeScriptTypes(
-        siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage' }),
+        siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage', i18n, aiActions }),
     )
         .replace(/^import .*$/gmu, '')
         .replace(/^export const siteAdminAsyncData = createUseAsyncData\(\)\s*$/gmu, '')
@@ -110,6 +139,7 @@ const nativeEnvironment = async (request: typeof fetch) => {
     const dependencies = {
         ...Object.fromEntries(Object.entries(Vue).filter(([name]) => /^[a-zA-Z_$][a-zA-Z_$0-9]*$/u.test(name))),
         ...runtime,
+        hashKey: nativeDependencies.hashKey,
         siteAdminAsyncData: runtime.useAsyncData,
         createSiteAdminClient,
         createSiteAdminManagementClient,
@@ -121,7 +151,7 @@ const nativeEnvironment = async (request: typeof fetch) => {
     }
     const helpers = new Function(
         ...Object.keys(dependencies),
-        `${generated}; return { useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
+        `${generated}; return { ${aiActions ? 'useAiAction,' : ''} useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
     )(...Object.values(dependencies)) as Helpers
     const states = new Map<string, Vue.Ref<unknown>>()
     const formDependencies = {
@@ -147,6 +177,321 @@ const flush = async () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     await Vue.nextTick()
 }
+const settles = async (pending: Promise<void>) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([
+            pending.then(() => true),
+            new Promise<false>((resolve) => {
+                timer = setTimeout(() => resolve(false), 100)
+            }),
+        ])
+    } finally {
+        clearTimeout(timer)
+    }
+}
+const cancelledSignals = [
+    ['AbortSignal.abort()', () => AbortSignal.abort()],
+    [
+        'an already-aborted controller',
+        () => {
+            const controller = new AbortController()
+            controller.abort()
+            return controller.signal
+        },
+    ],
+    ['a string reason', () => AbortSignal.abort('Cancelled')],
+    ['a custom non-Error reason', () => AbortSignal.abort({ cancelled: true })],
+] as const
+describe('native createUseFetch AI actions', () => {
+    describe.each(['execute', 'refresh'] as const)('%s cancellation', (method) => {
+        it.each(cancelledSignals)(
+            'settles %s before execution and permits a subsequent defer retry',
+            async (_, signal) => {
+                let calls = 0
+                const { helpers } = await nativeEnvironment(
+                    async () => {
+                        calls++
+                        return Response.json('Retried')
+                    },
+                    false,
+                    true,
+                )
+                const scope = Vue.effectScope()
+                // Exercise extensions on the awaited instance, as used by async component setup.
+                const state = await scope.run(() =>
+                    helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
+                )!
+                try {
+                    await state.execute()
+                    expect(state.status.value).toBe('success')
+                    expect(await settles(state[method]({ signal: signal() }))).toBe(true)
+                    expect(state.status.value).toBe('idle')
+                    expect(state.error.value).toBeUndefined()
+                    expect(state.data.value).toBeUndefined()
+                    expect(calls).toBe(1)
+                    expect(await settles(state.execute())).toBe(true)
+                    expect(state.status.value).toBe('success')
+                    expect(calls).toBe(2)
+                } finally {
+                    state.clear()
+                    scope.stop()
+                }
+            },
+        )
+    })
+    it('does not invoke transport for pre-aborted initial execution or interrupt a healthy deferred request', async () => {
+        let calls = 0
+        let complete!: () => void
+        let transport: AbortSignal | undefined
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                transport = init?.signal ?? undefined
+                await new Promise<void>((resolve) => {
+                    complete = resolve
+                })
+                return Response.json('Completed')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        // Also exercise extensions on the unawaited native composable return.
+        const state = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }))!
+        try {
+            expect(await settles(state.execute({ signal: AbortSignal.abort() }))).toBe(true)
+            expect(state.status.value).toBe('idle')
+            expect(calls).toBe(0)
+            const first = state.execute()
+            expect(await settles(state.execute({ signal: AbortSignal.abort('Cancelled') }))).toBe(true)
+            expect(state.status.value).toBe('pending')
+            expect(transport?.aborted).toBe(false)
+            expect(calls).toBe(1)
+            complete()
+            expect(await settles(first)).toBe(true)
+            expect(state.data.value).toBe('Completed')
+        } finally {
+            complete?.()
+            state.clear()
+            scope.stop()
+        }
+    })
+    it.each([
+        ['default AbortError', undefined, 'idle'],
+        ['explicit AbortError', new DOMException('Cancelled', 'AbortError'), 'idle'],
+        ['string reason', 'Cancelled', 'idle'],
+        ['custom non-Error reason', { cancelled: true }, 'idle'],
+        ['custom Error reason', new Error('Stopped'), 'error'],
+    ] as const)('settles in-flight %s, aborts transport and permits retry', async (_description, reason, status) => {
+        let calls = 0
+        let transport: AbortSignal | undefined
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                if (calls === 1) {
+                    transport = init?.signal ?? undefined
+                    await new Promise<void>((_resolve, reject) => {
+                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                    })
+                }
+                return Response.json('Retried')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = await scope.run(() =>
+            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
+        )!
+        try {
+            const controller = new AbortController()
+            const pending = state.execute({ signal: controller.signal })
+            controller.abort(reason)
+            expect(transport?.aborted).toBe(true)
+            expect(await settles(pending)).toBe(true)
+            expect(state.status.value).toBe(status)
+            if (status === 'idle') expect(state.error.value).toBeUndefined()
+            else expect(state.error.value).toMatchObject({ message: 'Stopped' })
+            expect(await settles(state.execute())).toBe(true)
+            expect(calls).toBe(2)
+            expect(state.data.value).toBe('Retried')
+            expect(state.status.value).toBe('success')
+        } finally {
+            state.clear()
+            scope.stop()
+        }
+    })
+    it('settles synchronous abort before middleware begins and allows retry', async () => {
+        let calls = 0
+        const { helpers } = await nativeEnvironment(
+            async () => {
+                calls++
+                return Response.json('Retried')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = await scope.run(() =>
+            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
+        )!
+        const controller = new AbortController()
+        const stop = Vue.watch(
+            state.status,
+            (status) => {
+                if (status === 'pending') controller.abort('Cancelled')
+            },
+            { flush: 'sync' },
+        )
+        try {
+            expect(await settles(state.execute({ signal: controller.signal }))).toBe(true)
+            expect(state.status.value).toBe('idle')
+            expect(calls).toBe(0)
+            stop()
+            expect(await settles(state.execute())).toBe(true)
+            expect(calls).toBe(1)
+            expect(state.status.value).toBe('success')
+        } finally {
+            stop()
+            state.clear()
+            scope.stop()
+        }
+    })
+    it('retains native timeout and pre-aborted Error state and permits retry', async () => {
+        let calls = 0
+        let transport: AbortSignal | undefined
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                if (calls === 1) {
+                    transport = init?.signal ?? undefined
+                    await new Promise<void>((_resolve, reject) => {
+                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                    })
+                }
+                return Response.json('Retried')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = await scope.run(() =>
+            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false, timeout: 5 }),
+        )!
+        try {
+            expect(await settles(state.execute({ signal: AbortSignal.abort(new Error('Stopped')) }))).toBe(true)
+            expect(calls).toBe(0)
+            expect(state.status.value).toBe('error')
+            expect(state.error.value).toMatchObject({ message: 'Stopped' })
+            expect(await settles(state.execute())).toBe(true)
+            expect(transport?.aborted).toBe(true)
+            expect(state.status.value).toBe('error')
+            expect(state.error.value).toMatchObject({ cause: { name: 'TimeoutError' } })
+            expect(await settles(state.execute())).toBe(true)
+            expect(calls).toBe(2)
+            expect(state.status.value).toBe('success')
+        } finally {
+            state.clear()
+            scope.stop()
+        }
+    })
+    it('executes only explicitly with fixed POST/watch/retry and snapshots reactive props', async () => {
+        const bodies: unknown[] = []
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                bodies.push(JSON.parse(String(init?.body)))
+                expect(init?.method?.toLowerCase()).toBe('post')
+                return Response.json({ content: 'Corrected' })
+            },
+            false,
+            true,
+        )
+        const props = Vue.ref({ content: 'First' })
+        const scope = Vue.effectScope()
+        const state = scope.run(() =>
+            helpers.useAiAction('proofread', { props, immediate: false, method: 'GET', retry: 3, watch: true }),
+        )!
+        await state
+        props.value.content = 'Second'
+        await flush()
+        expect(bodies).toHaveLength(0)
+        const pending = state.execute()
+        props.value.content = 'Third'
+        await pending
+        expect(bodies).toEqual([{ props: { content: 'Second' } }])
+        await flush()
+        expect(bodies).toHaveLength(1)
+        await state.execute()
+        expect(state.data.value).toEqual({ content: 'Corrected' })
+        scope.stop()
+    })
+    it('isolates different inputs and auth scopes, hydrates without inference twice', async () => {
+        let calls = 0
+        const { app, helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                return Response.json(JSON.parse(String(init?.body)).props.content)
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const auth = Vue.ref('alice')
+        const a = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, authScope: auth }))!
+        const b = scope.run(() => helpers.useAiAction('plain', { props: { content: 'B' }, authScope: auth }))!
+        await Promise.all([a, b])
+        expect(a.data.value).toBe('A')
+        expect(b.data.value).toBe('B')
+        expect(calls).toBe(2)
+        app.isHydrating = true
+        app.payload.serverRendered = true
+        const hydrated = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, authScope: 'alice' }))!
+        await hydrated
+        expect(hydrated.data.value).toBe('A')
+        expect(calls).toBe(2)
+        app.isHydrating = false
+        auth.value = 'bob'
+        await flush()
+        expect(a.data.value).toBeUndefined()
+        expect(calls).toBe(2)
+        await a.execute()
+        expect(calls).toBe(3)
+        scope.stop()
+    })
+    it('keeps failures in native error/status and supports cancellation and concurrent dedupe', async () => {
+        let calls = 0
+        let complete!: () => void
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                await new Promise<void>((resolve, reject) => {
+                    complete = resolve
+                    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                })
+                return Response.json({ error: { code: 'SITE_ADMIN_AI_FAILED' } }, { status: 502 })
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }))!
+        const first = state.execute()
+        const duplicate = state.execute()
+        expect(calls).toBe(1)
+        complete()
+        await Promise.all([first, duplicate])
+        expect(state.status.value).toBe('error')
+        expect(state.error.value).toMatchObject({ statusCode: 502 })
+        const controller = new AbortController()
+        const cancelled = state.execute({ signal: controller.signal })
+        controller.abort(new DOMException('Cancelled', 'AbortError'))
+        await cancelled
+        expect(state.status.value).toBe('idle')
+        expect(state.error.value).toBeUndefined()
+        scope.stop()
+    })
+})
 const modelDescriptor = createSiteAdminDescriptor(
     defineSiteAdminConfig({
         models: {
@@ -157,6 +502,63 @@ const modelDescriptor = createSiteAdminDescriptor(
 )
 
 describe('native management AsyncData and mutation invalidation', () => {
+    it('uses only explicit management locales while public helpers keep reactive i18n defaults', async () => {
+        const urls: URL[] = []
+        const { app, helpers } = await nativeEnvironment(async (input) => {
+            const url = new URL(String(input))
+            urls.push(url)
+            if (url.pathname === '/manage/models') return Response.json(modelDescriptor)
+            const entry = {
+                id: 'one',
+                model: 'posts',
+                locale: url.searchParams.get('locale') ?? '',
+                slug: 'one',
+                version: 1,
+                data: { title: 'Title' },
+            }
+            if (url.pathname === '/manage/entries')
+                return Response.json({ items: [entry], total: 1, limit: 50, offset: 0 })
+            if (url.pathname === '/manage/entries/one') return Response.json(entry)
+            return Response.json([
+                { data: { _siteAdmin: { id: 'one', model: 'posts', slug: 'one' }, title: 'Public' } },
+            ])
+        }, true)
+        const scope = Vue.effectScope()
+        const explicit = Vue.ref('ja')
+        const states = scope.run(() => ({
+            list: helpers.useSiteAdminManagementList('posts'),
+            entry: helpers.useSiteAdminManagementEntry('posts', 'one'),
+            localized: helpers.useSiteAdminManagementList('posts', { locale: explicit }),
+            public: helpers.useSiteAdminList('posts'),
+        }))!
+        await flush()
+        expect((states.entry.data.value as { locale: string }).locale).toBe('')
+        expect((states.list.data.value as { items: unknown[] }).items).toHaveLength(1)
+        expect(
+            urls.filter((url) => url.pathname === '/manage/entries').map((url) => url.searchParams.get('locale')),
+        ).toEqual([null, 'ja'])
+        expect(urls.find((url) => url.pathname === '/manage/entries/one')?.searchParams.get('locale')).toBeNull()
+        expect(urls.find((url) => url.pathname === '/content/posts')?.searchParams.get('locale')).toBe('ja')
+        const managementCount = urls.filter((url) => url.pathname.startsWith('/manage/')).length
+        app.$i18n.locale.value = 'en'
+        await flush()
+        expect(urls.filter((url) => url.pathname.startsWith('/manage/'))).toHaveLength(managementCount)
+        expect(
+            urls
+                .filter((url) => url.pathname === '/content/posts')
+                .at(-1)
+                ?.searchParams.get('locale'),
+        ).toBe('en')
+        explicit.value = 'en'
+        await flush()
+        expect(
+            urls
+                .filter((url) => url.pathname === '/manage/entries')
+                .at(-1)
+                ?.searchParams.get('locale'),
+        ).toBe('en')
+        scope.stop()
+    })
     it('hydrates an ID-only form from its raw native payload without another descriptor or entry request', async () => {
         let requests = 0
         const { app, helpers } = await nativeEnvironment(async () => {

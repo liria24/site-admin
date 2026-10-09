@@ -1,5 +1,6 @@
 import { normalize } from 'pathe'
 import { siteAdminNuxtManagementDataTemplate } from './management-template'
+import { siteAdminNuxtAiTemplate } from './ai-template'
 
 export interface SiteAdminClientTemplateOptions {
     basePath: string
@@ -7,6 +8,7 @@ export interface SiteAdminClientTemplateOptions {
     i18n?: boolean
     origin?: string
     auth?: boolean
+    aiActions?: boolean
 }
 
 /** App-side templates deliberately do not import the server's config module. */
@@ -56,6 +58,7 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
 
 ${siteAdminNuxtPublicDataTemplate(options)}
 ${siteAdminNuxtManagementDataTemplate(options)}
+${options.aiActions ? siteAdminNuxtAiTemplate(options) : ''}
 `
 
 const publicDataOverloads = (kind: 'Entry' | 'List'): string => {
@@ -217,7 +220,7 @@ const siteAdminResolveBatch = async (client: SiteAdminClient, requests: readonly
 export const siteAdminNuxtFormTemplate =
     (): string => `import { useSiteAdminForm as createForm } from '@liria24/site-admin/form'
 import type { UseSiteAdminFormOptions } from '@liria24/site-admin/form'
-import type { SiteAdminFormModels, SiteAdminManagementModels, SiteAdminEntry } from '@liria24/site-admin/client'
+import type { SiteAdminFormModels, SiteAdminManagementModels, SiteAdminAIActionModels, SiteAdminEntry } from '@liria24/site-admin/client'
 import { SiteAdminClientError } from '@liria24/site-admin/client'
 import { siteAdminManagementClientOptions, createNuxtSiteAdminManagementClient, useSiteAdminAuthScope, useSiteAdminModels, siteAdminAsyncData, siteAdminManagementKey } from '#build/site-admin/client'
 import { useNuxtApp, useState } from '#imports'
@@ -228,7 +231,7 @@ type ModelData<Name extends ModelName> = Extract<SiteAdminFormModels[Name], Reco
 type NuxtFormOptions<Data extends Record<string, unknown>, EntryData = Record<string, unknown>> = Omit<UseSiteAdminFormOptions<Data>, 'descriptor' | 'modelName' | 'entry' | 'id' | 'drafts' | 'client' | 'presentation' | 'generateMetadataOnSubmit' | 'initialEntry' | 'loadDescriptor' | 'loadEntry'> &
   ({ entry?: SiteAdminEntry<EntryData>; id?: never } | { id?: Vue.MaybeRefOrGetter<string | null | undefined>; entry?: never })
 
-export function useSiteAdminForm<Name extends ModelName & keyof SiteAdminManagementModels>(modelName: Name, options?: NuxtFormOptions<ModelData<Name>, SiteAdminManagementModels[Name]>): Promise<ReturnType<typeof createForm<ModelData<Name>>>>
+export function useSiteAdminForm<Name extends ModelName & keyof SiteAdminManagementModels & keyof SiteAdminAIActionModels>(modelName: Name, options?: NuxtFormOptions<ModelData<Name>, SiteAdminManagementModels[Name]>): Promise<ReturnType<typeof createForm<ModelData<Name>, Extract<keyof SiteAdminAIActionModels[Name], string>, Extract<SiteAdminManagementModels[Name], Record<string, unknown>>>>>
 export function useSiteAdminForm<Data extends Record<string, unknown>>(options: UseSiteAdminFormOptions<Data>): ReturnType<typeof createForm<Data>>
 export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOptions<Record<string, unknown>>, options: NuxtFormOptions<Record<string, unknown>> = {}) {
   const defaultConnection = siteAdminManagementClientOptions()
@@ -270,7 +273,7 @@ export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOption
     restore()
     const descriptor = Object.hasOwn(models, modelOrOptions) ? models[modelOrOptions] : undefined
     if (!descriptor) throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', '[site-admin] Form model "' + modelOrOptions + '" is unavailable to this actor.', 403)
-    const controller = createForm({ ...defaults, ...options, ...('slug' in options ? { get slug() { return options.slug } } : {}), descriptor, modelName: modelOrOptions, authScope: auth, drafts, client: management, presentation: true, generateMetadataOnSubmit: true,
+    const controller = createForm({ ...defaults, ...options, ...('slug' in options ? { get slug() { return options.slug } } : {}), descriptor, modelName: modelOrOptions, authScope: auth, drafts, client: management, presentation: true,
       ...(entrySource?.data.value?.entry ? { initialEntry: entrySource.data.value.entry } : {}),
       loadDescriptor: async (signal) => {
         await Vue.nextTick()
@@ -315,7 +318,7 @@ export const siteAdminNuxtModelTypes = (
     configPath: string,
     environments: readonly string[] = [],
 ): string => `import '@liria24/site-admin/client'
-import type { InferSiteAdminModels, InferSiteAdminFormModels, InferSiteAdminPublicModels, ResolvedSiteAdminConfig } from '@liria24/site-admin'
+import type { InferSiteAdminModels, InferSiteAdminFormModels, InferSiteAdminAIActions, InferSiteAdminNamedAiActions, InferSiteAdminPublicModels, ResolvedSiteAdminConfig } from '@liria24/site-admin'
 
 type SiteAdminDomainConfig = ResolvedSiteAdminConfig<typeof import(${JSON.stringify(normalize(configPath))}).default, readonly [${environments.map((environment) => JSON.stringify(environment)).join(', ')}]>
 
@@ -323,6 +326,8 @@ declare module '@liria24/site-admin/client' {
   interface SiteAdminClientRegistry {
     managementModels: InferSiteAdminModels<SiteAdminDomainConfig>
     formModels: InferSiteAdminFormModels<SiteAdminDomainConfig>
+    aiActions: InferSiteAdminAIActions<SiteAdminDomainConfig>
+    namedAiActions: InferSiteAdminNamedAiActions<SiteAdminDomainConfig>
     publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>
   }
 }

@@ -57,6 +57,9 @@ const requiredString = (value: unknown, name: string): string => {
     return value
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+
 const expectedVersion = (value: unknown): number => {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
         throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"expectedVersion" must be a non-negative integer.')
@@ -263,11 +266,28 @@ const handleManagementRequestInner = async <Context>(
             if (method === 'POST' && path[2] === 'publish') {
                 await entryFor(id, 'publish')
                 const body = await bodyObject(request)
+                if (body.draft !== undefined) {
+                    await entryFor(id, 'update')
+                    if (
+                        !isObject(body.draft) ||
+                        !isObject(body.draft.data) ||
+                        (body.draft.slug !== undefined && typeof body.draft.slug !== 'string') ||
+                        body.revisionId !== undefined
+                    )
+                        throw new SiteAdminError(
+                            'SITE_ADMIN_INVALID_INPUT',
+                            'Publish draft requires data and an optional slug, without revisionId.',
+                        )
+                }
                 return json(
                     await siteAdmin.publishEntry(id, {
                         actorId: actor.id,
                         expectedVersion: expectedVersion(body.expectedVersion),
-                        ...(typeof body.revisionId === 'string' ? { revisionId: body.revisionId } : {}),
+                        ...(body.draft !== undefined
+                            ? { draft: body.draft as { data: Record<string, unknown>; slug?: string } }
+                            : typeof body.revisionId === 'string'
+                              ? { revisionId: body.revisionId }
+                              : {}),
                     }),
                 )
             }
@@ -284,12 +304,29 @@ const handleManagementRequestInner = async <Context>(
             if (method === 'POST' && path[2] === 'schedule') {
                 await entryFor(id, 'schedule')
                 const body = await bodyObject(request)
+                if (body.draft !== undefined) {
+                    await entryFor(id, 'update')
+                    if (
+                        !isObject(body.draft) ||
+                        !isObject(body.draft.data) ||
+                        (body.draft.slug !== undefined && typeof body.draft.slug !== 'string') ||
+                        body.revisionId !== undefined
+                    )
+                        throw new SiteAdminError(
+                            'SITE_ADMIN_INVALID_INPUT',
+                            'Publish draft requires data and an optional slug, without revisionId.',
+                        )
+                }
                 return json(
                     await siteAdmin.schedulePublish(id, {
                         actorId: actor.id,
                         at: requiredString(body.at, 'at'),
                         expectedVersion: expectedVersion(body.expectedVersion),
-                        ...(typeof body.revisionId === 'string' ? { revisionId: body.revisionId } : {}),
+                        ...(body.draft !== undefined
+                            ? { draft: body.draft as { data: Record<string, unknown>; slug?: string } }
+                            : typeof body.revisionId === 'string'
+                              ? { revisionId: body.revisionId }
+                              : {}),
                     }),
                 )
             }
@@ -315,7 +352,15 @@ const handleManagementRequestInner = async <Context>(
                 await entryFor(id, 'ai')
                 await entryFor(id, 'readDraft')
                 return json(
-                    await siteAdmin.runAIAction(id, requiredString(path[3], 'action'), await bodyObject(request)),
+                    await siteAdmin.runAIAction(id, requiredString(path[3], 'action'), await bodyObject(request), {
+                        request,
+                        ...(context && typeof context === 'object'
+                            ? {
+                                  platformContext:
+                                      isObject(context) && isObject(context.context) ? context.context : context,
+                              }
+                            : {}),
+                    }),
                 )
             }
             if (method === 'POST' && path.length === 5 && path[2] === 'revisions' && path[4] === 'restore') {

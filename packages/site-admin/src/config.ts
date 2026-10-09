@@ -18,6 +18,12 @@ import type {
 import type { PublicEntry, PublicEntrySeo } from './server/types'
 import type { SiteAdminRouteRules } from './seo'
 import type { SiteAdminAsset } from './management-assets'
+import type {
+    SiteAdminAiActionsFromProps,
+    SiteAdminAiProps,
+    SiteAdminDecisionModel,
+    SiteAdminNamedAiAction,
+} from './ai/actions'
 
 export type SiteAdminSeoOptions = PublicEntrySeo
 
@@ -80,8 +86,13 @@ export interface SiteAdminLifecycleEvent {
 export interface SiteAdminAIConfig {
     /** Application-owned SDK model or request/task resolver. Never exposed to the client. */
     model?: SiteAdminAIModel
-    /** Server-only custom suggestion actions. */
+    /** Shared native decision model; a language model is not a decision model. */
+    decisionModel?: SiteAdminDecisionModel
+    /** Server-only, entry-independent application actions. */
+    actions?: Record<string, SiteAdminNamedAiAction>
+    /** @deprecated Entry-bound callbacks for existing editors; new actions use ai.actions. */
     models?: Record<string, Record<string, SiteAdminAIAction>>
+    /** @deprecated Draft saves never invoke AI. Move generation into an explicit models action. */
     slug?: (input: { data: Record<string, unknown>; model: string }) => Promise<string | null> | string | null
 }
 
@@ -101,6 +112,8 @@ export type SiteAdminAssetAction = 'delete' | 'gc' | 'read' | 'upload'
 export type SiteAdminSystemAction = 'diagnostics' | 'publishDue'
 
 export interface SiteAdminRoleDefinition {
+    /** Names of permitted ai.actions; '*' explicitly permits every configured action. */
+    ai?: readonly string[]
     assets?: readonly SiteAdminAssetAction[]
     models?: Readonly<Record<string, readonly SiteAdminModelAction[]>>
     system?: readonly SiteAdminSystemAction[]
@@ -160,6 +173,10 @@ export interface SiteAdminConfig<
 type OpaqueConfigPath =
     | readonly ['database']
     | readonly ['ai', 'model']
+    | readonly ['ai', 'decisionModel']
+    | readonly ['ai', 'actions', PropertyKey, 'model']
+    | readonly ['ai', 'actions', PropertyKey, 'output']
+    | readonly ['ai', 'actions', PropertyKey, 'props', PropertyKey]
     | readonly ['seo', 'image']
     | readonly ['models', PropertyKey, 'seo', 'image']
     | readonly ['routeRules', PropertyKey, 'seo', 'image']
@@ -210,13 +227,16 @@ type ConfigModels<Fields extends Record<string, FieldRecord>> = {
     [Name in keyof Fields]: ModelOptions<Fields[Name]>
 }
 
-export const defineSiteAdminConfig = <const Fields extends Record<string, FieldRecord>, const Config extends object>(
+export const defineSiteAdminConfig = <
+    const Fields extends Record<string, FieldRecord>,
+    const ActionProps extends Record<string, SiteAdminAiProps>,
+    const Config extends object,
+>(
     config: Config &
-        Omit<SiteAdminConfigInput, 'models'> & { models: ConfigModels<Fields> } & (Config extends FilesInputCheck<
-            NoInfer<Config>
-        >
-            ? unknown
-            : FilesInputCheck<NoInfer<Config>>),
+        Omit<SiteAdminConfigInput, 'models' | 'ai'> & {
+            models: ConfigModels<Fields>
+            ai?: Omit<SiteAdminAIConfig, 'actions'> & { actions?: SiteAdminAiActionsFromProps<ActionProps> }
+        } & (Config extends FilesInputCheck<NoInfer<Config>> ? unknown : FilesInputCheck<NoInfer<Config>>),
 ): Config & { models: ConfigModels<Fields> } => config
 
 type MergeEnvironment<Base, Override, Path extends readonly PropertyKey[] = []> = Path extends OpaqueConfigPath
@@ -266,6 +286,15 @@ export type InferModelData<Model extends ModelDefinition> = InferFields<Model['f
 
 export type InferSiteAdminModels<Config extends SiteAdminConfig> = {
     [Name in keyof Config['models']]: InferModelData<Config['models'][Name]>
+}
+
+/** Configured action names remain part of the Nuxt model registry without exposing implementations. */
+export type InferSiteAdminAIActions<Config extends SiteAdminConfig> = {
+    [Name in keyof Config['models']]: Config extends { ai: { models: infer Actions } }
+        ? Name extends keyof Actions
+            ? Actions[Name]
+            : {}
+        : {}
 }
 
 type FormField<F extends AnyField> = F extends { kind: 'image' | 'file' }
