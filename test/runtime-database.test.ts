@@ -16,7 +16,7 @@ import {
     type SiteAdminDatabaseConfig,
     type SiteAdminDatabaseContext,
 } from '../packages/site-admin/src/runtime/database'
-import type { SiteAdminDatabase } from '../packages/site-admin/src/adapter'
+import { createMemoryDatabase } from './memory-storage'
 import { resolveSiteAdminConfig } from '../packages/site-admin/src/config-resolution'
 import { createSiteAdmin } from '../packages/site-admin/src/server'
 import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
@@ -28,17 +28,10 @@ afterEach(async () => {
     await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
-const adapter = () =>
-    ({
-        dialect: 'sqlite',
-        query: vi.fn(async () => []),
-        atomic: vi.fn(async () => []),
-        bind: vi.fn(() => ({
-            revisionSource: 'SELECT 1',
-            assertSchema: async () => {},
-            insertRevisionData: () => ({ sql: 'SELECT 1' }),
-        })),
-    }) satisfies SiteAdminDatabase
+const adapter = () => {
+    const database = createMemoryDatabase()
+    return { ...database, bind: vi.fn((config: Parameters<typeof database.bind>[0]) => database.bind(config)) }
+}
 
 describe('application-owned database resolution', () => {
     it('keeps the native auth fixture database lazy during config and schema inspection', async () => {
@@ -77,8 +70,6 @@ describe('application-owned database resolution', () => {
         expect(await resolveSiteAdminDatabase(database)).toBe(database)
         expect(database.open).not.toHaveBeenCalled()
         expect(database.close).not.toHaveBeenCalled()
-        expect(database.query).not.toHaveBeenCalled()
-        expect(database.atomic).not.toHaveBeenCalled()
         expect(database.bind).not.toHaveBeenCalled()
     })
 
@@ -143,11 +134,11 @@ describe('application-owned database resolution', () => {
         const applicationDb = drizzle({ client, relations: schema.authRelations as never })
         const applicationAdapter = drizzleAdapter(applicationDb, { schema })
         const database = await resolveSiteAdminDatabase(() => applicationAdapter)
-        expect(await database.query("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([])
+        expect(await applicationAdapter.query("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([])
         await expect(createSiteAdmin({ config, database }).initialize()).rejects.toMatchObject({
             code: 'SITE_ADMIN_MIGRATION_REQUIRED',
         })
-        expect(await database.query("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([])
+        expect(await applicationAdapter.query("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([])
         const output = join(path, 'migrations')
         execFileSync(
             process.execPath,
@@ -178,7 +169,7 @@ describe('application-owned database resolution', () => {
                 updatedAt: new Date(),
             },
         })
-        expect(await database.query('SELECT email FROM user')).toEqual([{ email: 'app@example.test' }])
-        expect(await database.query('SELECT 1 AS value')).toEqual([{ value: 1 }])
+        expect(await applicationAdapter.query('SELECT email FROM user')).toEqual([{ email: 'app@example.test' }])
+        expect(await applicationAdapter.query('SELECT 1 AS value')).toEqual([{ value: 1 }])
     })
 })

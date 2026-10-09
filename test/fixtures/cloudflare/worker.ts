@@ -6,7 +6,7 @@ import { drizzleAdapter } from '../../../packages/site-admin/src/adapters/drizzl
 import * as schema from './.data/schema/schema'
 
 import { defineSiteAdminConfig, file, text } from '../../../packages/site-admin/src/index'
-import { queryRow, runAtomic } from '../../../packages/site-admin/src/server/database'
+import { queryRow, runAtomic } from '../../sqlite-queries'
 import { createSiteAdmin } from '../../../packages/site-admin/src/server/index'
 
 interface Env {

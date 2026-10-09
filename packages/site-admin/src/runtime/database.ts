@@ -25,13 +25,7 @@ export const resolveSiteAdminDatabase = async (
     context: SiteAdminDatabaseContext = {},
 ): Promise<SiteAdminDatabase> => {
     const database = typeof config === 'function' ? await config(context) : config
-    if (
-        !database ||
-        database.dialect !== 'sqlite' ||
-        typeof database.query !== 'function' ||
-        typeof database.atomic !== 'function' ||
-        typeof database.bind !== 'function'
-    )
+    if (!database || typeof database.bind !== 'function')
         throw new SiteAdminError(
             'SITE_ADMIN_DATABASE_UNSUPPORTED',
             '[site-admin] Provide an application-owned SiteAdminDatabase adapter in database or the site-admin:database hook.',

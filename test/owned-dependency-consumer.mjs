@@ -100,18 +100,9 @@ if (!getProvider('memory')) throw new Error('Native owned provider alias failed'
 const files = defineFilesConfig({ storage: { adapter: 'memory' } })
 const auth: Pick<BetterAuthOptions, 'emailAndPassword'> = { emailAndPassword: { enabled: true } }
 void auth; void parseMarkdown
-// Read-only empty protocol fixture, without an ORM, driver, connection or migration.
+// This build consumer never initializes database storage.
 const database: SiteAdminDatabase = {
-  dialect: 'sqlite',
-  async query() { return [] },
-  async atomic() { throw new Error('Owned consumer does not test database writes.') },
-  bind() {
-    return {
-      revisionSource: 'owned_consumer_revisions',
-      async assertSchema() {},
-      insertRevisionData() { throw new Error('Owned consumer does not test revision writes.') },
-    }
-  },
+  bind() { throw new Error('Owned consumer does not initialize storage.') },
 }
 export default defineSiteAdminConfig({
   ...files, assets: {},

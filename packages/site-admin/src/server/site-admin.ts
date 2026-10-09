@@ -35,7 +35,17 @@ import {
     validateModelData,
     type IndexedReference,
 } from '../validation'
-import { queryRow, queryRows, runAtomic, type AtomicStatement } from './database'
+import type {
+    StoragePublishedEntry,
+    StorageRoute,
+    StorageRouteChange,
+    StorageRevisionCandidate,
+    StorageContentCommit,
+    StorageCondition,
+    StorageAssetCopy,
+    StorageAssetCopyGuard,
+    StorageEntryFilter,
+} from '../storage'
 import { entryPath, modelRouteOptions, preferredSlugSource, routeRedirect, slugify, validateSlug } from './routes'
 import type {
     AssetRecord,
@@ -56,83 +66,12 @@ import type {
     UploadAssetInput,
 } from './types'
 
-interface EntryRow {
-    created_at: string
-    current_revision_id: string
-    data: string
-    id: string
-    locale: string
-    model: string
-    published_at: string | null
-    published_revision_id: string | null
-    revision_id: string
-    scheduled_at: string | null
-    scheduled_revision_id: string | null
-    slug: string
-    sort_order: number | null
-    translation_group: string
-    updated_at: string
-    version: number
-}
-
-interface RevisionRow {
-    actor_id: string | null
-    created_at: string
-    data: string
-    entry_id: string
-    id: string
-    slug: string
-}
-
-interface ReferenceTargetRow {
-    id: string
-    model: string
-    published_revision_id: string | null
-}
-
-interface AssetRow {
-    checksum: string | null
-    content_type: string
-    created_at: string
-    id: string
-    key: string
-    lease_expires_at: string | null
-    metadata: string
-    operation_token: string | null
-    size: number
-    state: AssetRecord['state']
-    storage: string
-    updated_at: string
-}
-
-interface PublishedRow {
-    data: string
-    id: string
-    locale: string
-    model: string
-    published_at: string
-    revision_id: string
-    slug: string
-    translation_group: string
-}
-
-interface RouteRow {
-    entry_id: string
-    kind: 'historical' | 'page' | 'redirect'
-    locale: string
-    path: string
-    revision_id: string | null
-    status: number | null
-    target_path: string | null
-}
-
-interface IncomingReferenceRow {
-    entry_id: string
-    field_path: string
-    model: string
-    revision_id: string
-    view: 'current' | 'published'
-}
+type EntryRow = EntryRecord
+type RevisionRow = RevisionRecord
+type ReferenceTargetRow = { id: string; model: string; publishedRevisionId: string | null }
+type AssetRow = AssetRecord
+type PublishedRow = StoragePublishedEntry
+type RouteRow = StorageRoute
 
 interface LLMSEntry {
     content?: string
@@ -141,37 +80,15 @@ interface LLMSEntry {
     title: string
 }
 
-interface MetaRow {
-    value: string
-}
-
 interface ProjectionBudget {
     alternates?: Map<string, Array<{ locale: string; path: string }>>
     nodes: number
 }
 
-interface AssetCopy {
-    assetId: string
-    key: string
-    state: 'copying' | 'ready' | 'retired'
-    storage: string
-}
-
-interface SqlGuard {
-    clause: string
-    params: Array<number | string>
-}
+type AssetCopy = StorageAssetCopy
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const parseObject = (value: string): Record<string, unknown> => {
-    const parsed: unknown = JSON.parse(value)
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', 'Stored revision data is not an object.')
-    }
-    return parsed as Record<string, unknown>
-}
 
 const stableJson = (value: unknown): string =>
     JSON.stringify(value, (_, item: unknown) =>
@@ -179,55 +96,6 @@ const stableJson = (value: unknown): string =>
             ? Object.fromEntries(Object.entries(item).toSorted(([left], [right]) => left.localeCompare(right)))
             : item,
     )
-
-// The DB requires a slug. This reserved, invalid URL value never reaches management DTOs or publication.
-const draftSlug = (id: string): string => `?site-admin-draft:${id}`
-const visibleSlug = (slug: string): string => (slug.startsWith('?site-admin-draft:') ? '' : slug)
-
-const toEntry = (row: EntryRow): EntryRecord => ({
-    createdAt: row.created_at,
-    currentRevisionId: row.current_revision_id,
-    data: parseObject(row.data),
-    id: row.id,
-    locale: row.locale,
-    model: row.model,
-    publishedAt: row.published_at,
-    publishedRevisionId: row.published_revision_id,
-    revisionId: row.revision_id,
-    scheduledAt: row.scheduled_at,
-    scheduledRevisionId: row.scheduled_revision_id,
-    slug: visibleSlug(row.slug),
-    sortOrder: row.sort_order,
-    translationGroup: row.translation_group,
-    updatedAt: row.updated_at,
-    version: Number(row.version),
-})
-
-const toRevision = (row: RevisionRow): RevisionRecord => ({
-    actorId: row.actor_id,
-    createdAt: row.created_at,
-    data: parseObject(row.data),
-    entryId: row.entry_id,
-    id: row.id,
-    slug: visibleSlug(row.slug),
-})
-
-const toAsset = (row: AssetRow): AssetRecord => ({
-    checksum: row.checksum,
-    contentType: row.content_type,
-    createdAt: row.created_at,
-    id: row.id,
-    key: row.key,
-    leaseExpiresAt: row.lease_expires_at,
-    metadata: parseObject(row.metadata) as Record<string, string>,
-    operationToken: row.operation_token,
-    size: Number(row.size),
-    state: row.state,
-    storage: row.storage,
-    updatedAt: row.updated_at,
-})
-
-const placeholders = (length: number): string => Array.from({ length }, () => '?').join(', ')
 
 const safeId = (value: string, label: string): string => {
     if (!/^[A-Za-z0-9_-]{1,128}$/u.test(value)) {
@@ -247,7 +115,6 @@ const durationMilliseconds = (value: number): number => {
 
 export class SiteAdmin<Context = unknown> {
     readonly #storage: SiteAdminStorage
-    readonly #revisionSource: string
     readonly diagnostics: SiteAdminDiagnostic[] = []
     readonly #options: SiteAdminOptions<Context>
     readonly #descriptor: SiteAdminDescriptor
@@ -263,15 +130,10 @@ export class SiteAdmin<Context = unknown> {
                 ...options,
                 config: { ...options.config, assets: resolveSiteAdminAssets(options.config.assets, options.config)! },
             }
-        if (
-            options.database?.dialect !== 'sqlite' ||
-            typeof options.database.bind !== 'function' ||
-            typeof options.database.query !== 'function' ||
-            typeof options.database.atomic !== 'function'
-        )
-            throw new SiteAdminError('SITE_ADMIN_DATABASE_UNSUPPORTED', 'Provide a Site Admin SQLite storage adapter.')
+        if (typeof options.database?.bind !== 'function')
+            throw new SiteAdminError('SITE_ADMIN_DATABASE_UNSUPPORTED', 'Provide a Site Admin storage adapter.')
         this.#storage = options.database.bind(options.config)
-        this.#revisionSource = this.#storage.revisionSource
+
         durationMilliseconds(options.config.assets?.cleanup?.minimumAge ?? 60 * 60 * 24)
         durationMilliseconds(options.config.assets?.operationLeaseSeconds ?? 60 * 15)
         if (
@@ -367,36 +229,26 @@ export class SiteAdmin<Context = unknown> {
     async #initialize(): Promise<void> {
         this.#validateConfig()
         await this.#storage.assertSchema()
-        const mode = await queryRow<MetaRow>(
-            this.#options.database,
-            "SELECT value FROM site_admin_meta WHERE key = 'asset_storage_mode'",
-        )
+        const mode = await this.#storage.assetStorageMode()
         const assets = this.config.assets
-        if (mode && mode.value !== (assets?.separateDrafts === true ? `separate:${assets.storage}` : 'shared'))
+        if (
+            mode &&
+            (mode.separate !== (assets?.separateDrafts === true) || (mode.separate && mode.storage !== assets?.storage))
+        )
             throw new SiteAdminError(
                 'SITE_ADMIN_MIGRATION_REQUIRED',
                 'Migrate existing Asset copies before changing the storage mode.',
             )
         if (assets?.separateDrafts === true) {
             await this.#assetStores()
-            const legacy = await queryRow<{ id: string }>(
-                this.#options.database,
-                "SELECT id FROM site_admin_assets WHERE storage <> 'draft' AND state <> 'deleted' LIMIT 1",
-            )
-            if (legacy)
+            if (await this.#storage.hasLegacyAssetOriginals())
                 throw new SiteAdminError(
                     'SITE_ADMIN_MIGRATION_REQUIRED',
                     'Move existing Asset originals to private draft storage before enabling separateDrafts.',
                 )
-            await this.#commit([
-                {
-                    sql: "INSERT INTO site_admin_meta(key, value) VALUES ('asset_storage_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE site_admin_meta.value = excluded.value RETURNING value",
-                    params: [`separate:${assets.storage}`],
-                    query: true,
-                    expectRow: true,
-                },
-            ])
+            await this.#storage.bindAssetStorageMode(assets.storage!)
         }
+
         await this.#reconcileRoutes()
         if (assets?.separateDrafts === true) {
             const sync = await this.#syncAssetCopies()
@@ -477,15 +329,8 @@ export class SiteAdmin<Context = unknown> {
             : path
     }
 
-    async #entryRow(id: string): Promise<EntryRow | undefined> {
-        return queryRow<EntryRow>(
-            this.#options.database,
-            `SELECT e.*, r.id AS revision_id, r.data, r.slug
-             FROM site_admin_entries e
-             JOIN ${this.#revisionSource} r ON r.id = e.current_revision_id
-             WHERE e.id = ?`,
-            [id],
-        )
+    #entryRow(id: string): Promise<EntryRecord | undefined> {
+        return this.#storage.readEntry(id)
     }
 
     async #requiredEntry(id: string): Promise<EntryRow> {
@@ -496,34 +341,28 @@ export class SiteAdmin<Context = unknown> {
 
     async getEntry(id: string): Promise<EntryRecord> {
         await this.initialize()
-        return toEntry(await this.#requiredEntry(id))
+        return this.#requiredEntry(id)
     }
 
     async listEntries(modelName?: string): Promise<EntryRecord[]> {
         await this.initialize()
         if (modelName) this.#model(modelName)
-        const rows = await queryRows<EntryRow>(
-            this.#options.database,
-            `SELECT e.*, r.id AS revision_id, r.data, r.slug
-             FROM site_admin_entries e
-             JOIN ${this.#revisionSource} r ON r.id = e.current_revision_id
-             ${modelName ? 'WHERE e.model = ?' : ''}
-             ORDER BY e.sort_order IS NULL, e.sort_order, e.updated_at DESC, e.id`,
-            modelName ? [modelName] : [],
-        )
-        return rows.map(toEntry)
+        return this.#storage.entries(modelName ? { models: [modelName] } : {})
+    }
+
+    async pageEntries(
+        filter: StorageEntryFilter,
+        page: { limit: number; offset: number },
+    ): Promise<{ items: EntryRecord[]; total: number }> {
+        await this.initialize()
+        for (const model of filter.models ?? []) this.#model(model)
+        return this.#storage.pageEntries(filter, page)
     }
 
     async listRevisions(entryId: string): Promise<RevisionRecord[]> {
         await this.initialize()
         await this.#requiredEntry(entryId)
-        return (
-            await queryRows<RevisionRow>(
-                this.#options.database,
-                `SELECT * FROM ${this.#revisionSource} WHERE entry_id = ? ORDER BY created_at DESC`,
-                [entryId],
-            )
-        ).map(toRevision)
+        return this.#storage.revisions(entryId)
     }
 
     async runAIAction(
@@ -591,7 +430,6 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    /** Proposes changes to an unsaved draft without reading, saving, or publishing an entry. */
     async generateMetadata(
         modelName: string,
         input: SiteAdminMetadataInput,
@@ -665,33 +503,7 @@ export class SiteAdmin<Context = unknown> {
         if (options.from) this.#model(options.from)
         if (options.view !== 'current' && options.view !== 'published')
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'view must be current or published.')
-        const pointer = options.view === 'published' ? 'published_revision_id' : 'current_revision_id'
-        const conditions = ['rel.target_entry_id = ?']
-        const params = [options.view, entryId]
-        if (options.from) {
-            conditions.push('source.model = ?')
-            params.push(options.from)
-        }
-        if (options.field) {
-            conditions.push('rel.field_path = ?')
-            params.push(options.field)
-        }
-        const rows = await queryRows<IncomingReferenceRow>(
-            this.#options.database,
-            `SELECT source.id AS entry_id, source.model, rel.revision_id, rel.field_path,
-                    ? AS view
-             FROM site_admin_relations rel
-             JOIN site_admin_entries source ON source.${pointer} = rel.revision_id
-             WHERE ${conditions.join(' AND ')} ORDER BY source.model, source.id, rel.field_path`,
-            params,
-        )
-        return rows.map((row) => ({
-            entryId: row.entry_id,
-            field: row.field_path,
-            model: row.model,
-            revisionId: row.revision_id,
-            view: row.view,
-        }))
+        return this.#storage.incomingReferences(entryId, options)
     }
 
     async restoreRevision(
@@ -707,30 +519,25 @@ export class SiteAdmin<Context = unknown> {
         await this.#assertPublishableRelations(definition, prepared.relations, entryId)
         const restoredRevisionId = this.#id()
         const time = this.#now()
-        const guard = this.#combineGuards(
-            this.#guard(entryId, input.expectedVersion),
-            this.#referenceGuard(definition, prepared, true),
-        )
-        const statements = this.#revisionStatements({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            assets: prepared.assets,
-            data: prepared.data,
-            entryId,
-            ...(guard ? { guard } : {}),
-            model: definition,
-            relations: prepared.relations,
-            revisionId: restoredRevisionId,
-            slug: revision.slug,
-            time,
+        await this.#commit({
+            conditions: [
+                this.#guard(entryId, input.expectedVersion),
+                ...this.#referenceGuard(definition, prepared, true),
+            ],
+            revisions: [
+                this.#revisionCandidate({
+                    ...(input.actorId ? { actorId: input.actorId } : {}),
+                    ...prepared,
+                    entryId,
+                    model: definition,
+                    revisionId: restoredRevisionId,
+                    slug: revision.slug,
+                    time,
+                }),
+            ],
+            updates: [{ id: entryId, patch: { currentRevisionId: restoredRevisionId, updatedAt: time } }],
         })
-        statements.push({
-            expectRow: true,
-            params: [restoredRevisionId, time, entryId, input.expectedVersion, ...(guard?.params ?? [])],
-            query: true,
-            sql: `UPDATE site_admin_entries SET current_revision_id = ?, version = version + 1, updated_at = ?
-                  WHERE id = ? AND version = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING version`,
-        })
-        await this.#commit(statements)
+
         await this.#afterCommit({
             ...(input.actorId ? { actorId: input.actorId } : {}),
             entryId,
@@ -747,73 +554,24 @@ export class SiteAdmin<Context = unknown> {
         if (!Number.isInteger(retain) || retain < 0) {
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"retain" must be a non-negative integer.')
         }
-        const revisions = await queryRows<{ id: string }>(
-            this.#options.database,
-            'SELECT id FROM site_admin_revisions WHERE entry_id = ? ORDER BY created_at DESC, id DESC',
-            [entryId],
-        )
-        const candidates = revisions.slice(retain).map((revision) => revision.id)
-        if (candidates.length === 0) return { deleted: [] }
-        const deletable = (table: string): string => `revision_id IN (${placeholders(candidates.length)})
-            AND NOT EXISTS (
-                SELECT 1 FROM site_admin_entries protected
-                WHERE protected.id = ? AND (
-                    protected.current_revision_id = ${table}.revision_id
-                    OR protected.published_revision_id = ${table}.revision_id
-                    OR protected.scheduled_revision_id = ${table}.revision_id
-                )
-            ) AND NOT EXISTS (
-                SELECT 1 FROM site_admin_routes protected_route
-                WHERE protected_route.revision_id = ${table}.revision_id
-            )`
-        const results = await runAtomic(this.#options.database, [
-            {
-                params: [...candidates, entryId],
-                sql: `DELETE FROM site_admin_asset_refs WHERE ${deletable('site_admin_asset_refs')}`,
-            },
-            {
-                params: [...candidates, entryId],
-                sql: `DELETE FROM site_admin_relations WHERE ${deletable('site_admin_relations')}`,
-            },
-            {
-                query: true,
-                sql: `DELETE FROM site_admin_revisions AS candidate WHERE entry_id = ?
-                      AND id IN (${placeholders(candidates.length)})
-                      AND NOT EXISTS (
-                          SELECT 1 FROM site_admin_entries protected WHERE protected.id = ? AND (
-                              protected.current_revision_id = candidate.id OR protected.published_revision_id = candidate.id
-                              OR protected.scheduled_revision_id = candidate.id
-                          )
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM site_admin_routes protected_route
-                          WHERE protected_route.entry_id = ? AND protected_route.revision_id = candidate.id
-                      ) RETURNING id`,
-                params: [entryId, ...candidates, entryId, entryId],
-            },
-        ])
-        await this.#requireAssetSync()
-        return { deleted: ((results.at(-1)?.rows ?? []) as Array<{ id: string }>).map((row) => row.id) }
+        const candidates = (await this.#storage.revisionIds(entryId)).slice(retain)
+        return { deleted: await this.#storage.pruneRevisions(entryId, candidates) }
     }
 
-    async #revision(id: string, entryId?: string): Promise<RevisionRow> {
-        const row = await queryRow<RevisionRow>(
-            this.#options.database,
-            `SELECT * FROM ${this.#revisionSource} WHERE id = ?${entryId ? ' AND entry_id = ?' : ''}`,
-            entryId ? [id, entryId] : [id],
-        )
+    async #revision(id: string, entryId?: string): Promise<RevisionRecord> {
+        const row = await this.#storage.readRevision(id, entryId)
         if (!row) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `Revision "${id}" does not exist.`)
         return row
     }
 
-    async #resolveSlug(
+    #resolveSlug(
         definition: ModelDefinition,
         data: Record<string, unknown>,
         explicit: string | undefined,
         fallbackId: string,
-    ): Promise<string> {
+    ): string {
         const maxLength = this.config.modelDefaults?.slug?.maxLength ?? 80
-        if (explicit === '' && definition.publishing !== false) return draftSlug(fallbackId)
+        if (explicit === '' && definition.publishing !== false) return ''
         if (explicit !== undefined) return validateSlug(explicit, maxLength)
         const generated = slugify(preferredSlugSource(definition, data) ?? '', maxLength)
         return validateSlug(generated || fallbackId, maxLength)
@@ -838,7 +596,7 @@ export class SiteAdmin<Context = unknown> {
         definition: ModelDefinition,
         revision: RevisionRow,
     ): Promise<{ assets: IndexedReference[]; data: Record<string, unknown>; relations: IndexedReference[] }> {
-        const stored = projectStoredFields(definition.fields, parseObject(revision.data))
+        const stored = projectStoredFields(definition.fields, revision.data)
         const prepared = await this.#prepareData(definition, stored, false)
         if (stableJson(prepared.data) !== stableJson(stored)) {
             throw new SiteAdminError(
@@ -857,11 +615,8 @@ export class SiteAdmin<Context = unknown> {
         const relationIds = [...new Set(references.relations.map((reference) => reference.id))]
         const relationTargets = new Map<string, ReferenceTargetRow>()
         if (relationIds.length > 0) {
-            const rows = await queryRows<ReferenceTargetRow>(
-                this.#options.database,
-                `SELECT id, model, published_revision_id FROM site_admin_entries WHERE id IN (${placeholders(relationIds.length)})`,
-                relationIds,
-            )
+            const rows = await this.#storage.referenceTargets(relationIds)
+
             for (const row of rows) relationTargets.set(row.id, row)
         }
         for (const reference of references.relations) {
@@ -876,11 +631,8 @@ export class SiteAdmin<Context = unknown> {
         const assetIds = [...new Set(references.assets.map((reference) => reference.id))]
         const assets = new Map<string, AssetRow>()
         if (assetIds.length > 0) {
-            const rows = await queryRows<AssetRow>(
-                this.#options.database,
-                `SELECT * FROM site_admin_assets WHERE id IN (${placeholders(assetIds.length)})`,
-                assetIds,
-            )
+            const rows = await this.#storage.assets({ ids: assetIds })
+
             for (const row of rows) assets.set(row.id, row)
         }
         for (const reference of references.assets) {
@@ -888,9 +640,9 @@ export class SiteAdmin<Context = unknown> {
             const field = fieldAtPath(definition.fields, reference.path)
             if (!asset || asset.state !== 'ready') {
                 issues.push({ message: `Asset "${reference.id}" is not ready.`, path: reference.path })
-            } else if (field && 'accept' in field && field.accept && !mimeMatches(asset.content_type, field.accept)) {
+            } else if (field && 'accept' in field && field.accept && !mimeMatches(asset.contentType, field.accept)) {
                 issues.push({
-                    message: `Asset type "${asset.content_type}" is not accepted.`,
+                    message: `Asset type "${asset.contentType}" is not accepted.`,
                     path: reference.path,
                 })
             }
@@ -905,251 +657,138 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    #guard(entryId: string, expectedVersion: number): SqlGuard {
-        return {
-            clause: 'EXISTS (SELECT 1 FROM site_admin_entries WHERE id = ? AND version = ?)',
-            params: [entryId, expectedVersion],
-        }
-    }
-
-    #combineGuards(...guards: Array<SqlGuard | undefined>): SqlGuard | undefined {
-        const active = guards.filter((guard): guard is SqlGuard => guard !== undefined)
-        if (active.length === 0) return undefined
-        return {
-            clause: active.map((guard) => `(${guard.clause})`).join(' AND '),
-            params: active.flatMap((guard) => guard.params),
-        }
+    #guard(entryId: string, expectedVersion: number): StorageCondition {
+        return { kind: 'entryVersion', id: entryId, version: expectedVersion }
     }
 
     #referenceGuard(
         definition: ModelDefinition,
         references: { assets: IndexedReference[]; relations: IndexedReference[] },
         publishing: boolean,
-    ): SqlGuard | undefined {
-        const clauses: string[] = []
-        const params: Array<number | string> = []
-        const assets = new Set(references.assets.map((reference) => reference.id))
-        for (const id of assets) {
-            clauses.push("EXISTS (SELECT 1 FROM site_admin_assets WHERE id = ? AND state = 'ready')")
-            params.push(id)
-        }
-        const relations = new Map<string, { model: string; published: boolean }>()
+    ): StorageCondition[] {
+        const targets = new Map<string, { id: string; model: string; published: boolean }>()
         for (const reference of references.relations) {
             const field = fieldAtPath(definition.fields, reference.path)
             if (field?.kind === 'relation') {
-                relations.set(`${reference.id}\0${field.model}`, {
+                const key = `${reference.id}\0${field.model}`
+                targets.set(key, {
+                    id: reference.id,
                     model: field.model,
-                    published: publishing && field.required === true,
+                    published: targets.get(key)?.published === true || (publishing && field.required === true),
                 })
             }
         }
-        for (const [key, relation] of relations) {
-            const id = key.slice(0, key.indexOf('\0'))
-            clauses.push(
-                `EXISTS (SELECT 1 FROM site_admin_entries WHERE id = ? AND model = ?${relation.published ? ' AND published_revision_id IS NOT NULL' : ''})`,
-            )
-            params.push(id, relation.model)
-        }
-        return clauses.length > 0 ? { clause: clauses.join(' AND '), params } : undefined
+        return [
+            { kind: 'assetsReady', ids: references.assets.map(({ id }) => id) },
+            { kind: 'relations', targets: [...targets.values()] },
+        ]
     }
 
-    #revisionStatements(input: {
+    #revisionCandidate(input: {
         actorId?: string
         assets: IndexedReference[]
         data: Record<string, unknown>
         entryId: string
-        guard?: SqlGuard
         model: ModelDefinition
         revisionId: string
         slug: string
         time: string
         relations: IndexedReference[]
-    }): AtomicStatement[] {
-        const guard = input.guard
-        const values = [input.revisionId, input.entryId, input.slug, input.actorId ?? null, input.time]
-        const statements: AtomicStatement[] = [
-            guard
-                ? {
-                      sql: `INSERT INTO site_admin_revisions(id, entry_id, slug, actor_id, created_at)
-                            SELECT ?, ?, ?, ?, ? WHERE ${guard.clause}`,
-                      params: [...values, ...guard.params],
-                  }
-                : {
-                      sql: `INSERT INTO site_admin_revisions(id, entry_id, slug, actor_id, created_at)
-                            VALUES (?, ?, ?, ?, ?)`,
-                      params: values,
-                  },
-        ]
+    }): StorageRevisionCandidate {
         const modelName = Object.entries(this.config.models).find(([, definition]) => definition === input.model)?.[0]
         if (!modelName) throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Unknown content Model.')
-        statements.push(this.#storage.insertRevisionData(modelName, input.revisionId, input.data))
-        for (const reference of input.relations) {
-            const field = fieldAtPath(input.model.fields, reference.path)
-            const params = [
-                input.revisionId,
-                reference.path,
-                reference.id,
-                reference.position,
-                field?.kind === 'relation' && field.required ? 1 : 0,
-            ]
-            statements.push(
-                guard
-                    ? {
-                          sql: `INSERT INTO site_admin_relations(revision_id, field_path, target_entry_id, position, required)
-                                SELECT ?, ?, ?, ?, ? WHERE ${guard.clause}`,
-                          params: [...params, ...guard.params],
-                      }
-                    : {
-                          sql: `INSERT INTO site_admin_relations(revision_id, field_path, target_entry_id, position, required)
-                                VALUES (?, ?, ?, ?, ?)`,
-                          params,
-                      },
-            )
+        return {
+            id: input.revisionId,
+            entryId: input.entryId,
+            actorId: input.actorId ?? null,
+            createdAt: input.time,
+            data: input.data,
+            slug: input.slug,
+            model: modelName,
+            assets: input.assets,
+            relations: input.relations.map((reference) => {
+                const field = fieldAtPath(input.model.fields, reference.path)
+                return { ...reference, required: field?.kind === 'relation' && field.required === true }
+            }),
         }
-        for (const reference of input.assets) {
-            const params = [input.revisionId, reference.path, reference.id, reference.position]
-            statements.push(
-                guard
-                    ? {
-                          sql: `INSERT INTO site_admin_asset_refs(revision_id, field_path, asset_id, position)
-                                SELECT ?, ?, ?, ? WHERE ${guard.clause}`,
-                          params: [...params, ...guard.params],
-                      }
-                    : {
-                          sql: `INSERT INTO site_admin_asset_refs(revision_id, field_path, asset_id, position)
-                                VALUES (?, ?, ?, ?)`,
-                          params,
-                      },
-            )
-        }
-        return statements
     }
 
     async #currentRoute(entryId: string): Promise<RouteRow | undefined> {
-        return queryRow<RouteRow>(
-            this.#options.database,
-            "SELECT * FROM site_admin_routes WHERE entry_id = ? AND kind IN ('page', 'redirect') LIMIT 1",
-            [entryId],
-        )
+        return (await this.#storage.routes({ entryId, kinds: ['page', 'redirect'] }))[0]
     }
 
-    async #routeStatements(input: {
+    async #routeChanges(input: {
         data: Record<string, unknown>
         definition: ModelDefinition
         entryId: string
-        guard?: SqlGuard
         modelName: string
         locale: string
         revisionId: string
         slug: string
         time: string
-    }): Promise<AtomicStatement[]> {
+    }): Promise<StorageRouteChange[]> {
         const redirect = routeRedirect(input.definition, input.data)
         const current = await this.#currentRoute(input.entryId)
         const basePath =
-            this.#options.routing?.enabled === false || (redirect && this.#options.routing?.redirects === false)
+            this.#options.routing?.enabled === false ||
+            (redirect && this.#options.routing?.redirects === false) ||
+            input.definition.public === false
                 ? null
-                : input.definition.public === false
-                  ? null
-                  : entryPath(input.modelName, input.definition, input.slug, this.#apiBases())
+                : entryPath(input.modelName, input.definition, input.slug, this.#apiBases())
         const path = basePath === null ? null : this.#localizedPath(input.definition, basePath, input.locale)
-        const guard = input.guard
-        const guardedDelete = (sql: string, params: Array<string | number>): AtomicStatement =>
-            guard ? { sql: `${sql} AND ${guard.clause}`, params: [...params, ...guard.params] } : { sql, params }
-        const statements: AtomicStatement[] = []
-        if (guard) {
-            statements.push({
-                sql: `UPDATE site_admin_routes SET target_path = ?, status = ?
-                      WHERE entry_id = ? AND kind = 'historical' AND ${guard.clause}`,
-                params: [
-                    path,
-                    this.config.modelDefaults?.historicalRedirectStatus ?? 301,
-                    input.entryId,
-                    ...guard.params,
-                ],
-            })
-        } else {
-            statements.push({
-                sql: "UPDATE site_admin_routes SET target_path = ?, status = ? WHERE entry_id = ? AND kind = 'historical'",
-                params: [path, this.config.modelDefaults?.historicalRedirectStatus ?? 301, input.entryId],
-            })
-        }
-        statements.push(
-            guardedDelete("DELETE FROM site_admin_routes WHERE entry_id = ? AND kind IN ('page', 'redirect')", [
-                input.entryId,
-            ]),
-        )
-        if (!path) return statements
-        statements.push(
-            guardedDelete('DELETE FROM site_admin_routes WHERE entry_id = ? AND path = ?', [input.entryId, path]),
-        )
-        if (current && current.path !== path && this.#options.routing?.preserveHistory !== false) {
-            const values = [
-                current.path,
-                current.locale,
-                input.entryId,
-                input.revisionId,
-                'historical',
-                path,
-                this.config.modelDefaults?.historicalRedirectStatus ?? 301,
-                input.time,
-            ]
-            statements.push(
-                guard
-                    ? {
-                          sql: `INSERT INTO site_admin_routes(path, locale, entry_id, revision_id, kind, target_path, status, created_at)
-                                SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.clause}`,
-                          params: [...values, ...guard.params],
-                      }
-                    : {
-                          sql: `INSERT INTO site_admin_routes(path, locale, entry_id, revision_id, kind, target_path, status, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                          params: values,
-                      },
-            )
-        }
-        const values = [
-            path,
-            input.locale,
-            input.entryId,
-            input.revisionId,
-            redirect ? 'redirect' : 'page',
-            redirect?.target ?? null,
-            redirect?.status ?? null,
-            input.time,
+        const status = this.config.modelDefaults?.historicalRedirectStatus ?? 301
+        const changes: StorageRouteChange[] = [
+            { kind: 'retargetHistory', entryId: input.entryId, path, status },
+            { kind: 'remove', entryId: input.entryId, kinds: ['page', 'redirect'] },
         ]
-        statements.push(
-            guard
-                ? {
-                      sql: `INSERT INTO site_admin_routes(path, locale, entry_id, revision_id, kind, target_path, status, created_at)
-                            SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.clause}`,
-                      params: [...values, ...guard.params],
-                  }
-                : {
-                      sql: `INSERT INTO site_admin_routes(path, locale, entry_id, revision_id, kind, target_path, status, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                      params: values,
-                  },
-        )
-        return statements
+        if (!path) return changes
+        changes.push({ kind: 'remove', entryId: input.entryId, path })
+        if (current && current.path !== path && this.#options.routing?.preserveHistory !== false)
+            changes.push({
+                kind: 'put',
+                route: {
+                    path: current.path,
+                    locale: current.locale,
+                    entryId: input.entryId,
+                    revisionId: input.revisionId,
+                    kind: 'historical',
+                    targetPath: path,
+                    status,
+                    createdAt: input.time,
+                },
+            })
+        changes.push({
+            kind: 'put',
+            route: {
+                path,
+                locale: input.locale,
+                entryId: input.entryId,
+                revisionId: input.revisionId,
+                kind: redirect ? 'redirect' : 'page',
+                targetPath: redirect?.target ?? null,
+                status: redirect?.status ?? null,
+                createdAt: input.time,
+            },
+        })
+        return changes
     }
 
     async #reconcileRoutes(): Promise<void> {
-        const routes = await queryRows<RouteRow>(this.#options.database, 'SELECT * FROM site_admin_routes')
+        const routes = await this.#storage.routes()
         const rows = await this.#publishedRows()
         const graph = await this.#publicSnapshot(rows)
         const routesByEntry = new Map<string, RouteRow[]>()
         for (const route of routes) {
-            const list = routesByEntry.get(route.entry_id) ?? []
+            const list = routesByEntry.get(route.entryId) ?? []
             list.push(route)
-            routesByEntry.set(route.entry_id, list)
+            routesByEntry.set(route.entryId, list)
         }
-        const statements: AtomicStatement[] = []
+        const statements: StorageRouteChange[] = []
         for (const entryId of routesByEntry.keys()) {
             const row = graph.get(entryId)
             const definition = row && this.#publicModel(row.model)
             if (!row || !definition?.route || this.#options.routing?.enabled === false) {
-                statements.push({ sql: 'DELETE FROM site_admin_routes WHERE entry_id = ?', params: [entryId] })
+                statements.push({ kind: 'remove', entryId })
                 routesByEntry.delete(entryId)
             }
         }
@@ -1158,11 +797,11 @@ export class SiteAdmin<Context = unknown> {
             if (!graph.has(row.id)) continue
             const definition = this.#publicModel(row.model)
             if (!definition?.route || this.#options.routing?.enabled === false) continue
-            const data = parseObject(row.data)
+            const data = row.data
             const redirect = routeRedirect(definition, data)
             if (redirect && this.#options.routing?.redirects === false) {
                 if (routesByEntry.has(row.id)) {
-                    statements.push({ sql: 'DELETE FROM site_admin_routes WHERE entry_id = ?', params: [row.id] })
+                    statements.push({ kind: 'remove', entryId: row.id })
                 }
                 continue
             }
@@ -1175,47 +814,34 @@ export class SiteAdmin<Context = unknown> {
             if (
                 current?.path === path &&
                 current.locale === row.locale &&
-                current.revision_id === row.revision_id &&
+                current.revisionId === row.revisionId &&
                 current.kind === (redirect ? 'redirect' : 'page') &&
-                current.target_path === (redirect?.target ?? null) &&
+                current.targetPath === (redirect?.target ?? null) &&
                 current.status === (redirect?.status ?? null)
             )
                 continue
             statements.push(
-                ...(await this.#routeStatements({
+                ...(await this.#routeChanges({
                     data,
                     definition,
                     entryId: row.id,
                     locale: row.locale,
                     modelName: row.model,
-                    revisionId: row.revision_id,
+                    revisionId: row.revisionId,
                     slug: row.slug,
                     time,
                 })),
             )
         }
-        if (statements.length > 0) await this.#commit([...statements, this.#generationStatement()])
+        if (statements.length > 0) await this.#commit({ routes: statements, publicGeneration: true })
     }
 
-    #generationStatement(guard?: SqlGuard): AtomicStatement {
-        if (guard) {
-            return {
-                sql: `INSERT INTO site_admin_meta(key,value) SELECT 'public_generation','1' WHERE ${guard.clause}
-                      ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1`,
-                params: guard.params,
-            }
-        }
-        return {
-            sql: "INSERT INTO site_admin_meta(key,value) VALUES ('public_generation','1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
-        }
+    #commit(input: StorageContentCommit): Promise<void> {
+        return this.#storage.commit(input)
     }
 
-    async #commit(statements: AtomicStatement[]): Promise<void> {
-        await runAtomic(this.#options.database, statements)
-    }
-
-    async #afterCommit(event: SiteAdminLifecycleEvent): Promise<void> {
-        const result = await this.#syncAssetCopies()
+    async #afterCommit(event: SiteAdminLifecycleEvent, publicGraphChanged = false): Promise<void> {
+        const result = publicGraphChanged ? await this.#syncAssetCopies() : { copied: [], deleted: [], failed: [] }
         if (this.config.hooks?.afterCommit) {
             try {
                 await this.config.hooks.afterCommit(event)
@@ -1237,100 +863,70 @@ export class SiteAdmin<Context = unknown> {
             )
     }
 
-    async #requireAssetSync(): Promise<void> {
-        this.#assertAssetSync(await this.#syncAssetCopies())
-    }
-
     async createEntry(modelName: string, input: EntryInput): Promise<EntryRecord> {
         await this.initialize()
         const definition = this.#model(modelName)
         const locale = this.#locale(definition, input.locale)
         const id = safeId(input.id ?? this.#id(), 'Entry ID')
         const prepared = await this.#prepareData(definition, input.data, true)
-        const slug = await this.#resolveSlug(definition, prepared.data, input.slug, id)
+        const slug = this.#resolveSlug(definition, prepared.data, input.slug, id)
         const revisionId = this.#id()
         const time = this.#now()
         const published = definition.publishing === false
-        const guard = this.#referenceGuard(definition, prepared, published)
-        const statements: AtomicStatement[] = [
-            guard
-                ? {
-                      sql: `INSERT INTO site_admin_entries(
-                    id, model, locale, translation_group, sort_order, version, created_at, updated_at, published_at
-                ) SELECT ?, ?, ?, ?, ?, 0, ?, ?, ? WHERE ${guard.clause}`,
-                      params: [
-                          id,
-                          modelName,
-                          locale,
-                          input.translationGroup ?? id,
-                          input.sortOrder ?? null,
-                          time,
-                          time,
-                          published ? time : null,
-                          ...guard.params,
-                      ],
-                  }
-                : {
-                      sql: `INSERT INTO site_admin_entries(
-                    id, model, locale, translation_group, sort_order, version, created_at, updated_at, published_at
-                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-                      params: [
-                          id,
-                          modelName,
-                          locale,
-                          input.translationGroup ?? id,
-                          input.sortOrder ?? null,
-                          time,
-                          time,
-                          published ? time : null,
-                      ],
-                  },
-            ...this.#revisionStatements({
-                ...(input.actorId ? { actorId: input.actorId } : {}),
-                assets: prepared.assets,
-                data: prepared.data,
-                entryId: id,
-                ...(guard ? { guard } : {}),
-                model: definition,
-                revisionId,
-                slug,
-                time,
-                relations: prepared.relations,
-            }),
-        ]
-        if (published) {
-            await this.#assertPublishableRelations(definition, prepared.relations, id)
-            statements.push(
-                ...(await this.#routeStatements({
-                    data: prepared.data,
-                    definition,
+        const publicGraphChanged = published && definition.public !== false
+        if (published) await this.#assertPublishableRelations(definition, prepared.relations, id)
+        await this.#commit({
+            conditions: this.#referenceGuard(definition, prepared, published),
+            create: {
+                id,
+                model: modelName,
+                locale,
+                translationGroup: input.translationGroup ?? id,
+                sortOrder: input.sortOrder ?? null,
+                version: 1,
+                createdAt: time,
+                updatedAt: time,
+                publishedAt: published ? time : null,
+                currentRevisionId: revisionId,
+                publishedRevisionId: published ? revisionId : null,
+                scheduledRevisionId: null,
+                scheduledAt: null,
+            },
+            revisions: [
+                this.#revisionCandidate({
+                    ...(input.actorId ? { actorId: input.actorId } : {}),
+                    ...prepared,
                     entryId: id,
-                    ...(guard ? { guard } : {}),
-                    modelName,
-                    locale,
+                    model: definition,
                     revisionId,
                     slug,
                     time,
-                })),
-                this.#generationStatement(guard),
-            )
-        }
-        statements.push({
-            expectRow: true,
-            params: [revisionId, published ? revisionId : null, time, id, ...(guard?.params ?? [])],
-            query: true,
-            sql: `UPDATE site_admin_entries
-                  SET current_revision_id = ?, published_revision_id = ?, version = 1, updated_at = ?
-                  WHERE id = ? AND version = 0${guard ? ` AND ${guard.clause}` : ''} RETURNING version`,
+                }),
+            ],
+            routes: published
+                ? await this.#routeChanges({
+                      data: prepared.data,
+                      definition,
+                      entryId: id,
+                      modelName,
+                      locale,
+                      revisionId,
+                      slug,
+                      time,
+                  })
+                : [],
+            publicGeneration: publicGraphChanged,
         })
-        await this.#commit(statements)
-        await this.#afterCommit({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            entryId: id,
-            model: modelName,
-            revisionId,
-            type: 'create',
-        })
+        await this.#afterCommit(
+            {
+                ...(input.actorId ? { actorId: input.actorId } : {}),
+                entryId: id,
+                model: modelName,
+                revisionId,
+                type: 'create',
+            },
+            publicGraphChanged,
+        )
         return this.getEntry(id)
     }
 
@@ -1340,69 +936,62 @@ export class SiteAdmin<Context = unknown> {
         const definition = this.#model(entry.model)
         const prepared = await this.#prepareData(definition, input.data, false)
         const slug =
-            input.slug === undefined
-                ? entry.slug
-                : await this.#resolveSlug(definition, prepared.data, input.slug, entry.id)
-        const revisionId = this.#id()
-        const time = this.#now()
-        const published = definition.publishing === false
-        const guard = this.#combineGuards(
-            this.#guard(entryId, input.expectedVersion),
-            this.#referenceGuard(definition, prepared, published),
-        )
-        const statements = this.#revisionStatements({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            assets: prepared.assets,
-            data: prepared.data,
-            entryId,
-            ...(guard ? { guard } : {}),
-            model: definition,
-            revisionId,
-            slug,
-            time,
-            relations: prepared.relations,
-        })
-        if (published) {
-            await this.#assertPublishableRelations(definition, prepared.relations, entryId)
-            statements.push(
-                ...(await this.#routeStatements({
-                    data: prepared.data,
-                    definition,
+            input.slug === undefined ? entry.slug : this.#resolveSlug(definition, prepared.data, input.slug, entry.id)
+        const revisionId = this.#id(),
+            time = this.#now(),
+            published = definition.publishing === false
+        const publicGraphChanged = published && definition.public !== false
+        if (published) await this.#assertPublishableRelations(definition, prepared.relations, entryId)
+        await this.#commit({
+            conditions: [
+                this.#guard(entryId, input.expectedVersion),
+                ...this.#referenceGuard(definition, prepared, published),
+            ],
+            revisions: [
+                this.#revisionCandidate({
+                    ...(input.actorId ? { actorId: input.actorId } : {}),
+                    ...prepared,
                     entryId,
-                    ...(guard ? { guard } : {}),
-                    modelName: entry.model,
-                    locale: entry.locale,
+                    model: definition,
                     revisionId,
                     slug,
                     time,
-                })),
-                this.#generationStatement(guard),
-            )
-        }
-        statements.push({
-            expectRow: true,
-            params: [
-                revisionId,
-                ...(published ? [revisionId] : []),
-                ...(published ? [time] : []),
-                time,
-                entryId,
-                input.expectedVersion,
-                ...(guard?.params ?? []),
+                }),
             ],
-            query: true,
-            sql: `UPDATE site_admin_entries SET current_revision_id = ?${published ? ', published_revision_id = ?' : ''},
-                  ${published ? 'published_at = ?,' : ''} version = version + 1, updated_at = ?
-                  WHERE id = ? AND version = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING version`,
+            routes: published
+                ? await this.#routeChanges({
+                      data: prepared.data,
+                      definition,
+                      entryId,
+                      modelName: entry.model,
+                      locale: entry.locale,
+                      revisionId,
+                      slug,
+                      time,
+                  })
+                : [],
+            updates: [
+                {
+                    id: entryId,
+                    patch: {
+                        currentRevisionId: revisionId,
+                        updatedAt: time,
+                        ...(published ? { publishedRevisionId: revisionId, publishedAt: time } : {}),
+                    },
+                },
+            ],
+            publicGeneration: publicGraphChanged,
         })
-        await this.#commit(statements)
-        await this.#afterCommit({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            entryId,
-            model: entry.model,
-            revisionId,
-            type: 'update',
-        })
+        await this.#afterCommit(
+            {
+                ...(input.actorId ? { actorId: input.actorId } : {}),
+                entryId,
+                model: entry.model,
+                revisionId,
+                type: 'update',
+            },
+            publicGraphChanged,
+        )
         return this.getEntry(entryId)
     }
 
@@ -1440,9 +1029,7 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    async publishEntry(entryId: string, input: PublishEntryInput): Promise<EntryRecord> {
-        await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
+    async #publicationCandidate(entry: EntryRecord, input: PublishEntryInput, publishing: boolean) {
         const definition = this.#model(entry.model)
         if (input.draft !== undefined && input.revisionId !== undefined)
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'draft and revisionId are mutually exclusive.')
@@ -1458,86 +1045,103 @@ export class SiteAdmin<Context = unknown> {
             )
         const revision = input.draft
             ? undefined
-            : await this.#revision(input.revisionId ?? entry.current_revision_id, entryId)
+            : await this.#revision(input.revisionId ?? entry.currentRevisionId, entry.id)
         const slug = validateSlug(
             input.draft?.slug ?? revision?.slug ?? entry.slug,
             this.config.modelDefaults?.slug?.maxLength ?? 80,
         )
         const prepared = input.draft
             ? await this.#prepareData(definition, input.draft.data, false)
-            : await this.#prepareRevision(definition, revision!)
+            : publishing
+              ? await this.#prepareRevision(definition, revision!)
+              : undefined
         const revisionId = revision?.id ?? this.#id()
-        await this.#assertPublishableRelations(definition, prepared.relations, entryId)
+        if (publishing) await this.#assertPublishableRelations(definition, prepared!.relations, entry.id)
         const time = this.#now()
-        const guard = this.#combineGuards(
-            this.#guard(entryId, input.expectedVersion),
-            this.#referenceGuard(definition, prepared, true),
-        )
-        const statements: AtomicStatement[] = [
-            ...(input.draft
-                ? this.#revisionStatements({
-                      ...(input.actorId ? { actorId: input.actorId } : {}),
-                      assets: prepared.assets,
-                      data: prepared.data,
-                      entryId,
-                      ...(guard ? { guard } : {}),
-                      model: definition,
-                      revisionId,
-                      slug,
-                      time,
-                      relations: prepared.relations,
-                  })
-                : []),
-            ...(await this.#routeStatements({
-                data: prepared.data,
+        return {
+            definition,
+            prepared,
+            revisionId,
+            slug,
+            time,
+            conditions: [
+                this.#guard(entry.id, input.expectedVersion),
+                ...(prepared ? this.#referenceGuard(definition, prepared, publishing) : []),
+            ],
+            revisions:
+                input.draft && prepared
+                    ? [
+                          this.#revisionCandidate({
+                              ...(input.actorId ? { actorId: input.actorId } : {}),
+                              ...prepared,
+                              entryId: entry.id,
+                              model: definition,
+                              revisionId,
+                              slug,
+                              time,
+                          }),
+                      ]
+                    : [],
+        }
+    }
+
+    async publishEntry(entryId: string, input: PublishEntryInput): Promise<EntryRecord> {
+        return this.#publishEntry(entryId, input, true)
+    }
+
+    async #publishEntry(entryId: string, input: PublishEntryInput, synchronize: boolean): Promise<EntryRecord> {
+        await this.initialize()
+        const entry = await this.#requiredEntry(entryId)
+        const candidate = await this.#publicationCandidate(entry, input, true)
+        const { definition, prepared, revisionId, slug, time, conditions, revisions } = candidate
+        await this.#commit({
+            conditions,
+            revisions,
+            routes: await this.#routeChanges({
+                data: prepared!.data,
                 definition,
                 entryId,
-                ...(guard ? { guard } : {}),
                 modelName: entry.model,
                 locale: entry.locale,
                 revisionId,
                 slug,
                 time,
-            })),
-            this.#generationStatement(guard),
-            {
-                expectRow: true,
-                params: [
-                    ...(input.draft ? [revisionId] : []),
-                    revisionId,
-                    time,
-                    time,
-                    entryId,
-                    input.expectedVersion,
-                    ...(guard?.params ?? []),
-                ],
-                query: true,
-                sql: `UPDATE site_admin_entries
-                      SET ${input.draft ? 'current_revision_id = ?,' : ''} published_revision_id = ?, published_at = ?, scheduled_revision_id = NULL, scheduled_at = NULL,
-                          version = version + 1, updated_at = ?
-                      WHERE id = ? AND version = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING version`,
-            },
-        ]
-        await this.#commit(statements)
-        await this.#afterCommit({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            entryId,
-            model: entry.model,
-            revisionId,
-            type: 'publish',
+            }),
+            publicGeneration: definition.public !== false,
+            updates: [
+                {
+                    id: entryId,
+                    patch: {
+                        ...(input.draft ? { currentRevisionId: revisionId } : {}),
+                        publishedRevisionId: revisionId,
+                        publishedAt: time,
+                        scheduledRevisionId: null,
+                        scheduledAt: null,
+                        updatedAt: time,
+                    },
+                },
+            ],
         })
+        await this.#afterCommit(
+            {
+                ...(input.actorId ? { actorId: input.actorId } : {}),
+                entryId,
+                model: entry.model,
+                revisionId,
+                type: 'publish',
+            },
+            synchronize && definition.public !== false,
+        )
         return this.getEntry(entryId)
     }
 
     async #assertCanUnpublish(entryId: string): Promise<void> {
-        const incoming = await queryRows<IncomingReferenceRow>(
-            this.#options.database,
-            `SELECT rel.field_path, source.model, rel.revision_id
-             FROM site_admin_relations rel
-             JOIN site_admin_entries source ON source.published_revision_id = rel.revision_id
-             WHERE rel.target_entry_id = ? AND source.id <> ? AND rel.required = 1`,
-            [entryId, entryId],
-        )
+        const incoming = await this.#storage.incomingReferences(entryId, {
+            view: 'published',
+            required: true,
+            excludeSelf: true,
+        })
+
         const blocking = incoming.filter((reference) => this.#publicModel(reference.model))
         if (blocking.length > 0) {
             throw new SiteAdminError(
@@ -1545,25 +1149,19 @@ export class SiteAdmin<Context = unknown> {
                 'Published entries contain required relations to this entry.',
                 blocking.map((reference) => ({
                     message: 'Required published relation would be broken.',
-                    path: reference.field_path,
+                    path: reference.field,
                 })),
             )
         }
     }
 
-    #unpublishGuard(entryId: string): SqlGuard {
-        const publicModels = Object.entries(this.config.models)
-            .filter(([, definition]) => definition.public !== false)
-            .map(([name]) => name)
-        if (publicModels.length === 0) return { clause: '1 = 1', params: [] }
+    #unpublishGuard(entryId: string): StorageCondition {
         return {
-            clause: `NOT EXISTS (
-                SELECT 1 FROM site_admin_relations rel
-                JOIN site_admin_entries source ON source.published_revision_id = rel.revision_id
-                WHERE rel.target_entry_id = ? AND source.id <> ? AND rel.required = 1
-                  AND source.model IN (${placeholders(publicModels.length)})
-            )`,
-            params: [entryId, entryId, ...publicModels],
+            kind: 'noRequiredPublicReferences',
+            id: entryId,
+            models: Object.entries(this.config.models)
+                .filter(([, definition]) => definition.public !== false)
+                .map(([name]) => name),
         }
     }
 
@@ -1571,100 +1169,53 @@ export class SiteAdmin<Context = unknown> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
         await this.#assertCanUnpublish(entryId)
-        const guard = this.#combineGuards(this.#guard(entryId, input.expectedVersion), this.#unpublishGuard(entryId))
-        if (!guard) throw new SiteAdminError('SITE_ADMIN_CONFLICT', 'Unable to guard unpublish operation.')
-        const time = this.#now()
-        await this.#commit([
-            {
-                params: [entryId, ...guard.params],
-                sql: `DELETE FROM site_admin_routes WHERE entry_id = ? AND ${guard.clause}`,
-            },
-            this.#generationStatement(guard),
-            {
-                expectRow: true,
-                params: [time, entryId, input.expectedVersion, ...guard.params],
-                query: true,
-                sql: `UPDATE site_admin_entries
-                      SET published_revision_id = NULL, scheduled_revision_id = NULL, scheduled_at = NULL,
-                          published_at = NULL, version = version + 1, updated_at = ?
-                      WHERE id = ? AND version = ? AND ${guard.clause} RETURNING version`,
-            },
-        ])
-        await this.#afterCommit({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            entryId,
-            model: entry.model,
-            type: 'unpublish',
+        const publicGraphChanged = Boolean(this.#publicModel(entry.model) && entry.publishedRevisionId)
+        await this.#commit({
+            conditions: [this.#guard(entryId, input.expectedVersion), this.#unpublishGuard(entryId)],
+            routes: [{ kind: 'remove', entryId }],
+            publicGeneration: publicGraphChanged,
+            updates: [
+                {
+                    id: entryId,
+                    patch: {
+                        publishedRevisionId: null,
+                        scheduledRevisionId: null,
+                        scheduledAt: null,
+                        publishedAt: null,
+                        updatedAt: this.#now(),
+                    },
+                },
+            ],
         })
+        await this.#afterCommit(
+            { ...(input.actorId ? { actorId: input.actorId } : {}), entryId, model: entry.model, type: 'unpublish' },
+            publicGraphChanged,
+        )
         return this.getEntry(entryId)
     }
 
     async schedulePublish(entryId: string, input: PublishEntryInput & { at: Date | string }): Promise<EntryRecord> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
-        const definition = this.#model(entry.model)
-        if (input.draft !== undefined && input.revisionId !== undefined)
-            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'draft and revisionId are mutually exclusive.')
-        if (
-            input.draft !== undefined &&
-            (!isObject(input.draft) ||
-                !isObject(input.draft.data) ||
-                (input.draft.slug !== undefined && typeof input.draft.slug !== 'string'))
-        )
-            throw new SiteAdminError(
-                'SITE_ADMIN_INVALID_INPUT',
-                'Publish draft must contain data and an optional slug.',
-            )
-        const revision = input.draft
-            ? undefined
-            : await this.#revision(input.revisionId ?? entry.current_revision_id, entryId)
-        const slug = validateSlug(
-            input.draft?.slug ?? revision?.slug ?? entry.slug,
-            this.config.modelDefaults?.slug?.maxLength ?? 80,
-        )
-        const prepared = input.draft ? await this.#prepareData(definition, input.draft.data, false) : undefined
-        const revisionId = revision?.id ?? this.#id()
         const at = input.at instanceof Date ? input.at : new Date(input.at)
-        if (!Number.isFinite(at.getTime()) || at.getTime() <= this.#date().getTime()) {
+        if (!Number.isFinite(at.getTime()) || at.getTime() <= this.#date().getTime())
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Scheduled publish time must be in the future.')
-        }
-        const time = this.#now()
-        const guard = this.#combineGuards(
-            this.#guard(entryId, input.expectedVersion),
-            prepared ? this.#referenceGuard(definition, prepared, false) : undefined,
-        )
-        await this.#commit([
-            ...(prepared
-                ? this.#revisionStatements({
-                      ...(input.actorId ? { actorId: input.actorId } : {}),
-                      assets: prepared.assets,
-                      data: prepared.data,
-                      entryId,
-                      ...(guard ? { guard } : {}),
-                      model: definition,
-                      revisionId,
-                      slug,
-                      time,
-                      relations: prepared.relations,
-                  })
-                : []),
-            {
-                expectRow: true,
-                params: [
-                    ...(input.draft ? [revisionId] : []),
-                    revisionId,
-                    at.toISOString(),
-                    time,
-                    entryId,
-                    input.expectedVersion,
-                    ...(guard?.params ?? []),
-                ],
-                query: true,
-                sql: `UPDATE site_admin_entries
-                      SET ${input.draft ? 'current_revision_id = ?,' : ''} scheduled_revision_id = ?, scheduled_at = ?, version = version + 1, updated_at = ?
-                      WHERE id = ? AND version = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING version`,
-            },
-        ])
+        const { revisionId, time, conditions, revisions } = await this.#publicationCandidate(entry, input, false)
+        await this.#commit({
+            conditions,
+            revisions,
+            updates: [
+                {
+                    id: entryId,
+                    patch: {
+                        ...(input.draft ? { currentRevisionId: revisionId } : {}),
+                        scheduledRevisionId: revisionId,
+                        scheduledAt: at.toISOString(),
+                        updatedAt: time,
+                    },
+                },
+            ],
+        })
         await this.#afterCommit({
             ...(input.actorId ? { actorId: input.actorId } : {}),
             entryId,
@@ -1678,40 +1229,28 @@ export class SiteAdmin<Context = unknown> {
     async cancelScheduledPublish(entryId: string, input: { expectedVersion: number }): Promise<EntryRecord> {
         await this.initialize()
         await this.#requiredEntry(entryId)
-        const time = this.#now()
-        await this.#commit([
-            {
-                expectRow: true,
-                params: [time, entryId, input.expectedVersion],
-                query: true,
-                sql: `UPDATE site_admin_entries
-                      SET scheduled_revision_id = NULL, scheduled_at = NULL, version = version + 1, updated_at = ?
-                      WHERE id = ? AND version = ? RETURNING version`,
-            },
-        ])
-        await this.#requireAssetSync()
+        await this.#commit({
+            conditions: [this.#guard(entryId, input.expectedVersion)],
+            updates: [{ id: entryId, patch: { scheduledRevisionId: null, scheduledAt: null, updatedAt: this.#now() } }],
+        })
         return this.getEntry(entryId)
     }
 
     async publishDue(now = this.#date()): Promise<PublishDueResult> {
         await this.initialize()
-        const due = await queryRows<{
-            id: string
-            scheduled_revision_id: string
-            version: number
-        }>(
-            this.#options.database,
-            `SELECT id, scheduled_revision_id, version FROM site_admin_entries
-             WHERE scheduled_revision_id IS NOT NULL AND scheduled_at <= ? ORDER BY scheduled_at`,
-            [now.toISOString()],
-        )
+        const due = await this.#storage.scheduledBefore(now.toISOString())
+
         const result: PublishDueResult = { failed: [], published: [] }
         for (const entry of due) {
             try {
-                await this.publishEntry(entry.id, {
-                    expectedVersion: Number(entry.version),
-                    revisionId: entry.scheduled_revision_id,
-                })
+                await this.#publishEntry(
+                    entry.id,
+                    {
+                        expectedVersion: Number(entry.version),
+                        revisionId: entry.revisionId,
+                    },
+                    false,
+                )
                 result.published.push(entry.id)
             } catch (error) {
                 result.failed.push({
@@ -1753,82 +1292,44 @@ export class SiteAdmin<Context = unknown> {
                 'Sort items require unique IDs, finite orders and non-negative integer versions.',
             )
         if (!items.length) return []
-        const input = JSON.stringify(items)
-        // One shared precondition protects every row, including native D1 batches.
-        const valid = `NOT EXISTS (SELECT 1 FROM json_each(?) item LEFT JOIN site_admin_entries e
-            ON e.id = json_extract(item.value, '$.id') WHERE e.id IS NULL OR e.model != ?
-            OR e.version != json_extract(item.value, '$.expectedVersion'))`
+        const entries = await Promise.all(items.map(({ id }) => this.#entryRow(id)))
         const time = this.#now()
-        await this.#commit([
-            this.#generationStatement({
-                clause:
-                    valid +
-                    ` AND EXISTS (SELECT 1 FROM site_admin_entries WHERE published_revision_id IS NOT NULL AND id IN (SELECT json_extract(value, '$.id') FROM json_each(?)))`,
-                params: [input, model, input],
-            }),
-            {
-                expectRow: true,
-                query: true,
-                params: [input, model, input, time, time],
-                sql: `WITH valid(ok) AS MATERIALIZED (SELECT ${valid}),
-                    items AS MATERIALIZED (SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.sortOrder') AS sort_order FROM json_each(?))
-                    UPDATE site_admin_entries SET sort_order = (SELECT sort_order FROM items WHERE items.id = site_admin_entries.id),
-                    published_at = CASE WHEN published_revision_id IS NOT NULL THEN ? ELSE published_at END,
-                    version = version + 1, updated_at = ?
-                    WHERE (SELECT ok FROM valid) AND id IN (SELECT id FROM items) RETURNING id`,
-            },
-        ])
+        await this.#commit({
+            conditions: items.map(({ id, expectedVersion }) => ({
+                kind: 'entryVersion',
+                id,
+                version: expectedVersion,
+                model,
+            })),
+            publicGeneration: Boolean(this.#publicModel(model)) && entries.some((entry) => entry?.publishedRevisionId),
+            updates: items.map((item, index) => ({
+                id: item.id,
+                patch: {
+                    sortOrder: item.sortOrder,
+                    updatedAt: time,
+                    ...(entries[index]?.publishedRevisionId ? { publishedAt: time } : {}),
+                },
+            })),
+        })
         return Promise.all(items.map((item) => this.getEntry(item.id)))
     }
 
     async deleteEntry(entryId: string, input: { actorId?: string; expectedVersion: number }): Promise<void> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
-        const incoming = await queryRow<{ revision_id: string }>(
-            this.#options.database,
-            'SELECT revision_id FROM site_admin_relations WHERE target_entry_id = ? LIMIT 1',
-            [entryId],
-        )
-        if (incoming) {
+        const publicGraphChanged = Boolean(this.#publicModel(entry.model) && entry.publishedRevisionId)
+        if (await this.#storage.hasRetainedRelations(entryId))
             throw new SiteAdminError('SITE_ADMIN_RELATION_BLOCKED', 'Retained revisions still reference this entry.')
-        }
-        const guard = this.#guard(entryId, input.expectedVersion)
-        const statements: AtomicStatement[] = [
-            {
-                params: [entryId, ...guard.params],
-                sql: `DELETE FROM site_admin_routes WHERE entry_id = ? AND ${guard.clause}`,
-            },
-            {
-                params: [entryId, ...guard.params],
-                sql: `DELETE FROM site_admin_asset_refs WHERE revision_id IN (
-                          SELECT id FROM site_admin_revisions WHERE entry_id = ?
-                      ) AND ${guard.clause}`,
-            },
-            {
-                params: [entryId, ...guard.params],
-                sql: `DELETE FROM site_admin_relations WHERE revision_id IN (
-                          SELECT id FROM site_admin_revisions WHERE entry_id = ?
-                      ) AND ${guard.clause}`,
-            },
-            {
-                params: [entryId, ...guard.params],
-                sql: `DELETE FROM site_admin_revisions WHERE entry_id = ? AND ${guard.clause}`,
-            },
-        ]
-        if (entry.published_revision_id) statements.push(this.#generationStatement(guard))
-        statements.push({
-            expectRow: true,
-            params: [entryId, input.expectedVersion],
-            query: true,
-            sql: 'DELETE FROM site_admin_entries WHERE id = ? AND version = ? RETURNING id',
+        await this.#commit({
+            conditions: [this.#guard(entryId, input.expectedVersion), { kind: 'noRetainedRelations', id: entryId }],
+            routes: [{ kind: 'remove', entryId }],
+            delete: entryId,
+            publicGeneration: publicGraphChanged,
         })
-        await this.#commit(statements)
-        await this.#afterCommit({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            entryId,
-            model: entry.model,
-            type: 'delete',
-        })
+        await this.#afterCommit(
+            { ...(input.actorId ? { actorId: input.actorId } : {}), entryId, model: entry.model, type: 'delete' },
+            publicGraphChanged,
+        )
     }
 
     #id(): string {
@@ -1844,31 +1345,11 @@ export class SiteAdmin<Context = unknown> {
     }
 
     async #publishedRows(modelName?: string, ids?: string[], locale?: string): Promise<PublishedRow[]> {
-        const conditions = ['e.published_revision_id IS NOT NULL', 'e.published_at IS NOT NULL']
-        const params: string[] = []
-        if (modelName) {
-            conditions.push('e.model = ?')
-            params.push(modelName)
-        }
-        if (ids) {
-            if (ids.length === 0) return []
-            conditions.push(`e.id IN (${placeholders(ids.length)})`)
-            params.push(...ids)
-        }
-        if (locale !== undefined) {
-            conditions.push('e.locale = ?')
-            params.push(locale)
-        }
-        return queryRows<PublishedRow>(
-            this.#options.database,
-            `SELECT e.id, e.model, e.locale, e.published_at, e.translation_group,
-                    r.id AS revision_id, r.data, r.slug
-             FROM site_admin_entries e
-             JOIN ${this.#revisionSource} r ON r.id = e.published_revision_id
-             WHERE ${conditions.join(' AND ')}
-             ORDER BY e.sort_order IS NULL, e.sort_order, e.published_at DESC`,
-            params,
-        )
+        return this.#storage.published({
+            ...(modelName ? { model: modelName } : {}),
+            ...(ids ? { ids } : {}),
+            ...(locale !== undefined ? { locale } : {}),
+        })
     }
 
     async #publicSnapshot(roots: PublishedRow[]): Promise<Map<string, PublishedRow>> {
@@ -1887,7 +1368,7 @@ export class SiteAdmin<Context = unknown> {
                 } catch {
                     continue
                 }
-                const stored = projectStoredFields(definition.fields, parseObject(row.data))
+                const stored = projectStoredFields(definition.fields, row.data)
                 const validated = await validateModelData(definition, stored)
                 if (!validated.data || stableJson(validated.data) !== stableJson(stored)) continue
                 const found = collectReferences(definition.fields, stored)
@@ -1901,11 +1382,8 @@ export class SiteAdmin<Context = unknown> {
         }
         const readyAssets = new Set<string>()
         if (assetIds.size > 0) {
-            const rows = await queryRows<{ id: string }>(
-                this.#options.database,
-                `SELECT id FROM site_admin_assets WHERE state = 'ready' AND id IN (${placeholders(assetIds.size)})`,
-                [...assetIds],
-            )
+            const rows = await this.#storage.assets({ state: 'ready', ids: [...assetIds] })
+
             for (const row of rows) readyAssets.add(row.id)
         }
         let changed = true
@@ -1933,35 +1411,22 @@ export class SiteAdmin<Context = unknown> {
         for (const row of roots) {
             if (!this.#publicModel(row.model)?.localized) continue
             const modelGroups = groups.get(row.model) ?? new Set<string>()
-            modelGroups.add(row.translation_group)
+            modelGroups.add(row.translationGroup)
             groups.set(row.model, modelGroups)
         }
         const rows = new Map(roots.map((row) => [row.id, row]))
         for (const [model, translationGroups] of groups) {
-            const groupIds = [...translationGroups]
-            // D1 permits 100 bound parameters per query; reserve one for the model.
-            for (let offset = 0; offset < groupIds.length; offset += 99) {
-                const chunk = groupIds.slice(offset, offset + 99)
-                const alternates = await queryRows<PublishedRow>(
-                    this.#options.database,
-                    `SELECT e.id, e.model, e.locale, e.published_at, e.translation_group,
-                        r.id AS revision_id, r.data, r.slug
-                 FROM site_admin_entries e
-                 JOIN ${this.#revisionSource} r ON r.id = e.published_revision_id
-                 WHERE e.model = ? AND e.translation_group IN (${placeholders(chunk.length)})
-                       AND e.published_at IS NOT NULL`,
-                    [model, ...chunk],
-                )
-                for (const row of alternates) rows.set(row.id, row)
-            }
+            const alternates = await this.#storage.published({ model, translationGroups: [...translationGroups] })
+            for (const row of alternates) rows.set(row.id, row)
         }
+
         return this.#publicSnapshot([...rows.values()])
     }
 
     #publishedPath(row: PublishedRow): string | null {
         const definition = this.#publicModel(row.model)
         if (!definition) return null
-        const redirect = routeRedirect(definition, parseObject(row.data))
+        const redirect = routeRedirect(definition, row.data)
         const basePath =
             this.#options.routing?.enabled === false || (redirect && this.#options.routing?.redirects === false)
                 ? null
@@ -2137,20 +1602,20 @@ export class SiteAdmin<Context = unknown> {
                 locale: row.locale,
                 model: row.model,
                 path,
-                publishedAt: row.published_at,
-                revisionId: row.revision_id,
+                publishedAt: row.publishedAt,
+                revisionId: row.revisionId,
                 slug: row.slug,
             }
         }
         const trail = new Set(parentTrail).add(row.id)
         const entry: PublicEntry = {
-            data: this.#hydrateFields(definition.fields, parseObject(row.data), graph, trail, budget, markdownSource),
+            data: this.#hydrateFields(definition.fields, row.data, graph, trail, budget, markdownSource),
             id: row.id,
             locale: row.locale,
             model: row.model,
             path,
-            publishedAt: row.published_at,
-            revisionId: row.revision_id,
+            publishedAt: row.publishedAt,
+            revisionId: row.revisionId,
             slug: row.slug,
         }
         if (definition.localized && path) {
@@ -2161,13 +1626,13 @@ export class SiteAdmin<Context = unknown> {
                     if (!this.#publicModel(alternate.model)?.localized) continue
                     const alternatePath = this.#publishedPath(alternate)
                     if (!alternatePath) continue
-                    const key = `${alternate.model}\0${alternate.translation_group}`
+                    const key = `${alternate.model}\0${alternate.translationGroup}`
                     const alternates = budget.alternates.get(key) ?? []
                     alternates.push({ locale: alternate.locale, path: alternatePath })
                     budget.alternates.set(key, alternates)
                 }
             }
-            entry.alternates = (budget.alternates.get(`${row.model}\0${row.translation_group}`) ?? []).map(
+            entry.alternates = (budget.alternates.get(`${row.model}\0${row.translationGroup}`) ?? []).map(
                 (alternate) => ({ ...alternate }),
             )
         }
@@ -2199,16 +1664,8 @@ export class SiteAdmin<Context = unknown> {
         if (definition.public === false)
             throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${modelName}" is private.`)
         const normalizedLocale = this.#locale(definition, locale)
-        const row = await queryRow<PublishedRow>(
-            this.#options.database,
-            `SELECT e.id, e.model, e.locale, e.published_at, e.translation_group,
-                    r.id AS revision_id, r.data, r.slug
-             FROM site_admin_entries e
-             JOIN ${this.#revisionSource} r ON r.id = e.published_revision_id
-             WHERE e.model = ? AND e.locale = ? AND e.published_revision_id IS NOT NULL AND (r.slug = ? OR e.id = ?)
-             LIMIT 1`,
-            [modelName, normalizedLocale, slugOrId, slugOrId],
-        )
+        const row = (await this.#storage.published({ model: modelName, locale: normalizedLocale, key: slugOrId }))[0]
+
         if (!row) return null
         const graph = await this.#publicEntryGraph([row])
         return graph.has(row.id) ? this.#projectPublished(row, graph) : null
@@ -2216,11 +1673,7 @@ export class SiteAdmin<Context = unknown> {
 
     async publicGeneration(): Promise<number> {
         await this.initialize()
-        const row = await queryRow<MetaRow>(
-            this.#options.database,
-            "SELECT value FROM site_admin_meta WHERE key = 'public_generation'",
-        )
-        return Number(row?.value ?? 0)
+        return this.#storage.publicGeneration()
     }
 
     async content(modelName: string, locale?: string): Promise<ComarkContent> {
@@ -2281,11 +1734,10 @@ export class SiteAdmin<Context = unknown> {
         const cached = this.#routes.get(normalizedLocale)
         if (cached?.generation !== generation) {
             const router = createRouter<RouteRow>()
-            const routes = await queryRows<RouteRow>(
-                this.#options.database,
-                `SELECT * FROM site_admin_routes WHERE locale IN (?, '') ORDER BY locale = '' ASC`,
-                [normalizedLocale],
+            const routes = (await this.#storage.routes({ locales: [normalizedLocale, ''] })).sort(
+                (left, right) => Number(left.locale === '') - Number(right.locale === ''),
             )
+
             for (const route of routes) addRoute(router, 'GET', route.path, route)
             this.#routes.set(normalizedLocale, { generation, router })
             if (this.#routes.size > 64) this.#routes.delete(this.#routes.keys().next().value!)
@@ -2294,7 +1746,7 @@ export class SiteAdmin<Context = unknown> {
         const match = findRoute(this.#routes.get(normalizedLocale)!.router, 'GET', normalizedPath, { normalize: true })
         if (!match) return null
         const route = match.data
-        const rows = await this.#publishedRows(undefined, [route.entry_id])
+        const rows = await this.#publishedRows(undefined, [route.entryId])
         const entry = rows[0]
         if (!entry) return null
         const graph = await this.#publicEntryGraph([entry])
@@ -2323,27 +1775,27 @@ export class SiteAdmin<Context = unknown> {
             projected.alternates ??= projected.path ? [{ locale: projected.locale, path: projected.path }] : []
             return { entry: projected, kind: 'page' }
         }
-        if (!route.target_path) return null
-        return { kind: 'redirect', status: route.status ?? 302, target: route.target_path }
+        if (!route.targetPath) return null
+        return { kind: 'redirect', status: route.status ?? 302, target: route.targetPath }
     }
 
     async sitemap(): Promise<Array<{ loc: string; lastmod?: string }>> {
         await this.initialize()
-        const routes = await queryRows<RouteRow>(
-            this.#options.database,
-            `SELECT * FROM site_admin_routes WHERE kind = 'page' ORDER BY path`,
+        const routes = (await this.#storage.routes({ kinds: ['page'] })).sort((left, right) =>
+            left.path.localeCompare(right.path),
         )
-        const rows = await this.#publishedRows(undefined, [...new Set(routes.map((route) => route.entry_id))])
+
+        const rows = await this.#publishedRows(undefined, [...new Set(routes.map((route) => route.entryId))])
         const graph = await this.#publicSnapshot(rows)
         const byId = new Map(rows.map((row) => [row.id, row]))
         return routes.flatMap((route) => {
-            const row = byId.get(route.entry_id)
+            const row = byId.get(route.entryId)
             const definition = row && this.#publicModel(row.model)
             const options = definition ? modelRouteOptions(definition) : null
             return row &&
                 graph.has(row.id) &&
                 (this.#resolveRouteRule(route.path).sitemap ?? options?.sitemap) !== false
-                ? [{ lastmod: row.published_at, loc: decodeURI(route.path) }]
+                ? [{ lastmod: row.publishedAt, loc: decodeURI(route.path) }]
                 : []
         })
     }
@@ -2359,60 +1811,24 @@ export class SiteAdmin<Context = unknown> {
         }>
     > {
         await this.initialize()
-        return (
-            await queryRows<RouteRow>(this.#options.database, 'SELECT * FROM site_admin_routes ORDER BY locale, path')
-        ).map((route) => ({
-            entryId: route.entry_id,
-            kind: route.kind,
-            locale: route.locale,
-            path: route.path,
-            status: route.status,
-            targetPath: route.target_path,
+        return (await this.#storage.routes()).map(({ entryId, kind, locale, path, status, targetPath }) => ({
+            entryId,
+            kind,
+            locale,
+            path,
+            status,
+            targetPath,
         }))
     }
 
     async inspect(): Promise<SiteAdminInspection> {
         await this.initialize()
-        const entryRows = await queryRows<{
-            drafts: number
-            model: string
-            published: number
-            scheduled: number
-            total: number
-        }>(
-            this.#options.database,
-            `SELECT model,
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN published_revision_id IS NOT NULL THEN 1 ELSE 0 END) AS published,
-                    SUM(CASE WHEN current_revision_id <> published_revision_id OR published_revision_id IS NULL THEN 1 ELSE 0 END) AS drafts,
-                    SUM(CASE WHEN scheduled_revision_id IS NOT NULL THEN 1 ELSE 0 END) AS scheduled
-             FROM site_admin_entries GROUP BY model ORDER BY model`,
-        )
-        const assetRows = await queryRows<{ count: number; state: string }>(
-            this.#options.database,
-            'SELECT state, COUNT(*) AS count FROM site_admin_assets GROUP BY state ORDER BY state',
-        )
-        const orphan = await queryRow<{ count: number }>(
-            this.#options.database,
-            `SELECT COUNT(*) AS count FROM site_admin_assets assets
-             WHERE assets.state IN ('ready', 'delete_failed', 'upload_failed')
-               AND NOT EXISTS (SELECT 1 FROM site_admin_asset_refs refs WHERE refs.asset_id = assets.id)`,
-        )
+        const stats = await this.#storage.statistics()
         return {
-            assets: Object.fromEntries(assetRows.map((row) => [row.state, Number(row.count)])),
+            assets: Object.fromEntries(stats.assets.map(({ state, count }) => [state, count])),
             diagnostics: structuredClone(this.diagnostics),
-            entries: Object.fromEntries(
-                entryRows.map((row) => [
-                    row.model,
-                    {
-                        drafts: Number(row.drafts),
-                        published: Number(row.published),
-                        scheduled: Number(row.scheduled),
-                        total: Number(row.total),
-                    },
-                ]),
-            ),
-            orphanAssets: Number(orphan?.count ?? 0),
+            entries: Object.fromEntries(stats.entries.map(({ model, ...counts }) => [model, counts])),
+            orphanAssets: stats.orphanAssets,
             publicGeneration: await this.publicGeneration(),
         }
     }
@@ -2496,28 +1912,21 @@ export class SiteAdmin<Context = unknown> {
         const abort = new AbortController()
         let pumping: Promise<void> | undefined
         try {
-            await this.#commit([
-                {
-                    params: [
-                        id,
-                        storage,
-                        key,
-                        contentType,
-                        upload.size,
-                        null,
-                        JSON.stringify(input.metadata ?? {}),
-                        'uploading',
-                        token,
-                        lease,
-                        time,
-                        time,
-                    ],
-                    sql: `INSERT INTO site_admin_assets(
-                    id, storage, key, content_type, size, checksum, metadata, state,
-                    operation_token, lease_expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                },
-            ])
+            await this.#storage.insertAsset({
+                id,
+                storage,
+                key,
+                contentType,
+                size: upload.size,
+                checksum: null,
+                metadata: input.metadata ?? {},
+                state: 'uploading',
+                operationToken: token,
+                leaseExpiresAt: lease,
+                createdAt: time,
+                updatedAt: time,
+            })
+
             // R2 needs a known-length stream, preserved by the Workers native transform.
             const FixedLength = (
                 globalThis as typeof globalThis & {
@@ -2536,16 +1945,14 @@ export class SiteAdmin<Context = unknown> {
             const hash = upload.checksum()
             if (Number(result.size) !== upload.size)
                 throw new Error('Stored upload size does not match the request body.')
-            await this.#commit([
-                {
-                    expectRow: true,
-                    params: [contentType, result.size, hash, this.#now(), id, token],
-                    query: true,
-                    sql: `UPDATE site_admin_assets SET content_type = ?, size = ?, checksum = ?, state = 'ready',
-                          operation_token = NULL, lease_expires_at = NULL, updated_at = ?
-                          WHERE id = ? AND state = 'uploading' AND operation_token = ? RETURNING id`,
-                },
-            ])
+            this.#assertStorageChange(
+                await this.#storage.finishAssetUpload(
+                    id,
+                    token,
+                    { contentType, size: result.size, checksum: hash },
+                    this.#now(),
+                ),
+            )
         } catch (error) {
             abort.abort(error)
             await upload.cancel(error).catch(() => {})
@@ -2553,14 +1960,8 @@ export class SiteAdmin<Context = unknown> {
             try {
                 if (await files.exists(key)) await files.delete(key)
             } catch {}
-            await this.#commit([
-                {
-                    params: [this.#now(), id, token],
-                    sql: `UPDATE site_admin_assets SET state = 'upload_failed', operation_token = NULL,
-                          lease_expires_at = NULL, updated_at = ?
-                          WHERE id = ? AND state = 'uploading' AND operation_token = ?`,
-                },
-            ])
+            await this.#storage.finishAssetUpload(id, token, undefined, this.#now())
+
             throw error
         }
         return this.getAsset(id)
@@ -2568,11 +1969,9 @@ export class SiteAdmin<Context = unknown> {
 
     async getAsset(id: string): Promise<AssetRecord> {
         await this.initialize()
-        const row = await queryRow<AssetRow>(this.#options.database, 'SELECT * FROM site_admin_assets WHERE id = ?', [
-            id,
-        ])
+        const row = await this.#storage.readAsset(id)
         if (!row) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `Asset "${id}" does not exist.`)
-        return toAsset(row)
+        return row
     }
 
     async downloadAsset(id: string, publicOnly = true): Promise<DownloadedAsset> {
@@ -2582,17 +1981,8 @@ export class SiteAdmin<Context = unknown> {
             throw new SiteAdminError('SITE_ADMIN_ASSET_NOT_READY', `Asset "${id}" is not ready.`)
         }
         if (publicOnly) {
-            const sources = await queryRows<{ id: string }>(
-                this.#options.database,
-                `SELECT entries.id FROM site_admin_asset_refs refs
-                 JOIN site_admin_entries entries ON entries.published_revision_id = refs.revision_id
-                 WHERE refs.asset_id = ?`,
-                [id],
-            )
-            const rows = await this.#publishedRows(
-                undefined,
-                sources.map((source) => source.id),
-            )
+            const rows = await this.#publishedRows(undefined, await this.#storage.publishedAssetSources(id))
+
             const graph = await this.#publicSnapshot(rows)
             if (!rows.some((row) => graph.has(row.id))) {
                 throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Asset "${id}" is not public.`)
@@ -2616,12 +2006,9 @@ export class SiteAdmin<Context = unknown> {
     async deleteAsset(id: string): Promise<void> {
         await this.initialize()
         const asset = await this.getAsset(id)
-        const reference = await queryRow<{ revision_id: string }>(
-            this.#options.database,
-            'SELECT revision_id FROM site_admin_asset_refs WHERE asset_id = ? LIMIT 1',
-            [id],
-        )
-        if (reference) throw new SiteAdminError('SITE_ADMIN_ASSET_IN_USE', 'A retained revision still uses this Asset.')
+        if (await this.#storage.hasAssetReferences(id))
+            throw new SiteAdminError('SITE_ADMIN_ASSET_IN_USE', 'A retained revision still uses this Asset.')
+
         const sync = await this.#syncAssetCopies()
         if (sync.failed.length)
             throw new SiteAdminError(
@@ -2635,20 +2022,8 @@ export class SiteAdmin<Context = unknown> {
     async #claimAsset(id: string): Promise<string> {
         const token = this.#id()
         const now = this.#now()
-        await this.#commit([
-            {
-                expectRow: true,
-                params: [token, this.#leaseExpiresAt(), now, id, now],
-                query: true,
-                sql: `UPDATE site_admin_assets SET state = 'deleting', operation_token = ?, lease_expires_at = ?, updated_at = ?
-                      WHERE id = ? AND (
-                          state IN ('ready', 'delete_failed', 'upload_failed')
-                          OR (state IN ('uploading', 'deleting') AND lease_expires_at <= ?)
-                      )
-                        AND NOT EXISTS (SELECT 1 FROM site_admin_asset_refs WHERE asset_id = site_admin_assets.id)
-                      RETURNING id`,
-            },
-        ])
+        this.#assertStorageChange(await this.#storage.claimAssetDeletion(id, token, this.#leaseExpiresAt(), now))
+
         return token
     }
 
@@ -2659,25 +2034,10 @@ export class SiteAdmin<Context = unknown> {
             }
             const files = await this.#options.getFiles(asset.storage)
             if (await files.exists(asset.key)) await files.delete(asset.key)
-            await this.#commit([
-                {
-                    expectRow: true,
-                    params: [this.#now(), asset.id, token],
-                    query: true,
-                    sql: `UPDATE site_admin_assets SET state = 'deleted', operation_token = NULL,
-                          lease_expires_at = NULL, updated_at = ?
-                          WHERE id = ? AND state = 'deleting' AND operation_token = ? RETURNING id`,
-                },
-            ])
+            this.#assertStorageChange(await this.#storage.finishAssetDeletion(asset.id, token, true, this.#now()))
         } catch (error) {
-            await this.#commit([
-                {
-                    params: [this.#now(), asset.id, token],
-                    sql: `UPDATE site_admin_assets SET state = 'delete_failed', operation_token = NULL,
-                          lease_expires_at = NULL, updated_at = ?
-                          WHERE id = ? AND state = 'deleting' AND operation_token = ?`,
-                },
-            ])
+            await this.#storage.finishAssetDeletion(asset.id, token, false, this.#now())
+
             throw error
         }
     }
@@ -2689,20 +2049,14 @@ export class SiteAdmin<Context = unknown> {
         if (sync.failed.length) return { deleted: [], failed: sync.failed }
         const grace = durationMilliseconds(this.config.assets.cleanup?.minimumAge ?? 60 * 60 * 24)
         const cutoff = new Date(this.#date().getTime() - grace).toISOString()
-        const candidates = await queryRows<AssetRow>(
-            this.#options.database,
-            `SELECT assets.* FROM site_admin_assets assets
-             WHERE ((assets.state IN ('ready', 'delete_failed', 'upload_failed') AND assets.created_at <= ?)
-                    OR (assets.state IN ('uploading', 'deleting') AND assets.lease_expires_at <= ?))
-               AND NOT EXISTS (SELECT 1 FROM site_admin_asset_refs refs WHERE refs.asset_id = assets.id)`,
-            [cutoff, this.#now()],
-        )
+        const candidates = await this.#storage.assetGCCandidates(cutoff, this.#now())
+
         const result: { deleted: string[]; failed: Array<{ id: string; message: string }> } = {
             deleted: [],
             failed: [],
         }
         for (const row of candidates) {
-            const asset = toAsset(row)
+            const asset = row
             try {
                 const token = await this.#claimAsset(asset.id)
                 await this.#deleteClaimedAsset(asset, token)
@@ -2750,11 +2104,7 @@ export class SiteAdmin<Context = unknown> {
     }
 
     async #assetCopies(): Promise<Array<{ ledger: string; copy: AssetCopy }>> {
-        const rows = await queryRows<{ key: string; value: string }>(
-            this.#options.database,
-            "SELECT key, value FROM site_admin_meta WHERE key LIKE 'asset_copy:%' ORDER BY key",
-        )
-        return rows.map((row) => ({ ledger: row.key, copy: JSON.parse(row.value) as AssetCopy }))
+        return this.#storage.assetCopies()
     }
 
     async #desiredAssetCopies(): Promise<Set<string>> {
@@ -2763,22 +2113,19 @@ export class SiteAdmin<Context = unknown> {
         for (const row of graph.values()) {
             const definition = this.#publicModel(row.model)
             if (definition)
-                for (const reference of collectReferences(definition.fields, parseObject(row.data)).assets)
-                    ids.add(reference.id)
+                for (const reference of collectReferences(definition.fields, row.data).assets) ids.add(reference.id)
         }
         return ids
     }
 
-    async #retireAssetCopy(ledger: string, copy: AssetCopy, guard?: SqlGuard): Promise<void> {
-        // ponytail: keep tombstones for late storage writes; compact after enforcing storage-operation deadlines.
-        await this.#commit([
-            {
-                sql: `UPDATE site_admin_meta SET value = ? WHERE key = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING key`,
-                params: [JSON.stringify({ ...copy, state: 'retired' }), ledger, ...(guard?.params ?? [])],
-                query: true,
-                expectRow: true,
-            },
-        ])
+    #assertStorageChange(changed: boolean): void {
+        if (!changed)
+            throw new SiteAdminError('SITE_ADMIN_CONFLICT', 'The record changed before this mutation committed.')
+    }
+
+    async #retireAssetCopy(ledger: string, copy: AssetCopy, guard?: StorageAssetCopyGuard): Promise<void> {
+        // Keep tombstones for late storage writes; GC retries deletion.
+        this.#assertStorageChange(await this.#storage.updateAssetCopy(ledger, { ...copy, state: 'retired' }, guard))
         if (!this.#options.getFiles)
             throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
         const files = await this.#options.getFiles(copy.storage)
@@ -2794,27 +2141,11 @@ export class SiteAdmin<Context = unknown> {
         const result: AssetSyncResult = { copied: [], deleted: [], failed: [] }
         if (this.config.assets?.separateDrafts !== true) return result
         // ponytail: one DB lease serializes copy I/O; use per-Asset leases if publication throughput requires it.
-        const lease = `${this.#leaseExpiresAt()}|${this.#id()}`
-        const owner = (): SqlGuard => ({
-            clause: "EXISTS (SELECT 1 FROM site_admin_meta WHERE key = 'asset_sync_lease' AND value = ? AND value > ?)",
-            params: [lease, `${this.#now()}|~`],
-        })
-        const generation = async (): Promise<string> =>
-            (
-                await queryRow<MetaRow>(
-                    this.#options.database,
-                    "SELECT value FROM site_admin_meta WHERE key = 'public_generation'",
-                )
-            )?.value ?? '0'
+        const lease = { expiresAt: this.#leaseExpiresAt(), id: this.#id() }
+        const owner = (): StorageAssetCopyGuard => ({ lease, now: this.#now() })
+        const generation = () => this.#storage.publicGeneration()
         try {
-            await this.#commit([
-                {
-                    sql: "INSERT INTO site_admin_meta(key, value) VALUES ('asset_sync_lease', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE site_admin_meta.value <= ? RETURNING value",
-                    params: [lease, `${this.#now()}|~`],
-                    query: true,
-                    expectRow: true,
-                },
-            ])
+            this.#assertStorageChange(await this.#storage.claimAssetSync(lease, this.#now()))
         } catch {
             result.failed.push({
                 id: '*',
@@ -2842,7 +2173,7 @@ export class SiteAdmin<Context = unknown> {
             for (const id of desired) {
                 if (copies.some(({ copy }) => copy.assetId === id && copy.state === 'ready')) continue
                 const token = this.#id()
-                const ledger = `asset_copy:${id}:${token}`
+                const ledger = `${id}:${token}`
                 const copy: AssetCopy = {
                     assetId: id,
                     key: `site-admin/public/${id}/${token}`,
@@ -2852,20 +2183,10 @@ export class SiteAdmin<Context = unknown> {
                 const guard = owner()
                 let recorded = false
                 try {
-                    await this.#commit([
-                        {
-                            sql: `INSERT INTO site_admin_meta(key, value) SELECT ?, ? WHERE ${guard.clause} RETURNING key`,
-                            params: [ledger, JSON.stringify(copy), ...guard.params],
-                            query: true,
-                            expectRow: true,
-                        },
-                    ])
+                    this.#assertStorageChange(await this.#storage.createAssetCopy(ledger, copy, guard))
                     recorded = true
-                    const asset = await queryRow<AssetRow>(
-                        this.#options.database,
-                        "SELECT * FROM site_admin_assets WHERE id = ? AND storage = 'draft' AND state = 'ready'",
-                        [id],
-                    )
+                    const asset = (await this.#storage.assets({ ids: [id], storage: 'draft', state: 'ready' }))[0]
+
                     if (!asset)
                         throw new SiteAdminError('SITE_ADMIN_ASSET_NOT_READY', 'The original Asset is not ready.')
                     const file = await stores.draft.download(asset.key, { as: 'stream' })
@@ -2889,7 +2210,7 @@ export class SiteAdmin<Context = unknown> {
                             void pumping.catch(() => {})
                             body = fixed.readable
                         }
-                        const stored = await stores.public.upload(copy.key, body, { contentType: asset.content_type })
+                        const stored = await stores.public.upload(copy.key, body, { contentType: asset.contentType })
                         await pumping
                         if (
                             Number(stored.size) !== upload.size ||
@@ -2908,20 +2229,14 @@ export class SiteAdmin<Context = unknown> {
                         result.deleted.push(id)
                         continue
                     }
-                    const currentOwner = owner()
-                    await this.#commit([
-                        {
-                            sql: `UPDATE site_admin_meta SET value = ? WHERE key = ? AND ${currentOwner.clause} AND COALESCE((SELECT value FROM site_admin_meta WHERE key = 'public_generation'), '0') = ? RETURNING key`,
-                            params: [
-                                JSON.stringify({ ...copy, state: 'ready' }),
-                                ledger,
-                                ...currentOwner.params,
-                                currentGeneration,
-                            ],
-                            query: true,
-                            expectRow: true,
-                        },
-                    ])
+                    this.#assertStorageChange(
+                        await this.#storage.updateAssetCopy(
+                            ledger,
+                            { ...copy, state: 'ready' },
+                            { ...owner(), generation: currentGeneration },
+                        ),
+                    )
+
                     result.copied.push(id)
                 } catch (error) {
                     if (recorded) {
@@ -2945,9 +2260,7 @@ export class SiteAdmin<Context = unknown> {
                 message: error instanceof Error ? error.message : 'Asset synchronization failed.',
             })
         } finally {
-            await this.#commit([
-                { sql: "DELETE FROM site_admin_meta WHERE key = 'asset_sync_lease' AND value = ?", params: [lease] },
-            ])
+            await this.#storage.releaseAssetSync(lease)
         }
         return result
     }

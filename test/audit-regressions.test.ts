@@ -5,9 +5,9 @@ import nodeSqlite from 'db0/connectors/node-sqlite'
 import { Files, type Body, type StoredFile, type UploadOptions } from 'files-sdk'
 import { memory } from 'files-sdk/memory'
 import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
-import { handleManagementRequest, handlePublicRequest } from '../packages/site-admin/src/server'
+import { createSiteAdmin, handleManagementRequest, handlePublicRequest } from '../packages/site-admin/src/server'
 import { prepareUpload } from '../packages/site-admin/src/server/upload'
-import { createMigratedTestAdmin } from './migrate'
+import { createMigratedTestAdmin, migrateTestDatabase, testAdapter } from './migrate'
 
 const databases: Database[] = []
 type SingleUpload = { upload: (key: string, body: Body, options?: UploadOptions) => Promise<StoredFile> }
@@ -211,26 +211,21 @@ it('rejects inaccurate lengths, aborted streams and explicit caps, and cleans fa
 it('evicts public snapshots and routes after 64 locale keys without a locale whitelist', async () => {
     const database = createDatabase(nodeSqlite({ name: ':memory:' }))
     databases.push(database)
-    const admin = await createMigratedTestAdmin({
-        database,
-        config: defineSiteAdminConfig({
-            models: { posts: { localized: true, fields: { title: text() }, route: true } },
-        }),
+    const config = defineSiteAdminConfig({
+        models: { posts: { localized: true, fields: { title: text() }, route: true } },
     })
+    await migrateTestDatabase(database, config)
+    const storage = (await testAdapter(database, config)).bind(config)
+    const admin = createSiteAdmin({ config, database: { bind: () => storage } })
     const first = await admin.content('posts', 'locale-0')
     for (let i = 1; i <= 64; i++) await admin.content('posts', `locale-${i}`)
     expect(await admin.content('posts', 'locale-0')).not.toBe(first)
-    const native = (await database.getInstance()) as import('node:sqlite').DatabaseSync
-    const original = native.prepare.bind(native)
-    let routeReads = 0
-    native.prepare = (sql: string) => {
-        if (sql.includes('SELECT * FROM site_admin_routes WHERE locale')) routeReads++
-        return original(sql)
-    }
+    const routeReads = vi.spyOn(storage, 'routes')
     for (let i = 0; i <= 64; i++) await admin.resolvePath('/missing', `locale-${i}`)
-    const before = routeReads
+    const before = routeReads.mock.calls.length
     await admin.resolvePath('/missing', 'locale-64')
-    expect(routeReads).toBe(before)
+    expect(routeReads).toHaveBeenCalledTimes(before)
     await admin.resolvePath('/missing', 'locale-0')
-    expect(routeReads).toBe(before + 1)
+    expect(routeReads).toHaveBeenCalledTimes(before + 1)
+    expect(routeReads).toHaveBeenLastCalledWith({ locales: ['locale-0', ''] })
 })
