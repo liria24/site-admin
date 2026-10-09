@@ -619,6 +619,44 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 expect(await graph(storage)).toEqual(before)
             }, 20_000)
 
+        if (kind !== 'memory')
+            it('bounds long near-whole-value query candidates before native recursion', async () => {
+                const definition = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+                const database = await backend(kind, definition)
+                const core = createSiteAdmin({ config: definition, database }),
+                    storage = database.bind(definition)
+                const entry = await core.createEntry('posts', {
+                    slug: 'long-query',
+                    data: { title: 'a'.repeat(1_050_000) },
+                })
+                const started = performance.now()
+                for (const [q, total] of [
+                    ['a'.repeat(1_050_001), 0],
+                    ['a'.repeat(1_100_000), 0],
+                    ['a'.repeat(1_050_000), 1],
+                    ['a'.repeat(1_049_999) + 'b', 0],
+                ] as const)
+                    expect((await storage.pageEntries({ models: ['posts'], q }, { limit: 1, offset: 0 })).total).toBe(
+                        total,
+                    )
+                expect(performance.now() - started).toBeLessThan(2_000)
+                const periodic = 'a'.repeat(63) + 'b'
+                await core.updateEntry(entry.id, {
+                    expectedVersion: entry.version,
+                    data: { title: periodic.repeat(16_406) },
+                })
+                const rareAnchorStarted = performance.now()
+                expect(
+                    (
+                        await storage.pageEntries(
+                            { models: ['posts'], q: 'a'.repeat(1_049_983) + 'b' },
+                            { limit: 1, offset: 0 },
+                        )
+                    ).total,
+                ).toBe(0)
+                expect(performance.now() - rareAnchorStarted).toBeLessThan(2_000)
+            }, 10_000)
+
         if (kind === 'd1')
             it('resumes a large cold search through the standard client within each fresh request budget', async () => {
                 const definition = defineSiteAdminConfig({
