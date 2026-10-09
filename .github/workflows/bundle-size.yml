@@ -1,0 +1,90 @@
+# Adapted from insight-ts: unprivileged PR measurement, separate comment-only job.
+name: Package size
+
+on:
+    pull_request:
+
+permissions: {}
+
+concurrency:
+    group: package-size-${{ github.event.pull_request.number }}
+    cancel-in-progress: true
+
+jobs:
+    compare:
+        name: Package size comparison
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        steps:
+            - name: Checkout base
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  path: base
+                  persist-credentials: false
+                  ref: ${{ github.event.pull_request.base.sha }}
+            - name: Checkout pull request
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  path: head
+                  persist-credentials: false
+                  ref: ${{ github.event.pull_request.head.sha }}
+                  repository: ${{ github.event.pull_request.head.repo.full_name }}
+            - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+              with:
+                  node-version: '24.21.0'
+            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: head/package.json
+            - run: bun ci
+              working-directory: base
+            - run: bun run build
+              working-directory: base
+            - run: bun ci
+              working-directory: head
+            - run: bun run build
+              working-directory: head
+            - name: Measure base
+              run: bun scripts/measure-bundles.mjs --package-root ../base/packages/site-admin --output bundle-base.json
+              working-directory: head
+            - name: Measure pull request
+              run: bun scripts/measure-bundles.mjs --package-root packages/site-admin --output bundle-head.json
+              working-directory: head
+            - name: Compare
+              run: bun scripts/measure-bundles.mjs --compare bundle-base.json bundle-head.json --output bundle-comment.md
+              working-directory: head
+            - name: Add job summary
+              run: |
+                  printf 'Base: `%s`\n\nHead: `%s`\n\n' "$BASE_SHA" "$HEAD_SHA" >> bundle-comment.md
+                  cat bundle-comment.md >> "$GITHUB_STEP_SUMMARY"
+              env:
+                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+                  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+              working-directory: head
+            - name: Save report
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: bundle-size-comment
+                  path: |
+                      head/bundle-comment.md
+                      head/bundle-base.json
+                      head/bundle-head.json
+                  if-no-files-found: error
+
+    comment:
+        name: Package size comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        needs: compare
+        runs-on: ubuntu-latest
+        permissions:
+            pull-requests: write
+        steps:
+            # Only the pinned comment action runs with write permission. PR code is never checked out.
+            - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+              with:
+                  name: bundle-size-comment
+            - name: Update pull request comment
+              uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+              with:
+                  header: package-bundle-size
+                  path: bundle-comment.md
