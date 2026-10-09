@@ -24,7 +24,7 @@ interface State {
     error: Vue.Ref<unknown>
     execute(options?: { signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
     clear(): void
-    refresh(options?: { cachedData?: unknown }): Promise<void>
+    refresh(options?: { cachedData?: unknown; signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
 }
 interface Helpers {
     useAiAction(name: string, options: Record<string, unknown>): State & Promise<State>
@@ -177,7 +177,225 @@ const flush = async () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     await Vue.nextTick()
 }
+const settles = async (pending: Promise<void>) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([
+            pending.then(() => true),
+            new Promise<false>((resolve) => {
+                timer = setTimeout(() => resolve(false), 100)
+            }),
+        ])
+    } finally {
+        clearTimeout(timer)
+    }
+}
+const cancelledSignals = [
+    ['AbortSignal.abort()', () => AbortSignal.abort()],
+    [
+        'an already-aborted controller',
+        () => {
+            const controller = new AbortController()
+            controller.abort()
+            return controller.signal
+        },
+    ],
+    ['a string reason', () => AbortSignal.abort('Cancelled')],
+    ['a custom non-Error reason', () => AbortSignal.abort({ cancelled: true })],
+] as const
 describe('native createUseFetch AI actions', () => {
+    describe.each(['execute', 'refresh'] as const)('%s cancellation', (method) => {
+        it.each(cancelledSignals)(
+            'settles %s before execution and permits a subsequent defer retry',
+            async (_, signal) => {
+                let calls = 0
+                const { helpers } = await nativeEnvironment(
+                    async () => {
+                        calls++
+                        return Response.json('Retried')
+                    },
+                    false,
+                    true,
+                )
+                const scope = Vue.effectScope()
+                // Exercise extensions on the awaited instance, as used by async component setup.
+                const state = await scope.run(() =>
+                    helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
+                )!
+                try {
+                    await state.execute()
+                    expect(state.status.value).toBe('success')
+                    expect(await settles(state[method]({ signal: signal() }))).toBe(true)
+                    expect(state.status.value).toBe('idle')
+                    expect(state.error.value).toBeUndefined()
+                    expect(state.data.value).toBeUndefined()
+                    expect(calls).toBe(1)
+                    expect(await settles(state.execute())).toBe(true)
+                    expect(state.status.value).toBe('success')
+                    expect(calls).toBe(2)
+                } finally {
+                    state.clear()
+                    scope.stop()
+                }
+            },
+        )
+    })
+    it('does not invoke transport for pre-aborted initial execution or interrupt a healthy deferred request', async () => {
+        let calls = 0
+        let complete!: () => void
+        let transport: AbortSignal | undefined
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                transport = init?.signal ?? undefined
+                await new Promise<void>((resolve) => {
+                    complete = resolve
+                })
+                return Response.json('Completed')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        // Also exercise extensions on the unawaited native composable return.
+        const state = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }))!
+        try {
+            expect(await settles(state.execute({ signal: AbortSignal.abort() }))).toBe(true)
+            expect(state.status.value).toBe('idle')
+            expect(calls).toBe(0)
+            const first = state.execute()
+            expect(await settles(state.execute({ signal: AbortSignal.abort('Cancelled') }))).toBe(true)
+            expect(state.status.value).toBe('pending')
+            expect(transport?.aborted).toBe(false)
+            expect(calls).toBe(1)
+            complete()
+            expect(await settles(first)).toBe(true)
+            expect(state.data.value).toBe('Completed')
+        } finally {
+            complete?.()
+            state.clear()
+            scope.stop()
+        }
+    })
+    it.each([
+        ['default AbortError', undefined, 'idle'],
+        ['explicit AbortError', new DOMException('Cancelled', 'AbortError'), 'idle'],
+        ['string reason', 'Cancelled', 'idle'],
+        ['custom non-Error reason', { cancelled: true }, 'idle'],
+        ['custom Error reason', new Error('Stopped'), 'error'],
+    ] as const)('settles in-flight %s, aborts transport and permits retry', async (_description, reason, status) => {
+        let calls = 0
+        let transport: AbortSignal | undefined
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                if (calls === 1) {
+                    transport = init?.signal ?? undefined
+                await new Promise<void>((_resolve, reject) => {
+                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                    })
+                }
+                return Response.json('Retried')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = await scope.run(() =>
+            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
+        )!
+        try {
+            const controller = new AbortController()
+            const pending = state.execute({ signal: controller.signal })
+            controller.abort(reason)
+            expect(transport?.aborted).toBe(true)
+            expect(await settles(pending)).toBe(true)
+            expect(state.status.value).toBe(status)
+            if (status === 'idle') expect(state.error.value).toBeUndefined()
+            else expect(state.error.value).toMatchObject({ message: 'Stopped' })
+            expect(await settles(state.execute())).toBe(true)
+            expect(calls).toBe(2)
+            expect(state.data.value).toBe('Retried')
+            expect(state.status.value).toBe('success')
+        } finally {
+            state.clear()
+            scope.stop()
+        }
+    })
+    it('settles synchronous abort before middleware begins and allows retry', async () => {
+        let calls = 0
+        const { helpers } = await nativeEnvironment(
+            async () => {
+                calls++
+                return Response.json('Retried')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = await scope.run(() =>
+            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
+        )!
+        const controller = new AbortController()
+        const stop = Vue.watch(
+            state.status,
+            (status) => {
+                if (status === 'pending') controller.abort('Cancelled')
+            },
+            { flush: 'sync' },
+        )
+        try {
+            expect(await settles(state.execute({ signal: controller.signal }))).toBe(true)
+            expect(state.status.value).toBe('idle')
+            expect(calls).toBe(0)
+            stop()
+            expect(await settles(state.execute())).toBe(true)
+            expect(calls).toBe(1)
+            expect(state.status.value).toBe('success')
+        } finally {
+            stop()
+            state.clear()
+            scope.stop()
+        }
+    })
+    it('retains native timeout and pre-aborted Error state and permits retry', async () => {
+        let calls = 0
+        let transport: AbortSignal | undefined
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                if (calls === 1) {
+                    transport = init?.signal ?? undefined
+                await new Promise<void>((_resolve, reject) => {
+                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                    })
+                }
+                return Response.json('Retried')
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = await scope.run(() =>
+            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false, timeout: 5 }),
+        )!
+        try {
+            expect(await settles(state.execute({ signal: AbortSignal.abort(new Error('Stopped')) }))).toBe(true)
+            expect(calls).toBe(0)
+            expect(state.status.value).toBe('error')
+            expect(state.error.value).toMatchObject({ message: 'Stopped' })
+            expect(await settles(state.execute())).toBe(true)
+            expect(transport?.aborted).toBe(true)
+            expect(state.status.value).toBe('error')
+            expect(state.error.value).toMatchObject({ cause: { name: 'TimeoutError' } })
+            expect(await settles(state.execute())).toBe(true)
+            expect(calls).toBe(2)
+            expect(state.status.value).toBe('success')
+        } finally {
+            state.clear()
+            scope.stop()
+        }
+    })
     it('executes only explicitly with fixed POST/watch/retry and snapshots reactive props', async () => {
         const bodies: unknown[] = []
         const { helpers } = await nativeEnvironment(

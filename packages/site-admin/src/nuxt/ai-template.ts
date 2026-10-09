@@ -6,7 +6,7 @@ import { createUseFetch } from '#app/composables/fetch'
 import { defineUseFetchAddon } from '#app/composables/addons'
 import { hashKey } from '#app'
 import type { UseFetchOptions } from '#app/composables/fetch'
-import type { AsyncDataMiddleware } from '#app/composables/asyncData'
+import type { AsyncDataExecuteOptions, AsyncDataMiddleware } from '#app/composables/asyncData'
 import type { SiteAdminNamedAiActions } from '@liria24/site-admin/client'
 
 // Nuxt owns hashing, SSR payload hydration, cancellation and AsyncData state.
@@ -15,14 +15,32 @@ export const siteAdminAiFetch = createUseFetch({
   addons: [defineUseFetchAddon({
     setup: (options) => {
       Object.assign(options, { method: 'post', watch: false, retry: 0 })
+      // Nuxt normalizes non-Error reasons to AbortError; timeout/provider errors retain native error state.
+      const isCancellation = (reason: unknown) => !(reason instanceof Error) || reason.name === 'AbortError'
       const abortMiddleware: AsyncDataMiddleware = async (next, { signal }) => {
         const key = toValue(options.key)
         // Public clear settles Nuxt 4.6's external-abort promise after transport cancellation.
-        const abort = () => { if (signal.reason?.name === 'AbortError' && key) clearNuxtData(key) }
+        const abort = () => { if (isCancellation(signal.reason) && key) clearNuxtData(key) }
         signal.addEventListener('abort', abort, { once: true })
         try { return await next() } finally { signal.removeEventListener('abort', abort) }
       }
       options.middleware.push(abortMiddleware)
+      return (asyncData) => {
+        const refresh = asyncData.refresh
+        const execute = (execution?: AsyncDataExecuteOptions): Promise<void> => {
+          if (execution?.signal?.aborted && isCancellation(execution.signal.reason)) {
+            // An already-cancelled invocation must not poison defer or cancel a healthy shared request.
+            if (asyncData.status.value !== 'pending') asyncData.clear()
+            return Promise.resolve()
+          }
+          const key = toValue(options.key)
+          const pending = refresh(execution)
+          // A synchronous status watcher can abort before middleware or promise registration.
+          if (execution?.signal?.aborted && isCancellation(execution.signal.reason) && key) clearNuxtData(key)
+          return pending
+        }
+        return { execute, refresh: execute }
+      }
     },
   })],
 })
