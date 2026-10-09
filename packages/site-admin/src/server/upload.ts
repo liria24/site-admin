@@ -88,3 +88,27 @@ export const prepareUpload = async (input: UploadAssetInput, maxSize?: number) =
         stream,
     }
 }
+
+export const safeFilename = (value: string): string => {
+    const name =
+        value
+            .split(/[\\/]/u)
+            .at(-1)
+            ?.replace(/[^A-Za-z0-9._-]+/gu, '-') ?? 'file'
+    return name.replace(/^[.-]+/u, '').slice(0, 120) || 'file'
+}
+
+export const detectedMime = (bytes: Uint8Array): string => {
+    const starts = (...values: number[]): boolean => values.every((value, index) => bytes[index] === value)
+    if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png'
+    if (starts(0xff, 0xd8, 0xff)) return 'image/jpeg'
+    if (starts(0x47, 0x49, 0x46, 0x38)) return 'image/gif'
+    if (starts(0x52, 0x49, 0x46, 0x46) && new TextDecoder().decode(bytes.slice(8, 12)) === 'WEBP') return 'image/webp'
+    if (
+        new TextDecoder().decode(bytes.slice(4, 12)) === 'ftypavif' ||
+        new TextDecoder().decode(bytes.slice(4, 12)) === 'ftypavis'
+    )
+        return 'image/avif'
+    if (starts(0x25, 0x50, 0x44, 0x46)) return 'application/pdf'
+    return 'application/octet-stream'
+}
