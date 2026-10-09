@@ -235,14 +235,19 @@ const accessControl = (config: SiteAdminConfig): string => {
             return [name, statements]
         }),
     )
+    const definitions = {
+        admin: 'ac.newRole(resources)',
+        user: 'ac.newRole(Object.fromEntries(Object.keys(resources).map((name) => [name, []])))',
+        ...Object.fromEntries(
+            Object.entries(custom).map(([name, permissions]) => [name, `ac.newRole(${JSON.stringify(permissions)})`]),
+        ),
+    }
     return `const resources = ${JSON.stringify(resources)}
 const ac = createAccessControl(resources)
 const roles = {
-  admin: ac.newRole(resources),
-  user: ac.newRole(Object.fromEntries(Object.keys(resources).map((name) => [name, []]))),
-  ...{${Object.entries(custom)
-      .map(([name, permissions]) => `${JSON.stringify(name)}: ac.newRole(${JSON.stringify(permissions)}),`)
-      .join('\n  ')}}
+  ${Object.entries(definitions)
+      .map(([name, code]) => `${JSON.stringify(name)}: ${code},`)
+      .join('\n  ')}
 }`
 }
 
