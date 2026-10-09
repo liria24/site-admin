@@ -124,7 +124,7 @@ ${publicDataOverloads('List', true)}
 ${publicDataOverloads('List')}
 export function useSiteAdminList(model: PublicModelName, options: AsyncDataOptions<SiteAdminPublicModels[PublicModelName][] | SiteAdminPublicSummaryModels[keyof SiteAdminPublicSummaryModels][]> & SiteAdminLocaleOptions & { markdown?: 'full' | 'summary' } = {}) {
   const clientOptions = siteAdminPublicClientOptions()
-  const client = createSiteAdminClient(clientOptions)
+  const client = createSiteAdminClient<SiteAdminPublicModels, SiteAdminPublicSummaryModels>(clientOptions)
   const locale = useSiteAdminLocale(options.locale)
   const key = computed(() => siteAdminDataKey(clientOptions, 'list', model, null, locale.value, options.markdown))
   const { locale: _locale, markdown: _markdown, ...asyncOptions } = options
@@ -132,7 +132,7 @@ export function useSiteAdminList(model: PublicModelName, options: AsyncDataOptio
     const effectiveLocale = locale.value
     const request = { signal, ...(effectiveLocale === undefined ? {} : { locale: effectiveLocale }) }
     if (options.markdown === 'summary') return client.list<PublicModelName & keyof SiteAdminPublicSummaryModels>(model, { ...request, markdown: 'summary' })
-    return client.list<PublicModelName>(model, request)
+    return client.list<PublicModelName>(model, { ...request, markdown: 'full' })
   }, asyncOptions)
 }
 
