@@ -194,13 +194,16 @@ describe('native Better Auth integration', () => {
         expect(sources.client).toEqual(['/app/client-plugin.ts', 'site-admin/better-auth-client-plugin.mjs'])
         const early = {
             filename: 'types/nuxt-better-auth-endpoints.d.ts',
-            getContents: () => "import type createServerAuth from '/app/extended-auth.ts'",
+            getContents: () =>
+                "import type createServerAuth from '/app/extended-auth.ts'\nimport type { getEndpoints } from 'better-auth/api'",
         }
         kit.templates.push(early)
         await hook.mock.calls.find(([name]) => name === 'afterEach')![1]({ name: 'modules:done' })
         expect(await Promise.resolve(early.getContents())).toContain(
             'import type createServerAuth from "site-admin/better-auth-server-config.ts"',
         )
+        expect(await Promise.resolve(early.getContents())).not.toContain("from 'better-auth/api'")
+        expect(await Promise.resolve(early.getContents())).toMatch(/better-auth\/dist\/api\/index\.d\.mts/u)
         const wrapper = kit.templates.find(({ filename }) => filename === 'site-admin/better-auth-server-config.ts')!
         expect(wrapper.getContents()).toContain('import createAuth from "/app/extended-auth.ts"')
         expect(wrapper.getContents()).toContain('Parameters<typeof createAuth>[0]')
@@ -208,7 +211,7 @@ describe('native Better Auth integration', () => {
         const template: { filename: string; getContents: () => string | Promise<string> } = {
             filename: 'types/nuxt-better-auth-infer.d.ts',
             getContents: () =>
-                "import type createServerAuth from '/app/extended-auth.ts'\nexport type Config = ReturnType<typeof createServerAuth>",
+                "import type createServerAuth from '/app/extended-auth.ts'\nimport type { BetterAuthOptions } from 'better-auth'\nimport type { InferFieldsOutput } from 'better-auth/db'\nexport type Config = ReturnType<typeof createServerAuth>",
         }
         const templatesHook = hook.mock.calls.find(([name]) => name === 'app:templates')![1]
         templatesHook({ templates: [template] })
@@ -216,6 +219,8 @@ describe('native Better Auth integration', () => {
         expect(await template.getContents()).toContain(
             'import type createServerAuth from "site-admin/better-auth-server-config.ts"',
         )
+        expect(await template.getContents()).not.toMatch(/from ['"]better-auth(?:\/db)?['"]/u)
+        expect(await template.getContents()).toMatch(/better-auth\/dist\/db\/index\.d\.mts/u)
         templatesHook({ templates: [template] })
         expect(template.getContents).toBe(rewritten)
         const config: import('nitropack/types').NitroConfig = { esbuild: { options: { exclude: /node_modules/u } } }

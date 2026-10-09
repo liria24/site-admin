@@ -197,7 +197,7 @@ export default defineNuxtConfig({
     await writeFile(
         join(temporary, 'server/site-admin.config.ts'),
         `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
-export default defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+export default defineSiteAdminConfig({ authorization: { roles: { user: {} } }, models: { posts: { fields: { title: text() } } } })
 `,
     )
     await mkdir(join(temporary, 'server/app/components/OgImage'), { recursive: true })
@@ -337,6 +337,10 @@ void admin
         `const nativeSession = useUserSession()
 const role: NonNullable<typeof nativeSession.user.value>['role'] = 'admin'
 const impersonatedBy: NonNullable<typeof nativeSession.session.value>['impersonatedBy'] = 'test-admin'
+// @ts-expect-error Native role inference must not degrade to any.
+const invalidRole: NonNullable<typeof nativeSession.user.value>['role'] = 1
+// @ts-expect-error Native session inference must retain its field type.
+const invalidImpersonatedBy: NonNullable<typeof nativeSession.session.value>['impersonatedBy'] = 1
 const client: import('@liria24/site-admin/client').SiteAdminClient = useSiteAdminClient()
 const route = useSiteAdminRoute()
 // @ts-expect-error No such public client method.
@@ -344,6 +348,8 @@ client.missing()
 void route
 void role
 void impersonatedBy
+void invalidRole
+void invalidImpersonatedBy
 `,
     )
     const setupNuxt = (dev) =>

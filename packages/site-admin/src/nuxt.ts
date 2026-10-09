@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 import { normalize } from 'pathe'
+import { resolveModulePath } from 'exsolve'
 
 import {
     addImports,
@@ -239,9 +240,9 @@ const ac = createAccessControl(resources)
 const roles = {
   admin: ac.newRole(resources),
   user: ac.newRole(Object.fromEntries(Object.keys(resources).map((name) => [name, []]))),
-  ${Object.entries(custom)
+  ...{${Object.entries(custom)
       .map(([name, permissions]) => `${JSON.stringify(name)}: ac.newRole(${JSON.stringify(permissions)}),`)
-      .join('\n  ')}
+      .join('\n  ')}}
 }`
 }
 
@@ -539,11 +540,27 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
                         write: true,
                     })
                     nuxt.options.alias['#auth/server'] = serverConfig.dst
+                    // Native declarations are generated inside the app, outside the SDK's dependency scope.
+                    // Resolve their public type exports explicitly; pnpm need not hoist our dependencies.
+                    const nativeAuthTypes = Object.fromEntries(
+                        ['better-auth', 'better-auth/db', 'better-auth/api'].map((specifier) => [
+                            specifier,
+                            normalize(
+                                resolveModulePath(specifier, {
+                                    from: import.meta.url,
+                                    conditions: ['types', 'import'],
+                                }),
+                            ),
+                        ]),
+                    )
                     const rewritten = new WeakSet<object>()
                     const rewriteTemplates = (templates: typeof nuxt.options.build.templates) => {
                         for (const template of templates) {
                             if (
-                                !template.filename?.startsWith('types/nuxt-better-auth-') ||
+                                !(
+                                    template.filename?.startsWith('types/nuxt-better-auth-') ||
+                                    template.filename === 'types/auth-database.d.ts'
+                                ) ||
                                 !template.getContents ||
                                 rewritten.has(template)
                             )
@@ -551,10 +568,16 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
                             rewritten.add(template)
                             const getContents = template.getContents
                             template.getContents = async (context) =>
-                                (await getContents(context)).replace(
-                                    `import type createServerAuth from '${source}'`,
-                                    `import type createServerAuth from ${JSON.stringify(serverConfig.dst)}`,
-                                )
+                                (await getContents(context))
+                                    .replace(
+                                        `import type createServerAuth from '${source}'`,
+                                        `import type createServerAuth from ${JSON.stringify(serverConfig.dst)}`,
+                                    )
+                                    .replace(
+                                        /from (['"])(better-auth(?:\/(?:api|db))?)\1/gu,
+                                        (_match, _quote, specifier: string) =>
+                                            `from ${JSON.stringify(nativeAuthTypes[specifier])}`,
+                                    )
                         }
                     }
                     // `nuxt prepare` writes types before the app template hook runs.
