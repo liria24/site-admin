@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { createError } from 'h3'
 import { describe, expect, it } from 'vitest'
 import * as Vue from 'vue'
+import { renderToString } from 'vue/server-renderer'
 import {
     createSiteAdminClient,
     createSiteAdminManagementClient,
@@ -57,14 +58,20 @@ interface Helpers {
     ): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
 }
 
-const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions = false, serverFetch = false) => {
+const nativeEnvironment = async (
+    request: typeof fetch,
+    i18n = false,
+    aiActions = false,
+    serverFetch = false,
+    serverRuntime = false,
+) => {
     const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
     const root = dirname(requireNuxt.resolve('nuxt/package.json'))
     const script = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
     const native = script(await readFile(join(root, 'dist/app/composables/asyncData.js'), 'utf8'))
         .replace(/^const createUseAsyncData =.*?^\}\);/gmsu, '')
-        .replaceAll('import.meta.client', 'true')
-        .replaceAll('import.meta.server', 'false')
+        .replaceAll('import.meta.client', String(!serverRuntime))
+        .replaceAll('import.meta.server', String(serverRuntime))
         .replaceAll('import.meta.dev', 'false')
         .replaceAll('import.meta.prerender', 'false')
     const hooks = new Map<string, Set<(...args: unknown[]) => unknown>>()
@@ -83,7 +90,7 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions 
         payload: {
             data: Vue.shallowReactive({} as Record<string, unknown>),
             _errors: Vue.shallowReactive({}),
-            serverRendered: false,
+            serverRendered: serverRuntime,
         },
         static: { data: {} as Record<string, unknown> },
         isHydrating: false,
@@ -130,8 +137,8 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions 
         },
     }
     const fetchSource = script(await readFile(join(root, 'dist/app/composables/fetch.js'), 'utf8'))
-        .replaceAll('import.meta.client', 'true')
-        .replaceAll('import.meta.server', 'false')
+        .replaceAll('import.meta.client', String(!serverRuntime))
+        .replaceAll('import.meta.server', String(serverRuntime))
         .replaceAll('import.meta.dev', 'false')
     const addonsSource = script(await readFile(join(root, 'dist/app/composables/addons.js'), 'utf8'))
     const runtime = new Function(
@@ -533,6 +540,118 @@ const modelDescriptor = createSiteAdminDescriptor(
 )
 
 describe('native management AsyncData and mutation invalidation', () => {
+    it('defers management entry/list descriptors until execution and shares the started read', async () => {
+        const requests: string[] = []
+        const { helpers, app } = await nativeEnvironment(async (input) => {
+            const path = new URL(String(input)).pathname
+            requests.push(path)
+            if (path === '/manage/models') return Response.json(modelDescriptor)
+            const entry = {
+                id: path.split('/').at(-1),
+                model: 'posts',
+                data: { title: 'Deferred', image: 'asset' },
+            }
+            return Response.json(path === '/manage/entries' ? { items: [entry], total: 1 } : entry)
+        })
+        const scope = Vue.effectScope()
+        const id = Vue.ref('one')
+        const actor = Vue.ref('alice')
+        const states = scope.run(() => ({
+            entry: helpers.useSiteAdminManagementEntry('posts', id, { immediate: false, authScope: actor }),
+            list: helpers.useSiteAdminManagementList('posts', { immediate: false, authScope: actor }),
+        }))!
+        await flush()
+        id.value = 'two'
+        actor.value = 'bob'
+        await flush()
+        expect(requests).toEqual([])
+        expect(states.entry.status.value).toBe('idle')
+        expect(states.list.status.value).toBe('idle')
+        expect(Object.values(app.payload.data)).toEqual([])
+
+        await Promise.all([states.entry.execute(), states.list.execute()])
+        expect(requests.filter((path) => path === '/manage/models')).toHaveLength(1)
+        expect(requests.filter((path) => path !== '/manage/models').sort()).toEqual([
+            '/manage/entries',
+            '/manage/entries/two',
+        ])
+        expect(states.entry.status.value).toBe('success')
+        expect(states.list.status.value).toBe('success')
+        expect((states.entry.data.value as { data: { image: { url: string } } }).data.image.url).toBe(
+            'http://site.test/manage/assets/asset/content',
+        )
+        scope.stop()
+    })
+
+    describe.each(['entry', 'list'] as const)('SSR management %s native scheduling', (kind) => {
+        it.each([
+            ['deferred', { immediate: false }],
+            ['client-only', { server: false }],
+        ] as const)('keeps %s reads idle without descriptor requests or payload', async (_mode, options) => {
+            const requests: string[] = []
+            const { helpers, app } = await nativeEnvironment(
+                async (input) => {
+                    const path = new URL(String(input)).pathname
+                    requests.push(path)
+                    return Response.json(modelDescriptor)
+                },
+                false,
+                false,
+                true,
+                true,
+            )
+            let state: State | undefined
+            const html = await renderToString(
+                Vue.createSSRApp({
+                    setup() {
+                        state =
+                            kind === 'entry'
+                                ? helpers.useSiteAdminManagementEntry('posts', 'one', options)
+                                : helpers.useSiteAdminManagementList('posts', options)
+                        return () => Vue.h('div', state!.status.value)
+                    },
+                }),
+            )
+            expect(html).toBe('<div>idle</div>')
+            expect(state?.data.value).toBeUndefined()
+            expect(requests).toEqual([])
+            expect(app.payload.data).toEqual({})
+        })
+    })
+
+    it('shares the descriptor after normal SSR entry/list execution starts', async () => {
+        const requests: string[] = []
+        const environment = await nativeEnvironment(
+            async (input) => {
+                const path = new URL(String(input)).pathname
+                requests.push(path)
+                if (path === '/manage/models') return Response.json(modelDescriptor)
+                const entry = { id: 'one', model: 'posts', data: { title: 'SSR', image: 'asset' } }
+                return Response.json(path === '/manage/entries' ? { items: [entry], total: 1 } : entry)
+            },
+            false,
+            false,
+            true,
+            true,
+        )
+        const html = await renderToString(
+            Vue.createSSRApp({
+                setup() {
+                    const entry = environment.helpers.useSiteAdminManagementEntry('posts', 'one')
+                    const list = environment.helpers.useSiteAdminManagementList('posts')
+                    return () => Vue.h('div', entry.status.value + ':' + list.status.value)
+                },
+            }),
+        )
+        expect(html).toBe('<div>success:success</div>')
+        expect(requests.filter((path) => path === '/manage/models')).toHaveLength(1)
+        expect(requests.filter((path) => path !== '/manage/models').sort()).toEqual([
+            '/manage/entries',
+            '/manage/entries/one',
+        ])
+        expect(environment.requestFetches()).toBe(1)
+    })
+
     it('reuses clients within a request and auth scope, separating transport identity and credentials', async () => {
         const request = async () => Response.json({ items: [], total: 0, limit: 50, offset: 0 })
         const environment = await nativeEnvironment(request)

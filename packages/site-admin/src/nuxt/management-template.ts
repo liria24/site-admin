@@ -113,10 +113,10 @@ export const createNuxtSiteAdminManagementClient = <Models extends { [Name in ke
   } })
 }
 
-export const useSiteAdminModels = (connection: SiteAdminManagementClientOptions, auth: MaybeRefOrGetter<string>) => {
+export const useSiteAdminModels = (connection: SiteAdminManagementClientOptions, auth: MaybeRefOrGetter<string>, immediate = true) => {
   const client = createNuxtSiteAdminManagementClient(connection, auth)
   const key = computed(() => siteAdminManagementKey(connection, toValue(auth), 'models', null, null))
-  return siteAdminAsyncData(() => key.value, (_app, { signal }) => client.models({ signal }), { dedupe: 'defer' })
+  return siteAdminAsyncData(() => key.value, (_app, { signal }) => client.models({ signal }), { dedupe: 'defer', immediate })
 }
 
 export const siteAdminReadModels = async (source: ReturnType<typeof useSiteAdminModels>, auth: MaybeRefOrGetter<string>, signal: AbortSignal): Promise<SiteAdminDescriptor> => {
@@ -145,7 +145,7 @@ export function useSiteAdminManagementEntry(model: ManagementModelName, id: Mayb
   const auth = useSiteAdminAuthScope(options.authScope, connection)
   const locale = computed(() => toValue(options.locale))
   const client = createNuxtSiteAdminManagementClient(connection, auth)
-  const modelsSource = useSiteAdminModels(connection, auth)
+  const modelsSource = useSiteAdminModels(connection, auth, false)
   const key = computed(() => siteAdminManagementKey(connection, auth.value, 'entry', model, toValue(id), locale.value))
   const { authScope: _auth, locale: _locale, limit: _limit, offset: _offset, q: _q, ...asyncOptions } = options
   return siteAdminAsyncData(() => key.value, async (_app, { signal }) => {
@@ -164,7 +164,7 @@ export function useSiteAdminManagementList(model: ManagementModelName, options: 
   const auth = useSiteAdminAuthScope(options.authScope, connection)
   const locale = computed(() => toValue(options.locale))
   const client = createNuxtSiteAdminManagementClient(connection, auth)
-  const modelsSource = useSiteAdminModels(connection, auth)
+  const modelsSource = useSiteAdminModels(connection, auth, false)
   const query = computed(() => ({ ...(locale.value === undefined ? {} : { locale: locale.value }), ...(toValue(options.limit) === undefined ? {} : { limit: toValue(options.limit)! }), ...(toValue(options.offset) === undefined ? {} : { offset: toValue(options.offset)! }), ...(toValue(options.q) === undefined ? {} : { q: toValue(options.q)! }) }))
   const key = computed(() => siteAdminManagementKey(connection, auth.value, 'list', model, query.value, locale.value))
   const { authScope: _auth, locale: _locale, limit: _limit, offset: _offset, q: _q, ...asyncOptions } = options
