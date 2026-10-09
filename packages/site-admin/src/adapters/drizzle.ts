@@ -1,6 +1,6 @@
 import type { EmptyRelations } from 'drizzle-orm'
 import type { SQLiteAsyncDatabase } from 'drizzle-orm/sqlite-core/async/db'
-import { is, getTableName, entityKind } from 'drizzle-orm'
+import { is, getTableName, getTableColumns, entityKind } from 'drizzle-orm'
 import { SQLiteTable } from 'drizzle-orm/sqlite-core'
 import { SiteAdminError } from '../errors'
 import type { SiteAdminDatabase, DatabaseValue as Primitive } from '../adapter'
@@ -97,15 +97,16 @@ export function drizzleAdapter(db: DrizzleDatabase, options: { schema: Record<st
                 insertRevisionData(model, revisionId, data) {
                     const table = mapped[model]
                     if (!table) throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', `Unknown Model "${model}".`)
-                    const content = connection.orm
-                        .insert(table)
-                        .values({ ...data, revisionId })
-                        .toSQL()
-                    const guarded = content.sql.replace(/ values \((.*)\)$/u, ' select $1')
-                    if (guarded === content.sql) throw new Error('Unexpected Drizzle insert SQL shape.')
+                    const columns = getTableColumns(table)
+                    const keys = ['revisionId', ...Object.keys(config.models[model]!.fields)]
+                    const values: Record<string, unknown> = { ...data, revisionId }
+                    const params = keys.map((key) => {
+                        const value = values[key]
+                        return value === undefined || value === null ? null : columns[key]!.mapToDriverValue(value)
+                    }) as Primitive[]
                     return {
-                        sql: guarded + ' WHERE EXISTS (SELECT 1 FROM site_admin_revisions WHERE id = ?)',
-                        params: [...(content.params as Primitive[]), revisionId],
+                        sql: `INSERT INTO ${JSON.stringify(getTableName(table))}(${keys.map((key) => JSON.stringify(columns[key]!.name)).join(',')}) SELECT ${keys.map(() => '?').join(',')} WHERE EXISTS (SELECT 1 FROM site_admin_revisions WHERE id = ?)`,
+                        params: [...params, revisionId],
                     }
                 },
             }

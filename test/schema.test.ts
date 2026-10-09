@@ -125,4 +125,63 @@ describe('application-owned Drizzle migrations', () => {
         expect(generated).toContain("from 'drizzle-orm/sqlite-core'")
         expect(() => generateSiteAdminSchema({ models: { posts: { fields: { revisionId: text() } } } })).toThrow()
     })
+
+    it('keeps removed optional columns and historical values with old or regenerated application mappings', async () => {
+        const db = database()
+        const original = defineSiteAdminConfig({
+            models: { posts: { fields: { title: text({ required: true }), excerpt: text() } } },
+        })
+        const current = defineSiteAdminConfig({ models: { posts: { fields: { title: text({ required: true }) } } } })
+        await migrateTestDatabase(db, original)
+        const oldMapping = await testAdapter(db, original)
+        const previous = await createSiteAdmin({ config: original, database: oldMapping }).createEntry('posts', {
+            data: { title: 'before', excerpt: 'retained history' },
+        })
+        for (const adapter of [oldMapping, await testAdapter(db, current)]) {
+            const admin = createSiteAdmin({ config: current, database: adapter })
+            await admin.initialize()
+            const entry = await admin.getEntry(previous.id)
+            expect(entry.data).toEqual({ title: 'before' })
+            const next = await admin.createEntry('posts', { data: { title: 'after' } })
+            const edited = await admin.updateEntry(next.id, {
+                expectedVersion: next.version,
+                data: { title: 'edited' },
+            })
+            await admin.publishEntry(edited.id, { expectedVersion: edited.version })
+            expect((await admin.getPublicEntry('posts', edited.id))?.data).toEqual({ title: 'edited' })
+            expect(
+                await db
+                    .prepare('SELECT field_excerpt FROM site_admin_content_posts WHERE revision_id = ?')
+                    .get(previous.revisionId),
+            ).toEqual({ field_excerpt: 'retained history' })
+        }
+        const columns = (await db.prepare('PRAGMA table_info(site_admin_content_posts)').all()) as Array<{
+            name: string
+        }>
+        expect(columns.map((column) => column.name)).toContain('field_excerpt')
+    })
+
+    it('permits retained defaulted columns but rejects required extras that prevent active-column inserts', async () => {
+        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+        const db = database()
+        await migrateTestDatabase(db, config)
+        await db.exec("ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT NOT NULL DEFAULT 'preserved'")
+        const admin = createSiteAdmin({ config, database: await testAdapter(db, config) })
+        await admin.createEntry('posts', { data: { title: 'new' } })
+        expect(await db.prepare('SELECT legacy FROM site_admin_content_posts').get()).toEqual({ legacy: 'preserved' })
+
+        const blocked = database()
+        await migrateTestDatabase(blocked, {
+            models: { posts: { fields: { title: text(), excerpt: text({ required: true }) } } },
+        })
+        await expect(
+            createSiteAdmin({ config, database: await testAdapter(blocked, config) }).initialize(),
+        ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+
+        const constrained = database()
+        await migrateTestDatabase(constrained, { models: { posts: { fields: { title: text({ required: true }) } } } })
+        await expect(
+            createSiteAdmin({ config, database: await testAdapter(constrained, config) }).initialize(),
+        ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+    })
 })
