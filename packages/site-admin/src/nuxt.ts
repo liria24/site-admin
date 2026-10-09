@@ -197,6 +197,7 @@ const accessControl = (config: SiteAdminConfig): string => {
     const resources = {
         ...Object.fromEntries(Object.keys(config.models).map((name) => [`siteAdmin:model:${name}`, modelActions])),
         'siteAdmin:assets': assetActions,
+        ...(config.ai?.actions ? { 'siteAdmin:ai': Object.keys(config.ai.actions) } : {}),
         'siteAdmin:system': systemActions,
         session: ['list', 'revoke', 'delete'],
         user: [
@@ -217,6 +218,9 @@ const accessControl = (config: SiteAdminConfig): string => {
             const statements: Record<string, readonly string[]> = {
                 'siteAdmin:assets': role.assets ?? [],
                 'siteAdmin:system': role.system ?? [],
+                ...(config.ai?.actions
+                    ? { 'siteAdmin:ai': role.ai?.includes('*') ? Object.keys(config.ai.actions) : (role.ai ?? []) }
+                    : {}),
                 session: [],
                 user: [],
             }
@@ -513,14 +517,6 @@ export default defineNuxtModule<ModuleConfig>({
 
         const publicLocales = options.i18n ? localeOptions(nuxt) : { strategy: 'no_prefix', supported: [] }
 
-        if (options.routing.enabled) {
-            const middleware = addTemplate({
-                filename: 'site-admin/route-middleware.mjs',
-                getContents: () => routeMiddleware(options, publicLocales),
-                write: true,
-            })
-            addRouteMiddleware({ global: true, name: 'site-admin-public-route', path: middleware.dst })
-        }
         if (options.routing.metadata && (options.seo || options.ogImage || options.schemaOrg)) {
             const plugin = addTemplate({
                 filename: 'site-admin/metadata-plugin.mjs',
@@ -595,7 +591,7 @@ export default defineNuxtModule<ModuleConfig>({
                 })
                 // Preserve the existing custom-hook bridge only for legacy hook-only apps.
                 // Direct adapter configurations leave Better Auth's app-owned provider intact.
-                if (!domainConfig.database) {
+                if (!domainConfig.database && Object.keys(domainConfig.models).length > 0) {
                     nuxt.hook('better-auth:database:providers', (providers) => {
                         providers.siteAdmin = {
                             priority: 1_000,
@@ -631,6 +627,21 @@ export default defineNuxtModule<ModuleConfig>({
             }
         }
 
+        const aiEnabled = options.ai ?? Boolean(domainConfig?.ai)
+        const namedAiActions = aiEnabled && Boolean(Object.keys(domainConfig?.ai?.actions ?? {}).length)
+        const legacyAiModel = aiEnabled && Boolean(domainConfig?.ai?.model)
+        const cmsConfigured =
+            !domainConfig ||
+            Boolean(Object.keys(domainConfig.models).length || domainConfig.assets || domainConfig.database)
+        if (options.routing.enabled && cmsConfigured) {
+            const middleware = addTemplate({
+                filename: 'site-admin/route-middleware.mjs',
+                getContents: () => routeMiddleware(options, publicLocales),
+                write: true,
+            })
+            addRouteMiddleware({ global: true, name: 'site-admin-public-route', path: middleware.dst })
+        }
+
         // Only the explicitly serializable public presentation contract enters client config.
         const publicConfig = nuxt.options.runtimeConfig.public as typeof nuxt.options.runtimeConfig.public & {
             siteAdmin?: { seo?: unknown; routeRules?: unknown }
@@ -648,6 +659,7 @@ export default defineNuxtModule<ModuleConfig>({
                     managementBase: options.server.managementBase,
                     i18n: options.i18n,
                     auth: options.auth,
+                    aiActions: namedAiActions,
                     ...(options.client.origin ? { origin: options.client.origin } : {}),
                 }),
             write: true,
@@ -667,6 +679,14 @@ export default defineNuxtModule<ModuleConfig>({
             { from: clientTemplate.dst, name: 'useSiteAdminList' },
             { from: clientTemplate.dst, name: 'useSiteAdminBatch' },
         ])
+        if (namedAiActions) {
+            nuxt.options.optimization.keyedComposables.push({
+                name: 'siteAdminAiFetch',
+                source: clientTemplate.dst,
+                argumentLength: 3,
+            })
+            addImports({ from: clientTemplate.dst, name: 'useAiAction' })
+        }
         if (options.seo) {
             const seoTemplate = addTemplate({
                 filename: 'site-admin/seo.ts',
@@ -741,7 +761,6 @@ export default defineNuxtModule<ModuleConfig>({
       },
     },`
             : ''
-        const aiEnabled = options.ai ?? Boolean(domainConfig.ai)
         nitro.experimental ??= {}
         nitro.experimental.tasks = true
         nitro.tasks ??= {}
@@ -771,6 +790,7 @@ export default defineNuxtModule<ModuleConfig>({
 import { useServerHooks } from 'nuxt/server'
 ${authImport}
 ${filesImport}
+${namedAiActions || legacyAiModel ? `import { ${[namedAiActions ? 'executeSiteAdminAiAction' : '', legacyAiModel ? 'createSiteAdminAI' : ''].filter(Boolean).join(', ')} } from '@liria24/site-admin/ai'` : ''}
 import { resolveSiteAdminDatabase } from '@liria24/site-admin/runtime/database'
 import inputConfig from ${JSON.stringify(normalize(configPath))}
 import { resolveSiteAdminConfig } from '@liria24/site-admin/config-resolution'
@@ -791,21 +811,22 @@ export default defineNitroPlugin((nitroApp) => {
   const databases = new WeakMap()
   /** @type {WeakMap<object, import('nuxt/server').RequestEvent>} */
   const nativeEvents = new WeakMap()
+  const authorize = ${authorize}
   nitroApp.hooks.hook('request', (event) => {
     captureNitroRequest(event, ${JSON.stringify(options.server.managementBase)}, ${JSON.stringify(Boolean(domainConfig.assets))})
   })
   /** @param {import('nuxt/server').RequestEvent} [event] @returns {Promise<import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>} */
-  const resolveDatabases = async (event, platformContext) => {
+  const resolveDatabases = async (event, platformContext, authOnly = false) => {
     if (event) {
       nativeEvents.set(event.context, event)
-      const cached = pending.get(event.context)
+      const cached = authOnly ? databases.get(event.context) : pending.get(event.context)
       if (cached) return cached
     }
     const resolve = async () => {
       /** @type {import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext} */
       const context = { ...(event ? { event, request: event.req } : {}), ...(platformContext ? { platformContext } : {}) }
       await hooks.callHook('site-admin:database', context)
-      context.database = await resolveSiteAdminDatabase(context.database ?? domainConfig.database, {
+      if (!authOnly) context.database = await resolveSiteAdminDatabase(context.database ?? domainConfig.database, {
         ...(event ? { event, request: event.req, platformContext: event.context } : {}),
         ...(platformContext ? { platformContext } : {}),
       })
@@ -813,7 +834,7 @@ export default defineNitroPlugin((nitroApp) => {
       return context
     }
     const result = resolve()
-    if (event) {
+    if (event && !authOnly) {
       pending.set(event.context, result)
       result.catch(() => { pending.delete(event.context); databases.delete(event.context) })
     }
@@ -827,7 +848,8 @@ export default defineNitroPlugin((nitroApp) => {
     if (siteAdmin) return siteAdmin
     siteAdmin = createSiteAdmin({
     aiEnabled: ${JSON.stringify(aiEnabled)},
-    authorize: ${authorize},
+    authorize,
+    ${legacyAiModel ? 'aiExecution: (context) => createSiteAdminAI(domainConfig.ai.model, context).generateText,' : ''}
     config: { ...domainConfig, assets: ${JSON.stringify(domainConfig.assets)} },
     database,
     ${filesOption}
@@ -864,7 +886,14 @@ export default defineNitroPlugin((nitroApp) => {
     publicBase: ${JSON.stringify(options.client.basePath)},
     tasks: ${JSON.stringify(domainConfig.tasks ?? {})},
     getSiteAdmin,
-    initializeRequest: async (event) => { await resolveDatabases(event) },
+    initializeRequest: async (event) => { await resolveDatabases(event, undefined, ${cmsConfigured ? (namedAiActions ? `new URL(event.req.url).pathname.startsWith(${JSON.stringify(options.server.managementBase + '/ai/actions/')})` : 'false') : 'true'}) },
+    ${
+        namedAiActions
+            ? `runAiAction: async (event, name, input) => executeSiteAdminAiAction(domainConfig, name, input, {
+      actor: await authorize?.(event.req, event), request: event.req, platformContext: event.context,
+    }),`
+            : ''
+    }
     authDatabase: (context) => context ? databases.get(context)?.authDatabase : undefined,
   })
 })
@@ -873,11 +902,17 @@ export default defineNitroPlugin((nitroApp) => {
         })
         addServerPlugin(runtimeTemplate.dst)
         const resolver = createResolver(import.meta.url)
-        addServerHandler({
-            handler: resolver.resolve('./runtime/public-handler'),
-            route: `${options.client.basePath}/**`,
-        })
+        if (cmsConfigured)
+            addServerHandler({
+                handler: resolver.resolve('./runtime/public-handler'),
+                route: `${options.client.basePath}/**`,
+            })
         if (options.auth) {
+            if (namedAiActions)
+                addServerHandler({
+                    handler: resolver.resolve('./runtime/ai-action-handler'),
+                    route: `${options.server.managementBase}/ai/actions/**`,
+                })
             addServerHandler({
                 handler: resolver.resolve('./runtime/management-handler'),
                 route: `${options.server.managementBase}/**`,
@@ -893,6 +928,7 @@ export default defineNitroPlugin((nitroApp) => {
             await setupSiteAdminDevtools(nuxt)
         }
         addServerImports({ from: '@liria24/site-admin/nuxt/server', name: 'useSiteAdmin' })
+        if (namedAiActions) addServerImports({ from: '@liria24/site-admin/nuxt/server', name: 'runAiAction' })
         nitro.externals.inline!.push(normalize(runtimeTemplate.dst), normalize(configPath))
     },
 })

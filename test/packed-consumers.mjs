@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { verifyStandalone } from './standalone-consumer.mjs'
 import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
 import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
+import { assertAiOmitted } from './assert-ai-omitted.mjs'
 import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
@@ -386,6 +387,7 @@ void route
     setupNuxt(false)
     await rm(satoriPath)
     exec(['nuxt', 'build', 'server'])
+    await assertAiOmitted(join(temporary, 'server'))
     // CLI 4 relocates build artifacts; prepare restores the public generated type surface.
     exec(['nuxt', 'prepare', 'server'])
     for (const context of ['node', 'app', 'server'])

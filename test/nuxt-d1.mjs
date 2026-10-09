@@ -10,6 +10,7 @@ import { buildNuxt, loadNuxt } from 'nuxt/kit'
 import { generateCombinedSchema } from '../packages/site-admin/dist/generate.js'
 import domain from './fixtures/nuxt-d1/site-admin.config.ts'
 import { assertNoNodeSQLiteDriver, verifyNodeSQLiteDriverCheck } from './fixtures/nuxt-d1/worker-imports.mjs'
+import { assertAiOmitted } from './assert-ai-omitted.mjs'
 
 verifyNodeSQLiteDriverCheck()
 const run = promisify(execFile)
@@ -130,6 +131,7 @@ const sourceFiles = async (directory) => {
     ).join('\n')
 }
 const workerSource = await sourceFiles(join(fixture, '.output/server'))
+await assertAiOmitted(fixture)
 assertNoNodeSQLiteDriver(workerSource)
 if (workerSource.includes('node:sqlite'))
     console.log(

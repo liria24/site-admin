@@ -558,9 +558,7 @@ export class SiteAdmin<Context = unknown> {
             : entry
         let output
         try {
-            const ai = this.config.ai?.model
-                ? (await import('../ai')).createSiteAdminAI(this.config.ai.model, context).generateText
-                : undefined
+            const ai = this.#options.aiExecution?.(context)
             output = await action({
                 entry: structuredClone(snapshot),
                 input: structuredClone(input.draft !== undefined ? (isObject(input.input) ? input.input : {}) : input),

@@ -1,5 +1,6 @@
 import { normalize } from 'pathe'
 import { siteAdminNuxtManagementDataTemplate } from './management-template'
+import { siteAdminNuxtAiTemplate } from './ai-template'
 
 export interface SiteAdminClientTemplateOptions {
     basePath: string
@@ -7,6 +8,7 @@ export interface SiteAdminClientTemplateOptions {
     i18n?: boolean
     origin?: string
     auth?: boolean
+    aiActions?: boolean
 }
 
 /** App-side templates deliberately do not import the server's config module. */
@@ -56,6 +58,7 @@ export const useSiteAdminRoute = () => useState<PublicRouteResult | null>('site-
 
 ${siteAdminNuxtPublicDataTemplate(options)}
 ${siteAdminNuxtManagementDataTemplate(options)}
+${options.aiActions ? siteAdminNuxtAiTemplate(options) : ''}
 `
 
 const publicDataOverloads = (kind: 'Entry' | 'List'): string => {
@@ -315,7 +318,7 @@ export const siteAdminNuxtModelTypes = (
     configPath: string,
     environments: readonly string[] = [],
 ): string => `import '@liria24/site-admin/client'
-import type { InferSiteAdminModels, InferSiteAdminFormModels, InferSiteAdminAIActions, InferSiteAdminPublicModels, ResolvedSiteAdminConfig } from '@liria24/site-admin'
+import type { InferSiteAdminModels, InferSiteAdminFormModels, InferSiteAdminAIActions, InferSiteAdminNamedAiActions, InferSiteAdminPublicModels, ResolvedSiteAdminConfig } from '@liria24/site-admin'
 
 type SiteAdminDomainConfig = ResolvedSiteAdminConfig<typeof import(${JSON.stringify(normalize(configPath))}).default, readonly [${environments.map((environment) => JSON.stringify(environment)).join(', ')}]>
 
@@ -324,6 +327,7 @@ declare module '@liria24/site-admin/client' {
     managementModels: InferSiteAdminModels<SiteAdminDomainConfig>
     formModels: InferSiteAdminFormModels<SiteAdminDomainConfig>
     aiActions: InferSiteAdminAIActions<SiteAdminDomainConfig>
+    namedAiActions: InferSiteAdminNamedAiActions<SiteAdminDomainConfig>
     publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>
   }
 }

@@ -17,7 +17,12 @@ const mergeDomainValues = (override: unknown, base: unknown, path: string[] = []
             (path[0] === 'models' || path[0] === 'routeRules') &&
             path[2] === 'seo' &&
             path[3] === 'image')
-    if (path[0] === 'database' || (path[0] === 'ai' && path[1] === 'model') || seoImage) return override
+    const aiOpaque =
+        path[0] === 'ai' &&
+        ((path.length === 2 && (path[1] === 'model' || path[1] === 'decisionModel')) ||
+            (path[1] === 'actions' && path.length === 4 && (path[3] === 'model' || path[3] === 'output')) ||
+            (path[1] === 'actions' && path.length === 5 && path[3] === 'props'))
+    if (path[0] === 'database' || aiOpaque || seoImage) return override
     if (!isRecord(override) || !isRecord(base)) return override
     const result: Record<string, unknown> = { ...base }
     for (const [key, value] of Object.entries(override))
