@@ -14,6 +14,7 @@ import type {
 import { SiteAdminError } from '../errors'
 import { queryRows, runAtomic } from './drizzle-database'
 import { revisionSource } from './drizzle-tables'
+import { sqliteSearch } from './sqlite-search'
 
 const placeholders = (count: number) => Array.from({ length: count }, () => '?').join(',')
 const decodeObject = (value: string): Record<string, unknown> => {
@@ -153,10 +154,10 @@ export const sqliteStorage = (
             params.push(filter.locale)
         }
         if (filter.q) {
-            clauses.push(
-                "(instr(lower(CASE WHEN r.slug LIKE '?site-admin-draft:%' THEN '' ELSE r.slug END),?)>0 OR instr(lower(r.data),?)>0)",
-            )
-            params.push(filter.q.toLowerCase(), filter.q.toLowerCase())
+            const slug = sqliteSearch("CASE WHEN r.slug LIKE '?site-admin-draft:%' THEN '' ELSE r.slug END", filter.q)
+            const data = sqliteSearch('r.data', filter.q)
+            clauses.push('(' + slug.sql + ' OR ' + data.sql + ')')
+            params.push(...slug.params, ...data.params)
         }
         return { sql: clauses.join(' AND '), params }
     }
@@ -341,14 +342,19 @@ export const sqliteStorage = (
                     ?.value ?? 0,
             ),
         commit: async (input) => {
-            const guard = conditions(input.conditions),
+            const precondition = conditions(input.conditions),
                 statements: AtomicStatement[] = []
             const targetIds = [...(input.updates ?? []).map(({ id }) => id), ...(input.delete ? [input.delete] : [])]
             if (targetIds.length) {
-                guard.clause +=
+                precondition.clause +=
                     ' AND NOT EXISTS (SELECT 1 FROM json_each(?) candidate LEFT JOIN site_admin_entries e ON e.id=candidate.value WHERE e.id IS NULL)'
-                guard.params.push(JSON.stringify(targetIds))
+                precondition.params.push(JSON.stringify(targetIds))
             }
+            // One batch-local witness fixes every condition to the pre-commit state, including
+            // guards whose entries are subsequently updated/deleted. The native transaction
+            // isolates this row; successful batches remove it and failed batches roll it back.
+            const witness = 'content_commit:' + crypto.randomUUID()
+            const guard = { clause: 'EXISTS (SELECT 1 FROM site_admin_meta WHERE key=?)', params: [witness] }
             const gated = (sql: string, params: DatabaseValue[], returning = false): AtomicStatement => ({
                 sql: `${sql} WHERE ${guard.clause}${returning ? ' RETURNING id' : ''}`,
                 params: [...params, ...guard.params],
@@ -356,8 +362,8 @@ export const sqliteStorage = (
             })
             // D1 batches cannot throw on an empty RETURNING result before commit. Gate every dependent write.
             statements.push({
-                sql: `SELECT 1 WHERE ${guard.clause}`,
-                params: guard.params,
+                sql: `INSERT INTO site_admin_meta(key,value) SELECT ?,'1' WHERE ${precondition.clause} RETURNING key`,
+                params: [witness, ...precondition.params],
                 query: true,
                 expectRow: true,
             })
@@ -496,6 +502,7 @@ export const sqliteStorage = (
                     query: true,
                     expectRow: true,
                 })
+            statements.push({ sql: 'DELETE FROM site_admin_meta WHERE key=?', params: [witness] })
             await execute(statements)
         },
         readAsset: async (id) => {

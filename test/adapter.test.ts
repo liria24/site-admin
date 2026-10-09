@@ -11,6 +11,8 @@ import { createSiteAdmin, handleManagementRequest } from '../packages/site-admin
 import { defineSiteAdminConfig, text, file, relation, array } from '../packages/site-admin/src'
 import { migrateTestDatabase, testAdapter } from './migrate'
 import { createMemoryDatabase } from './memory-storage'
+import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
+import { queryRows } from './sqlite-queries'
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -100,6 +102,7 @@ async function setup(kind: 'memory' | 'sqlite' | 'd1') {
     })
     await core.initialize()
     return {
+        database,
         core,
         storage,
         tick: () => {
@@ -250,6 +253,43 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
             expect(await graph(storage)).toEqual(before)
         })
+        it.each([false, true])(
+            'evaluates mixed update/delete candidates against one pre-state (stale: %s)',
+            async (stale) => {
+                const { core, storage, database } = await setup(kind)
+                const a = await core.createEntry('posts', { data: { title: 'Update' } })
+                let b = await core.createEntry('posts', { data: { title: 'Delete' } })
+                b = await core.updateEntry(b.id, { expectedVersion: b.version, data: { title: 'Latest deleted' } })
+                const before = await graph(storage)
+                const pending = storage.commit({
+                    conditions: [
+                        { kind: 'entryVersion', id: a.id, version: stale ? 0 : a.version },
+                        { kind: 'entryVersion', id: b.id, version: b.version },
+                    ],
+                    updates: [{ id: a.id, patch: { sortOrder: 7 } }],
+                    delete: b.id,
+                    publicGeneration: true,
+                })
+                if (stale) {
+                    await expect(pending).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
+                    expect(await graph(storage)).toEqual(before)
+                } else {
+                    await pending
+                    expect(await storage.readEntry(a.id)).toMatchObject({ sortOrder: 7, version: a.version + 1 })
+                    expect(await storage.readEntry(b.id)).toBeUndefined()
+                    expect(await storage.revisions(b.id)).toEqual([])
+                    expect(await storage.publicGeneration()).toBe(before.generation + 1)
+                }
+                if (kind !== 'memory')
+                    expect(
+                        await queryRows(
+                            database as DrizzleSiteAdminDatabase,
+                            "SELECT key FROM site_admin_meta WHERE key LIKE 'content_commit:%'",
+                        ),
+                    ).toEqual([])
+            },
+        )
+
         it('guards every reorder against the same state and handles D1-sized sets', async () => {
             const { core, storage } = await setup(kind)
             const entries = []
@@ -272,6 +312,75 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             expect(sorted.map(({ sortOrder }) => sortOrder)).toEqual(items.map(({ sortOrder }) => sortOrder))
             expect(await core.publicGeneration()).toBe(0)
         })
+        it('matches native Unicode lowercasing before database count and paging', async () => {
+            const { core, storage, tick } = await setup(kind)
+            for (const title of [
+                'École',
+                'ÉCOLE second',
+                'ÅNGSTRÖM',
+                'МОСКВА',
+                'ΣΟΣ',
+                'ΟΣΑ',
+                'Σ',
+                'İstanbul',
+                'KELVIN',
+                'ǅURO',
+                'ẞ',
+                '𐐀𐐁',
+                '*[É]?',
+                'A\u0301Σ',
+                '\u0345Σ',
+                'AΣ\u0345',
+            ]) {
+                tick()
+                await core.createEntry('posts', { locale: 'en', data: { title } })
+            }
+            const entries = await storage.entries({ models: ['posts'], locale: 'en' })
+            for (const q of [
+                'école',
+                'Ångström',
+                'москва',
+                'ΣΟΣ',
+                'οσ',
+                'ος',
+                'σ',
+                'ς',
+                'İ',
+                'i',
+                '\u0307',
+                'kelvin',
+                'ǆuro',
+                'ß',
+                '𐐨',
+                '*[é]?',
+                'ecole',
+                'A\u0301Σ',
+                '\u0345Σ',
+                'AΣ\u0345',
+            ]) {
+                const expected = entries.filter(
+                    (entry) =>
+                        entry.slug.toLocaleLowerCase().includes(q.toLocaleLowerCase()) ||
+                        JSON.stringify(entry.data).toLocaleLowerCase().includes(q.toLocaleLowerCase()),
+                )
+                const first = await storage.pageEntries({ models: ['posts'], locale: 'en', q }, { limit: 1, offset: 0 })
+                const second = await storage.pageEntries(
+                    { models: ['posts'], locale: 'en', q },
+                    { limit: 1, offset: 1 },
+                )
+                expect(first.total, q).toBe(expected.length)
+                expect(
+                    first.items.map(({ id }) => id),
+                    q,
+                ).toEqual(expected.slice(0, 1).map(({ id }) => id))
+                expect(second.total, q).toBe(expected.length)
+                expect(
+                    second.items.map(({ id }) => id),
+                    q,
+                ).toEqual(expected.slice(1, 2).map(({ id }) => id))
+            }
+        })
+
         it('filters authorized models, locale and search before paging and counts empty pages', async () => {
             const { core, storage, tick } = await setup(kind)
             await core.createEntry('secrets', { data: { title: 'Needle private' } })
