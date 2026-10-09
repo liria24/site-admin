@@ -15,7 +15,7 @@ import type {
 import { SiteAdminError } from '../errors'
 import { queryRows, runAtomic } from './drizzle-database'
 import { revisionSource } from './drizzle-tables'
-import { searchKey, searchPrefix, searchScope, searchText } from './sqlite-search'
+import { searchKey, searchPrefix, searchScope, searchText, searchParts, searchPredicate } from './sqlite-search'
 
 const placeholders = (count: number) => Array.from({ length: count }, () => '?').join(',')
 const decodeObject = (value: string): Record<string, unknown> => {
@@ -155,8 +155,11 @@ export const sqliteStorage = (
             params.push(filter.locale)
         }
         if (filter.q) {
-            clauses.push('(instr(search_slug.value,?)>0 OR instr(search_data.value,?)>0)')
-            params.push(filter.q.toLocaleLowerCase(), filter.q.toLocaleLowerCase())
+            const q = filter.q.toLocaleLowerCase()
+            const slug = searchPredicate('search_slug', q),
+                data = searchPredicate('search_data', q)
+            clauses.push(`(${slug.sql} OR ${data.sql})`)
+            params.push(...slug.params, ...data.params)
         }
         return { sql: clauses.join(' AND '), params }
     }
@@ -175,27 +178,73 @@ export const sqliteStorage = (
     const populateSearch = async (filter: StorageEntryFilter, fingerprint: string, budget: { remaining: number }) => {
         const missing = missingSearch(filter, fingerprint)
         // Old schemas need no DDL or history rewrite. Each bounded batch is resumable and idempotent.
-        // At most 24 backfill queries, leaving room for auth and snapshot reads on D1 Free.
-        while (budget.remaining > 0) {
+        // Count every native statement and bound decoded text, including an individually large head.
+        while (budget.remaining >= 3) {
             budget.remaining--
-            const candidates = await rows<{ id: string; data: string; slug: string }>(
-                `SELECT r.id,r.data,r.slug ${missing.from} LIMIT 32`,
+            const candidates = await rows<{ id: string; bytes: number }>(
+                `SELECT r.id,length(CAST(r.data AS BLOB)) AS bytes ${missing.from} LIMIT 32`,
                 missing.params,
             )
             if (!candidates.length) return
-            const params = candidates.flatMap((candidate) => {
+            const ids: string[] = []
+            let bytes = 0
+            for (const candidate of candidates) {
+                if (ids.length && bytes + Number(candidate.bytes) > 1_048_576) break
+                ids.push(candidate.id)
+                bytes += Number(candidate.bytes)
+            }
+            budget.remaining--
+            const values = await rows<{ id: string; data: string; slug: string }>(
+                `SELECT r.id,r.data,r.slug FROM ${source} r WHERE r.id IN (SELECT value FROM json_each(?))`,
+                [JSON.stringify(ids)],
+            )
+            const prepared = values.map((candidate) => {
                 const text = searchText(decodeObject(candidate.data), decodeSlug(candidate.slug))
-                return [candidate.id, text.data, text.slug]
+                return { id: candidate.id, text, parts: searchParts(text) }
             })
-            await execute([
-                {
-                    sql: `WITH candidates(id,data,slug) AS (VALUES ${candidates.map(() => '(?,?,?)').join(',')}) INSERT INTO site_admin_meta(key,value)
+            if (!prepared.length) continue
+            if (prepared.every((candidate) => candidate.parts.length === 2)) {
+                budget.remaining--
+                await execute([
+                    {
+                        sql: `WITH candidates(id,data,slug) AS (VALUES ${prepared.map(() => '(?,?,?)').join(',')}) INSERT INTO site_admin_meta(key,value)
                     SELECT '${searchPrefix}'||hex(c.id)||':'||?||':data',c.data FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1
                     UNION ALL SELECT '${searchPrefix}'||hex(c.id)||':'||?||':slug',c.slug FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1 ON CONFLICT(key) DO NOTHING`,
-                    params: [...params, fingerprint, fingerprint],
-                },
-            ])
+                        params: [
+                            ...prepared.flatMap((candidate) => [
+                                candidate.id,
+                                candidate.text.data,
+                                candidate.text.slug,
+                            ]),
+                            fingerprint,
+                            fingerprint,
+                        ],
+                    },
+                ])
+            } else {
+                const parts: Array<{ id: string; part: string; value: string }> = []
+                for (const candidate of prepared) {
+                    if (Math.ceil((parts.length + candidate.parts.length) / 32) > budget.remaining) break
+                    parts.push(...candidate.parts.map((part) => ({ id: candidate.id, ...part })))
+                }
+                if (!parts.length) {
+                    budget.remaining = 0
+                    return
+                }
+                const statements: AtomicStatement[] = []
+                for (let offset = 0; offset < parts.length; offset += 32) {
+                    const batch = parts.slice(offset, offset + 32)
+                    statements.push({
+                        sql: `WITH candidates(id,part,value) AS (VALUES ${batch.map(() => '(?,?,?)').join(',')}) INSERT INTO site_admin_meta(key,value)
+                            SELECT '${searchPrefix}'||hex(c.id)||':'||?||':'||c.part,c.value FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1 ON CONFLICT(key) DO NOTHING`,
+                        params: [...batch.flatMap((part) => [part.id, part.part, part.value]), fingerprint],
+                    })
+                }
+                budget.remaining -= statements.length
+                await execute(statements)
+            }
         }
+        budget.remaining = 0
     }
     const readContent = async (
         filter: StorageEntryFilter,
@@ -205,7 +254,7 @@ export const sqliteStorage = (
         const where = entryFilter(filter)
         const from = `${contentFrom}${fingerprint ? searchJoins : ''} WHERE ${where.sql}`
         const params = [...(fingerprint ? [fingerprint, fingerprint] : []), ...where.params]
-        const budget = { remaining: 12 }
+        const budget = { remaining: 24 }
         for (let attempt = 0; attempt < 3; attempt++) {
             if (fingerprint) await populateSearch(filter, fingerprint, budget)
             const missing = fingerprint ? missingSearch(filter, fingerprint) : undefined
@@ -218,11 +267,14 @@ export const sqliteStorage = (
             // A writer using a different projection can install a new head during backfill.
             // Check completeness and count/page in the same native snapshot; never silently omit it.
             if (!missing) return result
-            if (Number((result[0]!.rows[0] as { missing: number }).missing) === 0) return result.slice(1)
+            const remaining = Number((result[0]!.rows[0] as { missing: number }).missing)
+            if (remaining === 0) return result.slice(1)
             if (!budget.remaining)
                 throw new SiteAdminError(
-                    'SITE_ADMIN_STORAGE_UNAVAILABLE',
+                    'SITE_ADMIN_SEARCH_PREPARING',
                     'Search metadata is still being prepared; retry the search.',
+                    undefined,
+                    remaining,
                 )
         }
         throw new SiteAdminError(
@@ -486,14 +538,16 @@ export const sqliteStorage = (
                         .map((name) => [name, value.data[name]]),
                 )
                 const text = searchText(projected, value.slug)
-                statements.push(
-                    gated('INSERT INTO site_admin_meta(key,value) SELECT column1,column2 FROM (VALUES (?,?),(?,?))', [
-                        searchKey(value.id, fingerprint, 'data'),
-                        text.data,
-                        searchKey(value.id, fingerprint, 'slug'),
-                        text.slug,
-                    ]),
-                )
+                const parts = searchParts(text)
+                for (let offset = 0; offset < parts.length; offset += 48) {
+                    const batch = parts.slice(offset, offset + 48)
+                    statements.push(
+                        gated(
+                            `INSERT INTO site_admin_meta(key,value) SELECT column1,column2 FROM (VALUES ${batch.map(() => '(?,?)').join(',')})`,
+                            batch.flatMap((part) => [searchKey(value.id, fingerprint, part.part), part.value]),
+                        ),
+                    )
+                }
                 for (const ref of value.relations)
                     statements.push(
                         gated(

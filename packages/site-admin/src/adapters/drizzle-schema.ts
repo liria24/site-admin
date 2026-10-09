@@ -20,6 +20,28 @@ import {
 const nullDefault = (value: string | null): boolean =>
     value === null || value.replace(/[\s()]/gu, '').toLowerCase() === 'null'
 
+type NativeSchemaRow =
+    | {
+          kind: 'column'
+          tableName: string
+          name: string
+          type: string
+          notnull: number
+          pk: number
+          dflt_value: string | null
+          indexName: null
+      }
+    | {
+          kind: 'index'
+          tableName: string
+          name: string | null
+          type: null
+          notnull: null
+          pk: null
+          dflt_value: null
+          indexName: string
+      }
+
 export function contentTables(database: Database, config: SiteAdminConfig) {
     validateContentNames(config)
     return Object.fromEntries(
@@ -78,6 +100,14 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
         meta,
         ...Object.values(contentTables(database, config)),
     ]
+    // Table-valued PRAGMAs keep all read-only compatibility checks in one native snapshot/call.
+    const nativeRows = await queryRows<NativeSchemaRow>(
+        database,
+        `WITH names AS (SELECT value FROM json_each(?))
+        SELECT 'column' AS kind,t.value AS tableName,p.name,p.type,p."notnull" AS "notnull",p.pk,p.dflt_value,NULL AS indexName FROM names t JOIN pragma_table_info(t.value) p
+        UNION ALL SELECT 'index',t.value,p.name,NULL,NULL,NULL,NULL,i.name FROM names t JOIN pragma_index_list(t.value) i JOIN pragma_index_info(i.name) p WHERE i."unique"=1`,
+        [JSON.stringify(tables.map((table) => getTableConfig(table).name))],
+    )
     for (const table of tables) {
         const expected = getTableConfig(table)
         const model = Object.entries(config.models).find(([name]) => contentTableName(name) === expected.name)?.[1]
@@ -107,13 +137,9 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
                 'SITE_ADMIN_SCHEMA_INCOMPATIBLE',
                 `Missing or incompatible generated schema table "${expected.name}".`,
             )
-        const columns = await queryRows<{
-            name: string
-            type: string
-            notnull: number
-            pk: number
-            dflt_value: string | null
-        }>(database, `PRAGMA table_info(${JSON.stringify(expected.name)})`)
+        const columns = nativeRows
+            .filter((row) => row.kind === 'column')
+            .filter((row) => row.tableName === expected.name)
         if (
             required.some((column) => {
                 const actual = columns.find((item) => item.name === column.name)
@@ -137,16 +163,11 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
             )
         // A retained UNIQUE key must be safe for every active-column insert.
         // Do not infer safety from partial predicates or nonconstant default expressions.
-        const indexes = await queryRows<{ name: string; unique: number; partial: number }>(
-            database,
-            `PRAGMA index_list(${JSON.stringify(expected.name)})`,
-        )
-        for (const index of indexes) {
-            if (!index.unique) continue
-            const indexed = await queryRows<{ name: string | null }>(
-                database,
-                `PRAGMA index_info(${JSON.stringify(index.name)})`,
-            )
+        const indexes = nativeRows
+            .filter((row) => row.kind === 'index')
+            .filter((row) => row.tableName === expected.name)
+        for (const indexName of new Set(indexes.map((row) => row.indexName))) {
+            const indexed = indexes.filter((row) => row.indexName === indexName)
             const retained = indexed.flatMap(({ name }) => {
                 const column = columns.find((item) => item.name === name)
                 return column && !required.some((item) => item.name === name) ? [column] : []

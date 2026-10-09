@@ -8,6 +8,7 @@ import * as schema from './.data/schema/schema'
 import { defineSiteAdminConfig, file, text } from '../../../packages/site-admin/src/index'
 import { queryRow, runAtomic } from '../../sqlite-queries'
 import { createSiteAdmin } from '../../../packages/site-admin/src/server/index'
+import { searchProbe } from './search-probe'
 
 interface Env {
     SITE_ADMIN_DB: AnyD1Database
@@ -24,6 +25,8 @@ export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         try {
             if (new URL(request.url).pathname === '/health') return new Response('OK')
+            if (new URL(request.url).pathname.startsWith('/search-'))
+                return await searchProbe(request, env.SITE_ADMIN_DB, schema)
             const database = drizzleAdapter(drizzle(env.SITE_ADMIN_DB), { schema })
             if (new URL(request.url).pathname === '/missing-binding') {
                 const missing = drizzleAdapter(drizzle(undefined as unknown as AnyD1Database), { schema })

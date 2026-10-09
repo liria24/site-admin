@@ -60,7 +60,7 @@ export default defineSiteAdminConfig({
 
 Create the application helper `server/database.ts` to return your chosen Drizzle SQLite or D1 connection. The resolver runs when a request or task needs the adapter; use its `{ event, request, platformContext }` argument for request-bound connections. Your application controls caching and disposal. See the [application connection example](https://github.com/liria24/site-admin/blob/main/test/fixtures/nuxt/server/database.ts) and [adapter protocol](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/adapter.ts).
 
-Unicode management search keeps derived text in existing metadata, leaving canonical columns and history unchanged. Old projections populate at most 384 heads per request; larger cold searches return 503 and resume on retry. Filtering, counts and pages remain in one native database snapshot.
+Unicode management search keeps bounded derived-text chunks in existing metadata, leaving canonical columns and history unchanged. Cold projections use at most 24 preparation statements per request (up to 256 small heads); the management client resumes search GETs only while reported preparation progresses. Filtering, counts and pages remain in one native database snapshot, including matches across chunk boundaries. Other requests are not retried.
 
 For example, a Node application can own a lazily opened SQLite connection:
 

@@ -14,6 +14,126 @@ import {
 } from '../packages/site-admin/src/nuxt/client-templates'
 
 describe('Site Admin clients', () => {
+    const preparing = (searchRemaining: unknown, status = 503, code = 'SITE_ADMIN_SEARCH_PREPARING') =>
+        Response.json({ error: { code, message: 'Preparing.', searchRemaining } }, { status })
+
+    it('resumes only progressing search GETs with the same query and signal, including paginated reads', async () => {
+        const controller = new AbortController()
+        const calls: string[] = []
+        const entries = [
+            { id: 'one', data: {} },
+            { id: 'two', data: {} },
+        ]
+        const client = createSiteAdminManagementClient({
+            fetch: async (input, init) => {
+                calls.push(String(input))
+                expect(init?.method).toBe('GET')
+                expect(init?.signal).toBe(controller.signal)
+                if (calls.length <= 2) return preparing(3 - calls.length)
+                const offset = Number(new URL(String(input), 'http://localhost').searchParams.get('offset'))
+                return Response.json({ items: entries.slice(offset, offset + 1), total: 2 })
+            },
+        })
+        expect(await client.listAllEntries('posts', { q: 'needle', limit: 1, signal: controller.signal })).toEqual(
+            entries,
+        )
+        expect(calls).toHaveLength(4)
+        expect(calls[0]).toBe(calls[1])
+        expect(calls[1]).toBe(calls[2])
+        expect(calls[3]).toContain('offset=1')
+    })
+
+    it.each([{ counts: [4, 4] }, { counts: [4, 5] }])(
+        'stops a search whose remaining count does not decrease: %j',
+        async ({ counts }) => {
+            let calls = 0
+            const client = createSiteAdminManagementClient({ fetch: async () => preparing(counts[calls++] ?? 1) })
+            await expect(client.listEntries('posts', { q: 'needle' })).rejects.toMatchObject({
+                code: 'SITE_ADMIN_SEARCH_PREPARING',
+            })
+            expect(calls).toBe(2)
+        },
+    )
+
+    it.each([undefined, null, '1', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+        'rejects malformed search progress without retry: %j',
+        async (remaining) => {
+            let calls = 0
+            const client = createSiteAdminManagementClient({
+                fetch: async () => {
+                    calls++
+                    return preparing(remaining)
+                },
+            })
+            await expect(client.listEntries('posts', { q: 'needle' })).rejects.toMatchObject({ status: 503 })
+            expect(calls).toBe(1)
+        },
+    )
+
+    it.each([
+        [500, 'SITE_ADMIN_SEARCH_PREPARING'],
+        [503, 'SITE_ADMIN_STORAGE_UNAVAILABLE'],
+        [401, 'SITE_ADMIN_AUTH_REQUIRED'],
+        [403, 'SITE_ADMIN_FORBIDDEN'],
+    ])('preserves ordinary and authorization errors without retry: %i %s', async (status, code) => {
+        let calls = 0
+        const client = createSiteAdminManagementClient({
+            fetch: async () => {
+                calls++
+                return preparing(1, status, code)
+            },
+        })
+        await expect(client.listEntries('posts', { q: 'needle' })).rejects.toMatchObject({ status, code })
+        expect(calls).toBe(1)
+    })
+
+    it('stops cancellation between preparation GETs and rejects an already cancelled search before transport', async () => {
+        const controller = new AbortController()
+        let calls = 0
+        const client = createSiteAdminManagementClient({
+            fetch: async (_input, init) => {
+                calls++
+                expect(init?.signal).toBe(controller.signal)
+                controller.abort()
+                return preparing(1)
+            },
+        })
+        await expect(client.listEntries('posts', { q: 'needle', signal: controller.signal })).rejects.toMatchObject({
+            name: 'AbortError',
+        })
+        expect(calls).toBe(1)
+        await expect(client.listAllEntries('posts', { q: 'needle', signal: controller.signal })).rejects.toMatchObject({
+            name: 'AbortError',
+        })
+        expect(calls).toBe(1)
+    })
+
+    it('never retries unfiltered reads, other GETs, writes, or AI even when they return search preparation errors', async () => {
+        let calls = 0
+        const client = createSiteAdminManagementClient<Record<string, Record<string, unknown>>>({
+            fetch: async () => {
+                calls++
+                return preparing(1)
+            },
+        })
+        const operations = [
+            () => client.listEntries('posts'),
+            () => client.listAllEntries('posts', { q: '' }),
+            () => client.models(),
+            () => client.getEntry('entry'),
+            () => client.createEntry('posts', { data: {} }),
+            () => client.updateEntry('entry', { data: {}, expectedVersion: 1 }),
+            () => client.deleteEntry('entry', { expectedVersion: 1 }),
+            () => client.runAIAction('entry', 'suggest', {}),
+            () => client.generateMetadata('posts', { data: {}, generate: {} }),
+            () => client.proofreadDraft('posts', { data: {} }),
+        ]
+        for (const [index, operation] of operations.entries()) {
+            await expect(operation()).rejects.toMatchObject({ code: 'SITE_ADMIN_SEARCH_PREPARING', status: 503 })
+            expect(calls).toBe(index + 1)
+        }
+    })
+
     it('preserves public projection, encoding, locale and nullable lookup contracts', async () => {
         const calls: Array<{ input: string; method?: string }> = []
         const client = createSiteAdminClient<Record<string, PublicEntry>>({

@@ -17,6 +17,7 @@ const errorResponse = (error: unknown): Response => {
                 error: {
                     code: error.code,
                     ...(error.issues ? { issues: error.issues } : {}),
+                    ...(error.searchRemaining !== undefined ? { searchRemaining: error.searchRemaining } : {}),
                     message: error.message,
                 },
             },

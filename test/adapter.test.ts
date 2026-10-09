@@ -13,11 +13,16 @@ import { migrateTestDatabase, testAdapter } from './migrate'
 import { createMemoryDatabase } from './memory-storage'
 import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
 import { queryRows, runAtomic } from './sqlite-queries'
+import { createSiteAdminManagementClient } from '../packages/site-admin/src/client'
 
 const cleanup: Array<() => Promise<void>> = []
 type BatchControls = {
     beforeBatch?: (queries: readonly string[]) => Promise<void>
     otherConnection?: () => Promise<SiteAdminDatabase>
+    calls?: number
+    maxCalls?: number
+    maxValueBytes?: number
+    trace?: string[]
 }
 const batchControls = new WeakMap<SiteAdminDatabase, BatchControls>()
 afterEach(async () => {
@@ -59,15 +64,26 @@ async function backend(
     if (kind === 'sqlite') return testAdapter(database, definition)
     const native = (await database.getInstance()) as DatabaseSync
     const controls: BatchControls = {}
+    const queryCall = (sql: string) => {
+        controls.calls = (controls.calls ?? 0) + 1
+        controls.trace?.push(sql)
+        if (controls.maxCalls !== undefined && controls.calls > controls.maxCalls) throw Error('D1 request query limit')
+    }
     class Statement {
         params: SQLInputValue[] = []
         constructor(readonly sql: string) {}
         bind(...params: SQLInputValue[]) {
             if (params.length > 100) throw Error('D1 bound parameter limit')
+            if (
+                controls.maxValueBytes !== undefined &&
+                params.some((value) => typeof value === 'string' && Buffer.byteLength(value) > controls.maxValueBytes!)
+            )
+                throw Error('D1 string/blob limit')
             this.params = params
             return this
         }
         async all() {
+            queryCall(this.sql)
             return { results: native.prepare(this.sql).all(...this.params), success: true }
         }
     }
@@ -77,10 +93,10 @@ async function backend(
             await controls.beforeBatch?.(statements.map(({ sql }) => sql))
             native.exec('BEGIN IMMEDIATE')
             try {
-                const results = statements.map((statement) => ({
-                    results: native.prepare(statement.sql).all(...statement.params),
-                    success: true,
-                }))
+                const results = statements.map((statement) => {
+                    queryCall(statement.sql)
+                    return { results: native.prepare(statement.sql).all(...statement.params), success: true }
+                })
                 native.exec('COMMIT')
                 return results
             } catch (error) {
@@ -528,27 +544,131 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         if (kind !== 'memory')
             it('finishes the exact cold-search budget and resumes larger legacy sets without returning a partial total', async () => {
                 const { core, storage, database } = await setup(kind)
-                for (let index = 0; index < 384; index++)
+                for (let index = 0; index < 256; index++)
                     await core.createEntry('posts', { data: { title: `École ${index}` } })
                 const physical = database as DrizzleSiteAdminDatabase
                 await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
                 expect(
-                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 383 })).total,
-                ).toBe(384)
+                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 255 })).total,
+                ).toBe(256)
                 await core.createEntry('posts', { data: { title: 'École last' } })
                 await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
                 const before = await graph(storage)
                 await expect(
-                    storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 384 }),
-                ).rejects.toMatchObject({ code: 'SITE_ADMIN_STORAGE_UNAVAILABLE', status: 503 })
+                    storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 256 }),
+                ).rejects.toMatchObject({ code: 'SITE_ADMIN_SEARCH_PREPARING', status: 503, searchRemaining: 1 })
                 expect(
                     await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
-                ).toHaveLength(768)
+                ).toHaveLength(512)
                 expect(
-                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 384 })).total,
-                ).toBe(385)
+                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 256 })).total,
+                ).toBe(257)
                 expect(await graph(storage)).toEqual(before)
             })
+
+        if (kind !== 'memory')
+            it('preserves a D1-sized canonical value whose lowercase metadata exceeds the native row limit', async () => {
+                const definition = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+                const database = await backend(kind, definition),
+                    physical = database as DrizzleSiteAdminDatabase
+                const controls = batchControls.get(database)
+                if (controls) controls.maxValueBytes = 2_000_000
+                const core = createSiteAdmin({ config: definition, database }),
+                    storage = database.bind(definition)
+                // The JSON prefix plus case expansion places the literal marker across a chunk boundary.
+                const marker = 'A😀B%_[]C'
+                const title = 'İ'.repeat(65_528) + marker + 'İ'.repeat(634_472)
+                const entry = await core.createEntry('posts', { slug: 'large-value', data: { title } })
+                const before = await graph(storage)
+                expect((await core.getEntry(entry.id)).data.title).toBe(title)
+                for (const q of [marker, 'i\u0307'.repeat(100) + marker + 'i\u0307'.repeat(75_000)])
+                    expect((await storage.pageEntries({ models: ['posts'], q }, { limit: 1, offset: 0 })).total).toBe(1)
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'A😀B%_[]X' }, { limit: 1, offset: 0 })).total,
+                ).toBe(0)
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'i\u0307' }, { limit: 1, offset: 0 })).total,
+                ).toBe(1)
+                expect(
+                    (
+                        await storage.pageEntries(
+                            { models: ['posts'], q: 'i\u0307'.repeat(150_000) },
+                            { limit: 1, offset: 0 },
+                        )
+                    ).total,
+                ).toBe(1)
+                expect(
+                    (
+                        await storage.pageEntries(
+                            { models: ['posts'], q: 'i\u0307'.repeat(75_000) + 'X' + 'i\u0307'.repeat(75_000) },
+                            { limit: 1, offset: 0 },
+                        )
+                    ).total,
+                ).toBe(0)
+                const sizes = await queryRows<{ bytes: number }>(
+                    physical,
+                    "SELECT length(CAST(key AS BLOB))+length(CAST(value AS BLOB)) AS bytes FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'",
+                )
+                expect(sizes.length).toBeGreaterThan(2)
+                expect(sizes.every(({ bytes }) => bytes < 2_000_000)).toBe(true)
+                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'i\u0307' }, { limit: 1, offset: 0 })).total,
+                ).toBe(1)
+                expect((await core.getEntry(entry.id)).data.title).toBe(title)
+                expect(await graph(storage)).toEqual(before)
+            }, 20_000)
+
+        if (kind === 'd1')
+            it('resumes a large cold search through the standard client within each fresh request budget', async () => {
+                const definition = defineSiteAdminConfig({
+                    authorization: { roles: { reader: { models: { posts: ['readDraft'] } } } },
+                    models: { posts: { fields: { title: text() } } },
+                })
+                const database = await backend(kind, definition),
+                    physical = database as DrizzleSiteAdminDatabase
+                const original = createSiteAdmin({ config: definition, database })
+                for (let index = 0; index < 2_049; index++)
+                    await original.createEntry('posts', { slug: `cold-${index}`, data: { title: `École ${index}` } })
+                const before = await graph(database.bind(definition))
+                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                const controls = batchControls.get(database)!,
+                    requests: number[] = [],
+                    remaining: number[] = []
+                const client = createSiteAdminManagementClient({
+                    basePath: '/manage',
+                    fetch: async (input, init) => {
+                        controls.calls = 0
+                        controls.maxCalls = 50
+                        controls.trace = []
+                        for (let index = 0; index < 10; index++) await physical.query('SELECT 1')
+                        const fresh = createSiteAdmin({
+                            config: definition,
+                            database,
+                            authorize: () => ({ id: 'reader', roles: ['reader'] }),
+                        })
+                        const response = await handleManagementRequest(
+                            fresh,
+                            new Request(new URL(String(input), 'https://example.test'), init),
+                            '/manage',
+                        )
+                        requests.push(controls.calls!)
+                        expect(controls.trace.every((sql) => !/^\s*(?:UPDATE|DELETE)/iu.test(sql))).toBe(true)
+                        if (response.status === 503)
+                            remaining.push((await response.clone().json()).error.searchRemaining)
+                        return response
+                    },
+                })
+                const page = await client.listEntries('posts', { q: 'école', limit: 1, offset: 2_048 })
+                expect(page.total).toBe(2_049)
+                expect(page.items).toHaveLength(1)
+                expect(requests.length).toBeGreaterThan(1)
+                expect(requests.every((calls) => calls <= 50)).toBe(true)
+                expect(remaining.every((value, index) => index === 0 || value < remaining[index - 1]!)).toBe(true)
+                delete controls.maxCalls
+                delete controls.trace
+                expect(await graph(database.bind(definition))).toEqual(before)
+            }, 30_000)
 
         if (kind === 'd1')
             it('retries when another schema writer installs an unindexed head before the page snapshot', async () => {
