@@ -1,4 +1,5 @@
 // Adapted from liria24/insight-ts/packages/insight-ts/scripts/measure-bundles.ts (MIT).
+// Copyright (c) 2026 Liria. Permission and warranty terms are in LICENSE.
 /* eslint-disable no-await-in-loop -- entries are measured sequentially to bound peak memory */
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
