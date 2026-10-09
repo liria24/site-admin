@@ -245,9 +245,11 @@ const roles = {
 
 const serverAccessPlugin = (
     config: SiteAdminConfig,
-): string => `import { admin, createAccessControl } from '#better-auth/plugins'
+): string => `import { createAccessControl } from '#better-auth/plugins'
+import type { BetterAuthOptions } from '#better-auth'
+import { extendSiteAdminAuth } from '@liria24/site-admin/nuxt/server'
 ${accessControl(config)}
-export default admin({ ac, adminRoles: ['admin'], defaultRole: 'user', roles })
+export default <const T extends BetterAuthOptions>(options: T) => extendSiteAdminAuth(options, resources, Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, role.statements])))
 `
 
 const clientAccessPlugin = (
@@ -486,7 +488,7 @@ export default defineNuxtModule<ModuleConfig>({
             }
             if (options.server.enabled && options.auth === true) {
                 const serverAuthPlugin = addTemplate({
-                    filename: 'site-admin/better-auth-server-plugin.mjs',
+                    filename: 'site-admin/better-auth-server-plugin.ts',
                     getContents: () => serverAccessPlugin(domainConfig!),
                     write: true,
                 })
@@ -496,7 +498,6 @@ export default defineNuxtModule<ModuleConfig>({
                     write: true,
                 })
                 nuxt.hook('better-auth:plugins:extend', (sources) => {
-                    sources.server = [...(sources.server ?? []), serverAuthPlugin.dst]
                     sources.client = [...(sources.client ?? []), clientAuthPlugin.dst]
                 })
                 // Preserve the existing custom-hook bridge only for legacy hook-only apps.
@@ -511,6 +512,21 @@ export default defineNuxtModule<ModuleConfig>({
                     })
                 }
                 await installOnce('@nuxtjs/better-auth', nuxt)
+                // Native setup resolves the app factory and any other additive plugins first.
+                // Wrapping its final factory preserves request context and the app-selected adapter.
+                nuxt.hook('modules:done', () => {
+                    const source = nuxt.options.alias['#auth/server']
+                    if (!source) throw new Error('[site-admin] Native Better Auth server configuration is unavailable.')
+                    const serverConfig = addTemplate({
+                        filename: 'site-admin/better-auth-server-config.ts',
+                        getContents: () => `import createAuth from ${JSON.stringify(source)}
+import extendAuth from ${JSON.stringify(serverAuthPlugin.dst)}
+export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createAuth(context))
+`,
+                        write: true,
+                    })
+                    nuxt.options.alias['#auth/server'] = serverConfig.dst
+                })
             }
             if (options.server.enabled && (domainConfig.assets || domainConfig.storage)) {
                 // Optional dependency defaults cover configured module entries. Dynamic installs

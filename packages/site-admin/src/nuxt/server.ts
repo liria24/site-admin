@@ -5,6 +5,8 @@ import type { SiteAdmin } from '../server/site-admin'
 import type { SiteAdminTaskOptions } from '../runtime/tasks'
 import type { SiteAdminNamedAiActions } from '../client'
 
+export { extendSiteAdminAuth } from '../runtime/auth'
+
 export interface SiteAdminRuntime {
     development?: {
         connector: string

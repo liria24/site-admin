@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import { join as joinPath } from 'pathe'
 import { buildNuxt, loadNuxt } from 'nuxt/kit'
 import { generateCombinedSchema } from '../packages/site-admin/dist/generate.js'
+import { admin } from 'better-auth/plugins'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import domain from './fixtures/nuxt-d1/site-admin.config.ts'
 import { assertNoNodeSQLiteDriver, verifyNodeSQLiteDriverCheck } from './fixtures/nuxt-d1/worker-imports.mjs'
@@ -39,6 +40,7 @@ await mkdir(join(fixture, '.data/schema'), { recursive: true })
 await writeFile(
     schemaPath,
     await generateCombinedSchema(domain, {
+        plugins: [admin({ schema: { user: { fields: { role: 'accessRole' } } } })],
         database: drizzleAdapter({}, { provider: 'sqlite', transaction: false }),
         emailAndPassword: { enabled: true },
     }),

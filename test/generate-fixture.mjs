@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import { generateCombinedSchema } from '../packages/site-admin/dist/generate.js'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 
-export async function generateFixtureSQL(config, directory) {
+export async function generateFixtureSQL(config, directory, plugins = []) {
     await mkdir(directory, { recursive: true })
     const schema = resolve(directory, 'schema.ts').replaceAll('\\', '/')
     const output = resolve(directory, 'migrations').replaceAll('\\', '/')
@@ -13,6 +13,7 @@ export async function generateFixtureSQL(config, directory) {
         await generateCombinedSchema(config, {
             database: drizzleAdapter({}, { provider: 'sqlite', transaction: false }),
             emailAndPassword: { enabled: true },
+            plugins,
         }),
     )
     execFileSync(

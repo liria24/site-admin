@@ -132,7 +132,7 @@ describe('native Better Auth integration', () => {
             delete config.database
         })
         const filenames = kit.templates.map(({ filename }) => filename)
-        expect(filenames).toContain('site-admin/better-auth-server-plugin.mjs')
+        expect(filenames).toContain('site-admin/better-auth-server-plugin.ts')
         expect(filenames).toContain('site-admin/better-auth-client-plugin.mjs')
         expect(
             kit.templates
@@ -170,6 +170,25 @@ describe('native Better Auth integration', () => {
         expect(runtime).toContain('resolveSiteAdminDatabase(context.database ?? domainConfig.database')
         expect(runtime).not.toContain('database-sqlite')
         expect(runtime).not.toContain('database-d1')
+    })
+
+    it('extends the effective native factory after module setup without adding a second server admin', async () => {
+        const hook = await setup(
+            true,
+            undefined,
+            undefined,
+            { tsConfig: {} },
+            { '#auth/server': '/app/extended-auth.ts' },
+        )
+        const sources = { server: ['/app/other-plugin.ts'], client: ['/app/client-plugin.ts'] }
+        hook.mock.calls.find(([name]) => name === 'better-auth:plugins:extend')![1](sources)
+        expect(sources.server).toEqual(['/app/other-plugin.ts'])
+        expect(sources.client).toEqual(['/app/client-plugin.ts', 'site-admin/better-auth-client-plugin.mjs'])
+        await hook.mock.calls.find(([name]) => name === 'modules:done')![1]()
+        const wrapper = kit.templates.find(({ filename }) => filename === 'site-admin/better-auth-server-config.ts')!
+        expect(wrapper.getContents()).toContain('import createAuth from "/app/extended-auth.ts"')
+        expect(wrapper.getContents()).toContain('Parameters<typeof createAuth>[0]')
+        expect(wrapper.getContents()).toContain('extendAuth(createAuth(context))')
     })
 
     it('serializes only approved SEO defaults and rules into public config', async () => {
