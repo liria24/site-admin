@@ -239,7 +239,9 @@ const ac = createAccessControl(resources)
 const roles = {
   admin: ac.newRole(resources),
   user: ac.newRole(Object.fromEntries(Object.keys(resources).map((name) => [name, []]))),
-  ...Object.fromEntries(Object.entries(${JSON.stringify(custom)}).map(([name, permissions]) => [name, ac.newRole(permissions)])),
+  ${Object.entries(custom)
+      .map(([name, permissions]) => `${JSON.stringify(name)}: ac.newRole(${JSON.stringify(permissions)}),`)
+      .join('\n  ')}
 }`
 }
 
@@ -512,9 +514,20 @@ export default defineNuxtModule<ModuleConfig>({
                     })
                 }
                 await installOnce('@nuxtjs/better-auth', nuxt)
+                nuxt.hook('nitro:config', (nativeConfig) => {
+                    const config = nativeConfig as NitroConfig
+                    config.esbuild ??= {}
+                    config.esbuild.options ??= {}
+                    config.esbuild.options.exclude = allowGeneratedFilesConfig(
+                        config.esbuild.options.exclude,
+                        resolve(nuxt.options.buildDir, 'site-admin'),
+                    )
+                })
                 // Native setup resolves the app factory and any other additive plugins first.
                 // Wrapping its final factory preserves request context and the app-selected adapter.
-                nuxt.hook('modules:done', () => {
+                const stopAuthSetupObserver = nuxt.hooks.afterEach(({ name }) => {
+                    if (name !== 'modules:done') return
+                    stopAuthSetupObserver()
                     const source = nuxt.options.alias['#auth/server']
                     if (!source) throw new Error('[site-admin] Native Better Auth server configuration is unavailable.')
                     const serverConfig = addTemplate({
@@ -526,6 +539,27 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
                         write: true,
                     })
                     nuxt.options.alias['#auth/server'] = serverConfig.dst
+                    const rewritten = new WeakSet<object>()
+                    const rewriteTemplates = (templates: typeof nuxt.options.build.templates) => {
+                        for (const template of templates) {
+                            if (
+                                !template.filename?.startsWith('types/nuxt-better-auth-') ||
+                                !template.getContents ||
+                                rewritten.has(template)
+                            )
+                                continue
+                            rewritten.add(template)
+                            const getContents = template.getContents
+                            template.getContents = async (context) =>
+                                (await getContents(context)).replace(
+                                    `import type createServerAuth from '${source}'`,
+                                    `import type createServerAuth from ${JSON.stringify(serverConfig.dst)}`,
+                                )
+                        }
+                    }
+                    // `nuxt prepare` writes types before the app template hook runs.
+                    rewriteTemplates(nuxt.options.build.templates)
+                    nuxt.hook('app:templates', (app) => rewriteTemplates(app.templates))
                 })
             }
             if (options.server.enabled && (domainConfig.assets || domainConfig.storage)) {

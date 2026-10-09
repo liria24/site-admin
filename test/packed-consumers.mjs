@@ -334,11 +334,16 @@ void admin
     )
     await writeFile(
         join(temporary, 'server/app/types.ts'),
-        `const client: import('@liria24/site-admin/client').SiteAdminClient = useSiteAdminClient()
+        `const nativeSession = useUserSession()
+const role: NonNullable<typeof nativeSession.user.value>['role'] = 'admin'
+const impersonatedBy: NonNullable<typeof nativeSession.session.value>['impersonatedBy'] = 'test-admin'
+const client: import('@liria24/site-admin/client').SiteAdminClient = useSiteAdminClient()
 const route = useSiteAdminRoute()
 // @ts-expect-error No such public client method.
 client.missing()
 void route
+void role
+void impersonatedBy
 `,
     )
     const setupNuxt = (dev) =>
@@ -347,7 +352,7 @@ void route
             [
                 '--input-type=module',
                 '-e',
-                `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: './server', dev: ${dev}, ready: true }); await nuxt.close()`,
+                `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: './server', dev: ${dev}, ready: true }); try { if (!nuxt.options.alias['#auth/server']?.endsWith('site-admin/better-auth-server-config.ts')) throw new Error('Native module ordering lost the Site Admin auth wrapper'); } finally { await nuxt.close() }`,
             ],
             temporary,
             {
@@ -377,6 +382,16 @@ void route
     await install()
     setupNuxt(true)
     setupNuxt(false)
+    const nativeConfigPath = join(temporary, 'server/nuxt.config.ts')
+    const nativeConfig = await readFile(nativeConfigPath, 'utf8')
+    for (const modules of [
+        "['@liria24/site-admin/nuxt', '@nuxtjs/better-auth']",
+        "['@nuxtjs/better-auth', '@liria24/site-admin/nuxt']",
+    ]) {
+        await writeFile(nativeConfigPath, nativeConfig.replace("['@liria24/site-admin/nuxt']", modules))
+        setupNuxt(false)
+    }
+    await writeFile(nativeConfigPath, nativeConfig)
     if (consumer.dependencies['nuxt-og-image'])
         throw new Error('Consumer should not need a direct OG module dependency.')
     const takumiPath = join(temporary, 'server/app/components/OgImage/Default.takumi.vue')

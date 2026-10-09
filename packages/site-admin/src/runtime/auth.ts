@@ -6,13 +6,29 @@ import type { AdminOptions } from 'better-auth/plugins/admin'
 type Statements = Record<string, readonly string[]>
 type AuthPlugins<T> = T extends { plugins: infer P extends readonly BetterAuthPlugin[] } ? P : []
 type AdminPlugin = ReturnType<typeof admin<AdminOptions>>
+type WithoutAdmin<P extends readonly BetterAuthPlugin[]> = P extends readonly [
+    infer First extends BetterAuthPlugin,
+    ...infer Rest extends readonly BetterAuthPlugin[],
+]
+    ? First['id'] extends 'admin'
+        ? WithoutAdmin<Rest>
+        : [First, ...WithoutAdmin<Rest>]
+    : number extends P['length']
+      ? Array<Exclude<P[number], { id: 'admin' }>>
+      : []
+type ExtendedPlugins<T> = [...WithoutAdmin<AuthPlugins<T>>, AdminPlugin]
 
 /** Extend the application's native admin instance before Better Auth builds its schema and adapter. */
-export const extendSiteAdminAuth = <const T extends BetterAuthOptions>(
+export function extendSiteAdminAuth<const T extends BetterAuthOptions>(
     options: T,
     resources: Statements,
     permissions: Record<string, Statements>,
-): Omit<T, 'plugins'> & { plugins: Array<AuthPlugins<T>[number] | AdminPlugin> } => {
+): Omit<T, 'plugins'> & { plugins: ExtendedPlugins<T> }
+export function extendSiteAdminAuth(
+    options: BetterAuthOptions,
+    resources: Statements,
+    permissions: Record<string, Statements>,
+): BetterAuthOptions {
     const plugins = options.plugins ?? []
     const admins = plugins.filter((plugin) => plugin.id === 'admin')
     if (admins.length > 1) throw new Error('[site-admin] Configure a single native Better Auth admin plugin.')
@@ -38,5 +54,5 @@ export const extendSiteAdminAuth = <const T extends BetterAuthOptions>(
     return {
         ...options,
         plugins: [...plugins.filter((item) => item.id !== 'admin'), plugin],
-    } as Omit<T, 'plugins'> & { plugins: Array<AuthPlugins<T>[number] | AdminPlugin> }
+    }
 }

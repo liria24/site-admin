@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import { betterAuth } from 'better-auth'
 import { admin, createAccessControl, username } from 'better-auth/plugins'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
@@ -119,6 +119,9 @@ describe('native admin configuration preservation', () => {
             })
             expect(runtime.options.roles!.admin!.statements.user).toBeUndefined()
             const auth = betterAuth(extended)
+            expectTypeOf<typeof auth.$Infer.Session.user>().toHaveProperty('role')
+            expectTypeOf<typeof auth.$Infer.Session.user>().toHaveProperty('username')
+            expectTypeOf<typeof auth.$Infer.Session.session>().toHaveProperty('impersonatedBy')
             expect(auth.api.isUsernameAvailable).toBeTypeOf('function')
             expect(auth.api.userHasPermission).toBeTypeOf('function')
             const context = await auth.$context
