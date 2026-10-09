@@ -291,7 +291,7 @@ describe('native createUseFetch AI actions', () => {
                 calls++
                 if (calls === 1) {
                     transport = init?.signal ?? undefined
-                await new Promise<void>((_resolve, reject) => {
+                    await new Promise<void>((_resolve, reject) => {
                         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
                     })
                 }
@@ -366,7 +366,7 @@ describe('native createUseFetch AI actions', () => {
                 calls++
                 if (calls === 1) {
                     transport = init?.signal ?? undefined
-                await new Promise<void>((_resolve, reject) => {
+                    await new Promise<void>((_resolve, reject) => {
                         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
                     })
                 }
