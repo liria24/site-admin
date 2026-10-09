@@ -31,6 +31,63 @@ const config = defineSiteAdminConfig({
 })
 
 describe('public client Markdown contract', () => {
+    it('keeps every summary after sequential detail routes and full HTTP reads', async () => {
+        const database = createDatabase(nodeSqlite({ name: ':memory:' }))
+        const configured = defineSiteAdminConfig({
+            models: {
+                posts: {
+                    route: '/posts/:slug',
+                    displayFields: { description: 'body' },
+                    fields: { title: text(), body: markdown() },
+                },
+            },
+        })
+        try {
+            const admin = await createMigratedTestAdmin({ config: configured, database })
+            const client = createSiteAdminClient<
+                InferSiteAdminPublicModels<typeof configured>,
+                InferSiteAdminPublicModels<typeof configured, 'summary'>
+            >({
+                origin: 'http://localhost',
+                fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
+            })
+            for (const slug of ['one', 'two']) {
+                const entry = await admin.createEntry('posts', {
+                    slug,
+                    data: {
+                        title: slug,
+                        body: `${slug} introduction\n\n<!-- more -->\n\nFULL_SENTINEL_${slug}`,
+                    },
+                })
+                await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+                expect(await admin.resolvePath(`/posts/${slug}`)).toMatchObject({ entry: { slug } })
+                expect(JSON.stringify(await client.get('posts', slug))).toContain(`FULL_SENTINEL_${slug}`)
+            }
+            const response = await handlePublicRequest(
+                admin,
+                new Request('http://localhost/api/content/posts?markdown=summary'),
+            )
+            const payload = await response.text()
+            expect(response.status).toBe(200)
+            expect(payload).toContain('one introduction')
+            expect(payload).toContain('two introduction')
+            expect(payload).not.toContain('FULL_SENTINEL_')
+            const summary = await client.list('posts', { markdown: 'summary' })
+            expect(summary.map(({ slug }) => slug).sort()).toEqual(['one', 'two'])
+            expect(summary.map(({ seo }) => seo?.description ?? '').sort()).toEqual([
+                'one introduction',
+                'two introduction',
+            ])
+            expect(JSON.stringify(await client.list('posts'))).toContain('FULL_SENTINEL_one')
+            expect(JSON.stringify(await client.list('posts'))).toContain('FULL_SENTINEL_two')
+            expect((await client.list('posts', { markdown: 'summary' })).map(({ slug }) => slug).sort()).toEqual([
+                'one',
+                'two',
+            ])
+        } finally {
+            await database.dispose()
+        }
+    })
     it('returns real Comark documents for this model and string Markdown inside related projections', async () => {
         const database = createDatabase(nodeSqlite({ name: ':memory:' }))
         try {
