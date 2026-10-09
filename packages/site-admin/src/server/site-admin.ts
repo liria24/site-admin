@@ -280,6 +280,8 @@ export class SiteAdmin<Context = unknown> {
         this.#options = options
         this.#resolveRouteRule = createSiteAdminRouteResolver(options.config.routeRules)
         this.#descriptor = createSiteAdminDescriptor(options.config)
+        for (const model of Object.values(this.#descriptor.models))
+            model.ai = options.aiEnabled !== false && Boolean(options.aiRuntime)
     }
 
     get config(): SiteAdminOptions<Context>['config'] {
@@ -293,7 +295,12 @@ export class SiteAdmin<Context = unknown> {
     descriptorFor(actor: import('./types').SiteAdminActor): SiteAdminDescriptor {
         const descriptor = this.descriptor
         descriptor.models = Object.fromEntries(
-            Object.entries(descriptor.models).filter(([modelName]) => this.can(actor, 'model', 'readDraft', modelName)),
+            Object.entries(descriptor.models)
+                .filter(([modelName]) => this.can(actor, 'model', 'readDraft', modelName))
+                .map(([modelName, model]) => [
+                    modelName,
+                    { ...model, ai: model.ai === true && this.can(actor, 'model', 'ai', modelName) },
+                ]),
         )
         if (!this.can(actor, 'asset', 'read')) descriptor.assets = false
         return descriptor

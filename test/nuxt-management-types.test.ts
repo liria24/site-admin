@@ -35,7 +35,7 @@ declare module '#imports' {
   export const useRequestFetch: () => (url: string, options: { [name: string]: unknown; onResponse?: (context: { response: Response }) => void }) => Promise<unknown>
   export const useState: <Value>(key: string, value: () => Value) => import('vue').Ref<Value>
   export const useUserSession: () => { user: import('vue').Ref<{ id: string; role?: string } | null>; session: import('vue').Ref<{ id: string } | null> }
-  export const useNuxtApp: () => { runWithContext: <Value>(callback: () => Value) => Value; hook: (event: string, callback: (keys?: string[]) => Promise<void>) => () => void }
+  export const useNuxtApp: () => { payload: { data: Record<string, unknown> }; runWithContext: <Value>(callback: () => Value) => Value; hook: (event: string, callback: (keys?: string[]) => Promise<void>) => () => void }
   export { clearNuxtData, refreshNuxtData, useNuxtData } from '#app/composables/asyncData'
 }
 `,

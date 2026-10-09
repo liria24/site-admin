@@ -300,6 +300,64 @@ describe('session form controller', () => {
         expect(controller.ai.proposal.value).toBeNull()
     })
 
+    it('preserves optional values removed during a pending save', async () => {
+        const save = Promise.withResolvers<Response>()
+        const started = Promise.withResolvers<void>()
+        const controller = useSiteAdminForm<Data>({
+            descriptor,
+            modelName: 'posts',
+            defaultValues: { title: 'Title', summary: 'Before' },
+            fetch: async () => {
+                started.resolve()
+                return save.promise
+            },
+        })
+        const submitting = controller.form.handleSubmit()
+        await started.promise
+        controller.form.setFieldValue('summary', undefined)
+        save.resolve(Response.json({ ...entry('created'), data: { title: 'Title', summary: 'Before' } }))
+        await submitting
+        expect(controller.form.state.values.summary).toBeUndefined()
+        expect(controller.draft.serialize().data).not.toHaveProperty('summary')
+        expect(controller.dirty.value).toBe(true)
+    })
+
+    it('does not run UI success callbacks for a saved identity left while the request was pending', async () => {
+        const save = Promise.withResolvers<Response>()
+        const started = Promise.withResolvers<void>()
+        const id = ref('one')
+        const onSuccess = vi.fn()
+        const scope = effectScope()
+        const controller = scope.run(() =>
+            useSiteAdminForm<Data>({
+                descriptor,
+                modelName: 'posts',
+                id,
+                initialEntry: entry('one'),
+                onSuccess,
+                fetch: async (input, init) => {
+                    if (init?.method === 'PATCH') {
+                        started.resolve()
+                        return save.promise
+                    }
+                    return Response.json(entry(String(input).split('/').at(-1)!))
+                },
+            }),
+        )!
+        controller.form.setFieldValue('title', 'Saved one')
+        const submitting = controller.form.handleSubmit()
+        await started.promise
+        id.value = 'two'
+        await flush()
+        save.resolve(Response.json(entry('one', 2, 'Saved one')))
+        await submitting
+        expect(controller.entryId.value).toBe('two')
+        expect(controller.form.state.values.title).toBe('two')
+        expect(onSuccess).not.toHaveBeenCalled()
+        expect(controller.serverError.value).toBeNull()
+        scope.stop()
+    })
+
     it.each([401, 403, 404])(
         'preserves management read status %s instead of turning it into a new form',
         async (status) => {
@@ -325,6 +383,212 @@ describe('session form controller', () => {
 })
 
 describe('controller AI proposals', () => {
+    it.each([
+        ['auto', 'auto', true, true],
+        ['manual', 'auto', false, true],
+        ['auto', 'manual', true, false],
+        ['manual', 'manual', false, false],
+    ] as const)(
+        'generates selected %s/%s metadata within an explicit save, preserving manual empty values and other fields',
+        async (slugMode, excerptMode, generateSlug, generateExcerpt) => {
+            const calls: Array<{ path: string; body: Record<string, unknown> }> = []
+            const controller = useSiteAdminForm<Data>({
+                descriptor: { ...descriptor, ai: true },
+                modelName: 'posts',
+                generateMetadataOnSubmit: true,
+                defaultValues: { title: 'Title', copy: 'Original', summary: '' },
+                fetch: async (input, init) => {
+                    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+                    const path = String(input)
+                    calls.push({ path, body })
+                    if (path.includes('/ai/metadata'))
+                        return Response.json({
+                            data: {
+                                ...(body.data as object),
+                                title: 'Do not apply',
+                                copy: 'Do not apply',
+                                summary: 'Generated',
+                            },
+                            slug: 'generated',
+                            issues: [],
+                        })
+                    return Response.json({ ...entry('created'), slug: body.slug, data: body.data })
+                },
+            })
+            controller.metadata.setMode('slug', slugMode)
+            controller.metadata.setMode('excerpt', excerptMode)
+            controller.metadata.slug.value = ''
+            await controller.form.handleSubmit()
+            expect(calls).toHaveLength(generateSlug || generateExcerpt ? 2 : 1)
+            if (generateSlug || generateExcerpt)
+                expect(calls[0]?.body.generate).toEqual({ slug: generateSlug, excerpt: generateExcerpt })
+            expect(calls.at(-1)?.body).toMatchObject({
+                slug: generateSlug ? 'generated' : '',
+                data: { title: 'Title', copy: 'Original', summary: generateExcerpt ? 'Generated' : '' },
+            })
+            expect(controller.dirty.value).toBe(false)
+            expect(controller.ai.busy.value).toBeNull()
+        },
+    )
+
+    it('generates a required excerpt before validating the final save payload', async () => {
+        const calls: string[] = []
+        const controller = useSiteAdminForm<Data>({
+            descriptor: {
+                ...descriptor,
+                ai: true,
+                fields: {
+                    ...descriptor.fields,
+                    summary: { ...descriptor.fields.summary!, required: true, minLength: 2 },
+                },
+            },
+            modelName: 'posts',
+            generateMetadataOnSubmit: true,
+            defaultValues: { title: 'Title' },
+            fetch: async (input, init) => {
+                calls.push(String(input))
+                if (String(input).includes('/ai/'))
+                    return Response.json({
+                        data: { title: 'Title', summary: 'Generated' },
+                        slug: 'generated',
+                        issues: [],
+                    })
+                return Response.json({ ...entry('saved'), data: JSON.parse(String(init?.body)).data })
+            },
+        })
+        await controller.form.handleSubmit()
+        expect(calls).toHaveLength(2)
+        expect(controller.form.state.values.summary).toBe('Generated')
+        expect(controller.serverError.value).toBeNull()
+    })
+
+    it.each(['unavailable', 'empty', 'issues'] as const)(
+        'preserves input and performs no mutation on %s metadata',
+        async (failure) => {
+            const calls: string[] = []
+            const controller = useSiteAdminForm<Data>({
+                descriptor: { ...descriptor, ai: true },
+                modelName: 'posts',
+                generateMetadataOnSubmit: true,
+                defaultValues: { title: 'Title', copy: 'Original' },
+                fetch: async (input) => {
+                    calls.push(String(input))
+                    return failure === 'unavailable'
+                        ? Response.json(
+                              { error: { code: 'SITE_ADMIN_AI_UNAVAILABLE', message: 'Unavailable' } },
+                              { status: 503 },
+                          )
+                        : Response.json({
+                              data: { title: 'Title', summary: failure === 'empty' ? '' : 'Generated' },
+                              slug: failure === 'empty' ? '' : 'generated',
+                              issues: failure === 'issues' ? [{ path: 'summary', message: 'Invalid' }] : [],
+                          })
+                },
+            })
+            await controller.form.handleSubmit()
+            expect(calls).toHaveLength(1)
+            expect(calls[0]).toContain('/ai/metadata')
+            expect(controller.entryId.value).toBeNull()
+            expect(controller.form.state.values.copy).toBe('Original')
+            expect(controller.form.state.values.summary).toBeUndefined()
+            expect(controller.ai.error.value).toBeInstanceOf(SiteAdminClientError)
+        },
+    )
+
+    it.each(['input', 'identity'] as const)(
+        'rejects stale metadata after %s changes while generation is pending',
+        async (change) => {
+            const generated = Promise.withResolvers<Response>()
+            const started = Promise.withResolvers<void>()
+            const id = ref<string | null>(null)
+            const calls: string[] = []
+            const scope = effectScope()
+            const controller = scope.run(() =>
+                useSiteAdminForm<Data>({
+                    descriptor: { ...descriptor, ai: true },
+                    modelName: 'posts',
+                    id,
+                    generateMetadataOnSubmit: true,
+                    defaultValues: { title: 'Title' },
+                    fetch: async (input) => {
+                        calls.push(String(input))
+                        if (String(input).includes('/ai/')) {
+                            started.resolve()
+                            return generated.promise
+                        }
+                        return Response.json(entry('two'))
+                    },
+                }),
+            )!
+            await controller.ready
+            const saving = controller.form.handleSubmit()
+            await started.promise
+            expect(controller.ai.busy.value).toBe('metadata')
+            if (change === 'input') controller.form.setFieldValue('title', 'Edited')
+            else {
+                id.value = 'two'
+                await flush()
+            }
+            generated.resolve(Response.json({ data: { title: 'Title', summary: 'Late' }, slug: 'late', issues: [] }))
+            await saving
+            expect(calls.some((path) => path.endsWith('/entries/posts'))).toBe(false)
+            expect(controller.form.state.values.title).toBe(change === 'input' ? 'Edited' : 'two')
+            expect(controller.form.state.values.summary).toBeUndefined()
+            expect(controller.ai.busy.value).toBeNull()
+            scope.stop()
+        },
+    )
+
+    it('keeps an unapplied proofreading proposal separate from metadata generated on save', async () => {
+        let saved: Record<string, unknown> | undefined
+        const controller = useSiteAdminForm<Data>({
+            descriptor: { ...descriptor, ai: true },
+            modelName: 'posts',
+            generateMetadataOnSubmit: true,
+            defaultValues: { title: 'Title', copy: 'Original' },
+            fetch: async (input, init) => {
+                if (String(input).includes('/ai/proofread'))
+                    return Response.json({ data: { title: 'Title', copy: 'Proofread' }, issues: [] })
+                if (String(input).includes('/ai/metadata'))
+                    return Response.json({
+                        data: { title: 'Title', copy: 'Unrelated change', summary: 'Generated' },
+                        slug: 'generated',
+                        issues: [],
+                    })
+                saved = JSON.parse(String(init?.body)).data
+                return Response.json({ ...entry('created'), data: saved, slug: 'generated' })
+            },
+        })
+        await controller.ai.proofread(['copy'])
+        expect(controller.ai.proposal.value?.data.copy).toBe('Proofread')
+        await controller.form.handleSubmit()
+        expect(saved?.copy).toBe('Original')
+        expect(controller.form.state.values.copy).toBe('Original')
+    })
+
+    it('defaults to manual without an AI runtime and rejects explicitly requested auto mode before saving', async () => {
+        let calls = 0
+        const controller = useSiteAdminForm<Data>({
+            descriptor: { ...descriptor, ai: false },
+            modelName: 'posts',
+            generateMetadataOnSubmit: true,
+            defaultValues: { title: 'Title' },
+            fetch: async () => {
+                calls += 1
+                return Response.json(entry('created'))
+            },
+        })
+        expect(controller.metadata.modes.value).toEqual({ slug: 'manual', excerpt: 'manual' })
+        controller.metadata.setMode('slug', 'auto')
+        await controller.form.handleSubmit()
+        expect(calls).toBe(0)
+        expect(controller.serverError.value?.code).toBe('SITE_ADMIN_AI_UNAVAILABLE')
+        expect(controller.form.state.values.title).toBe('Title')
+        controller.metadata.setMode('slug', 'manual')
+        await controller.form.handleSubmit()
+        expect(calls).toBe(1)
+    })
+
     it('uses descriptor field names, metadata modes, and explicit apply without saving', async () => {
         const calls: Array<{ url: string; body: Record<string, unknown> }> = []
         const controller = useSiteAdminForm<Data>({

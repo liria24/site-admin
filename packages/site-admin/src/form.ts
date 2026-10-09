@@ -37,7 +37,8 @@ export interface UseSiteAdminFormOptions<Data extends Record<string, unknown>> {
     modelName: string
     origin?: string
     onSuccess?: (entry: SiteAdminEntryMutation<Data>) => Promise<void> | void
-    slug?: string
+    /** Optional controlled slug source; omit to edit controller.slug directly. */
+    slug?: MaybeRefOrGetter<string | undefined>
     id?: MaybeRefOrGetter<string | null | undefined>
     authScope?: MaybeRefOrGetter<string>
     key?: string
@@ -47,6 +48,8 @@ export interface UseSiteAdminFormOptions<Data extends Record<string, unknown>> {
     initialEntry?: EntryRecord
     client?: SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     presentation?: boolean
+    /** Nuxt model-driven forms generate selected automatic metadata as part of an explicit save. */
+    generateMetadataOnSubmit?: boolean
     loadDescriptor?: (signal: AbortSignal) => Promise<ModelDescriptor>
     loadEntry?: (id: string, signal: AbortSignal) => Promise<EntryRecord>
 }
@@ -144,11 +147,14 @@ const descriptorIssues = (
 
 const descriptorSchema = <Data extends Record<string, unknown>>(
     model: ModelDescriptor,
+    generatedField?: string,
 ): StandardSchemaV1<Data, Data> => ({
     '~standard': {
         validate: (value) => {
             const data = value as Data
-            const issues = descriptorIssues(model.fields, data)
+            const issues = descriptorIssues(model.fields, data).filter(
+                (issue) => !generatedField || issue.path?.[0] !== generatedField,
+            )
             return issues.length > 0 ? { issues } : { value: data }
         },
         vendor: 'site-admin',
@@ -202,10 +208,15 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
         options.id === undefined || suppliedInitial?.id === toValue(options.id) ? suppliedInitial : undefined
     const entryId = ref(initial?.id ?? toValue(options.id) ?? null)
     const version = ref(initial?.version ?? null)
-    const slug = ref(initial?.slug ?? options.slug ?? '')
+    const hasSlugInput = 'slug' in options
+    const slug = ref(toValue(options.slug) ?? initial?.slug ?? '')
     const defaultMetadata = (): SiteAdminSessionDraft['metadata'] => {
         const excerpt = descriptor.value.fields[descriptor.value.displayFields?.description ?? 'excerpt']
-        return { slug: 'auto', excerpt: excerpt?.kind === 'text' || excerpt?.kind === 'textarea' ? 'auto' : 'manual' }
+        const auto = !options.generateMetadataOnSubmit || descriptor.value.ai === true
+        return {
+            slug: auto ? 'auto' : 'manual',
+            excerpt: auto && (excerpt?.kind === 'text' || excerpt?.kind === 'textarea') ? 'auto' : 'manual',
+        }
     }
     const metadata = ref<SiteAdminSessionDraft['metadata']>(
         initial ? { slug: 'manual', excerpt: 'manual' } : defaultMetadata(),
@@ -259,8 +270,15 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                     '~standard': {
                         vendor: 'site-admin',
                         version: 1 as const,
-                        validate: (value: unknown) =>
-                            descriptorSchema<Data>(descriptor.value)['~standard'].validate(value),
+                        validate: (value: unknown) => {
+                            const excerptName = descriptor.value.displayFields?.description ?? 'excerpt'
+                            return descriptorSchema<Data>(
+                                descriptor.value,
+                                options.generateMetadataOnSubmit && metadata.value.excerpt === 'auto'
+                                    ? excerptName
+                                    : undefined,
+                            )['~standard'].validate(value)
+                        },
                     },
                 },
                 triggers: [],
@@ -275,17 +293,103 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             const submittedIdentity = identity.value
             const submittedVersion = version.value
             const submittedId = entryId.value
-            const submittedSlug = slug.value
+            // Core callers have always been able to supply a getter evaluated at submission.
+            let submittedSlug = hasSlugInput ? toValue(options.slug) : slug.value
+            if (hasSlugInput) slug.value = submittedSlug ?? ''
+            const submittedInputSlug = slug.value
             const submittedLocale = toValue(options.locale)
             const submittedData = clone(serialize(value))
+            const submittedInputData = clone(submittedData)
             const updating = entryId.value !== null
             let entry: SiteAdminEntryMutation<Record<string, unknown>>
             try {
+                const excerptName = descriptor.value.displayFields?.description ?? 'excerpt'
+                const excerptField = descriptor.value.fields[excerptName]
+                const generate = {
+                    slug: metadata.value.slug === 'auto',
+                    excerpt:
+                        metadata.value.excerpt === 'auto' &&
+                        (excerptField?.kind === 'text' || excerptField?.kind === 'textarea'),
+                }
+                if (options.generateMetadataOnSubmit && (generate.slug || generate.excerpt)) {
+                    if (descriptor.value.ai !== true)
+                        throw new SiteAdminClientError(
+                            'SITE_ADMIN_AI_UNAVAILABLE',
+                            'Automatic metadata is unavailable. Enter metadata manually before saving.',
+                            503,
+                        )
+                    aiRequest?.abort()
+                    const request = new AbortController()
+                    aiRequest = request
+                    const generationId = ++generation
+                    const snapshot = inputSnapshot()
+                    aiBusy.value = 'metadata'
+                    aiError.value = null
+                    aiStale.value = false
+                    try {
+                        const generated = await client.generateMetadata(
+                            options.modelName,
+                            {
+                                data: submittedData,
+                                generate,
+                                ...(submittedSlug === undefined ? {} : { slug: submittedSlug }),
+                            },
+                            { signal: request.signal },
+                        )
+                        if (generationId !== generation || identity.value !== submittedIdentity) return
+                        if (request.signal.aborted || snapshot !== inputSnapshot()) {
+                            aiStale.value = true
+                            return createValidationError({
+                                fields: {},
+                                form: 'The draft changed during metadata generation. Save again.',
+                            })
+                        }
+                        if (
+                            generated.issues.length ||
+                            (generate.slug && !generated.slug?.trim()) ||
+                            (generate.excerpt &&
+                                (typeof generated.data[excerptName] !== 'string' ||
+                                    !(generated.data[excerptName] as string).trim()))
+                        ) {
+                            throw new SiteAdminClientError(
+                                'SITE_ADMIN_AI_OUTPUT_INVALID',
+                                'AI returned incomplete metadata. Your input is kept.',
+                                502,
+                                generated.issues,
+                            )
+                        }
+                        if (generate.slug) submittedSlug = generated.slug!
+                        if (generate.excerpt) submittedData[excerptName] = generated.data[excerptName]
+                        const issues = descriptorIssues(descriptor.value.fields, submittedData)
+                        if (issues.length)
+                            throw new SiteAdminClientError(
+                                'SITE_ADMIN_AI_OUTPUT_INVALID',
+                                'AI metadata does not satisfy the model. Your input is kept.',
+                                502,
+                                issues.map((issue) => ({
+                                    message: issue.message,
+                                    path: (issue.path ?? [])
+                                        .map((part) => (typeof part === 'object' ? String(part.key) : String(part)))
+                                        .join('.'),
+                                })),
+                            )
+                    } catch (error) {
+                        if (generationId !== generation || identity.value !== submittedIdentity) return
+                        aiError.value = error
+                        throw error
+                    } finally {
+                        if (generationId === generation) aiBusy.value = null
+                    }
+                }
                 const input = {
                     data: submittedData,
-                    ...(submittedSlug || options.slug !== undefined || metadata.value.slug === 'manual'
-                        ? { slug: submittedSlug }
-                        : {}),
+                    ...(hasSlugInput
+                        ? submittedSlug === undefined
+                            ? {}
+                            : { slug: submittedSlug }
+                        : submittedSlug || metadata.value.slug === 'manual'
+                          ? { slug: submittedSlug ?? '' }
+                          : {}),
                 }
                 entry = updating
                     ? await client.updateEntry(submittedId!, { ...input, expectedVersion: submittedVersion! })
@@ -312,22 +416,25 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             }
             const result: SiteAdminEntryMutation<Data> =
                 'data' in entry ? { ...entry, data: present(entry.data) } : entry
-            if (identity.value === submittedIdentity) {
+            const currentIdentity = identity.value === submittedIdentity
+            if (currentIdentity) {
                 const currentData = clone(serialize(form.state.values))
                 const currentSlug = slug.value
                 const editedDuringSave =
-                    canonical(currentData) !== canonical(submittedData) || currentSlug !== submittedSlug
+                    canonical(currentData) !== canonical(submittedInputData) || currentSlug !== submittedInputSlug
                 switching = true
                 entryId.value = entry.id
                 version.value = entry.version
-                slug.value = 'slug' in entry ? entry.slug : submittedSlug
+                slug.value = 'slug' in entry ? entry.slug : (submittedSlug ?? '')
                 baseline.value = serialize('data' in result ? result.data : value)
                 baseSlug = slug.value
                 form.reset(present(baseline.value))
                 if (editedDuringSave) {
-                    for (const [name, fieldValue] of Object.entries(present(currentData)))
-                        form.setFieldValue(name as never, fieldValue as never)
-                    slug.value = currentSlug
+                    const edited = present(currentData)
+                    for (const name of new Set([...Object.keys(submittedInputData), ...Object.keys(currentData)]))
+                        if (canonical(currentData[name]) !== canonical(submittedInputData[name]))
+                            form.setFieldValue(name as never, edited[name] as never)
+                    if (currentSlug !== submittedInputSlug) slug.value = currentSlug
                 }
                 conflict.value = false
                 discardProposal()
@@ -345,10 +452,12 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                 switching = false
                 remember()
             }
-            try {
-                await options.onSuccess?.(result)
-            } catch (error) {
-                callbackError.value = error
+            if (currentIdentity) {
+                try {
+                    await options.onSuccess?.(result)
+                } catch (error) {
+                    callbackError.value = error
+                }
             }
             return result
         },
@@ -466,8 +575,8 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             restore({
                 data: serialize(data),
                 baseline: serialize(data),
-                baseSlug: options.slug ?? '',
-                slug: options.slug ?? '',
+                baseSlug: toValue(options.slug) ?? '',
+                slug: toValue(options.slug) ?? '',
                 entryId: sourceId(),
                 baseVersion: null,
                 metadata: sourceId() ? { slug: 'manual', excerpt: 'manual' } : defaultMetadata(),
@@ -552,6 +661,14 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
     }
     if (initial) validateEntry(initial)
     if (drafts[identity.value]) restore(drafts[identity.value]!)
+    if (hasSlugInput)
+        watch(
+            () => toValue(options.slug),
+            (value) => {
+                slug.value = value ?? ''
+            },
+            { flush: 'sync' },
+        )
     watch(
         [values, slug, metadata],
         () => {
