@@ -10,11 +10,12 @@ import type {
     StorageAssetCopyGuard,
     StorageAssetSyncLease,
     StorageRoute,
+    StorageEntryFilter,
 } from '../storage'
 import { SiteAdminError } from '../errors'
 import { queryRows, runAtomic } from './drizzle-database'
 import { revisionSource } from './drizzle-tables'
-import { sqliteSearch } from './sqlite-search'
+import { searchKey, searchPrefix, searchScope, searchText } from './sqlite-search'
 
 const placeholders = (count: number) => Array.from({ length: count }, () => '?').join(',')
 const decodeObject = (value: string): Record<string, unknown> => {
@@ -154,12 +155,80 @@ export const sqliteStorage = (
             params.push(filter.locale)
         }
         if (filter.q) {
-            const slug = sqliteSearch("CASE WHEN r.slug LIKE '?site-admin-draft:%' THEN '' ELSE r.slug END", filter.q)
-            const data = sqliteSearch('r.data', filter.q)
-            clauses.push('(' + slug.sql + ' OR ' + data.sql + ')')
-            params.push(...slug.params, ...data.params)
+            clauses.push('(instr(search_slug.value,?)>0 OR instr(search_data.value,?)>0)')
+            params.push(filter.q.toLocaleLowerCase(), filter.q.toLocaleLowerCase())
         }
         return { sql: clauses.join(' AND '), params }
+    }
+    let scopePromise: Promise<string> | undefined
+    const scope = () => (scopePromise ??= searchScope(source))
+    const searchJoins = ` LEFT JOIN site_admin_meta search_data ON search_data.key='${searchPrefix}'||hex(r.id)||':'||?||':data'
+        LEFT JOIN site_admin_meta search_slug ON search_slug.key='${searchPrefix}'||hex(r.id)||':'||?||':slug'`
+    const contentFrom = `FROM site_admin_entries e JOIN ${source} r ON r.id=e.current_revision_id`
+    const missingSearch = (filter: StorageEntryFilter, fingerprint: string) => {
+        const where = entryFilter({ ...filter, q: '' })
+        return {
+            from: `${contentFrom}${searchJoins} WHERE ${where.sql} AND (search_data.key IS NULL OR search_slug.key IS NULL)`,
+            params: [fingerprint, fingerprint, ...where.params],
+        }
+    }
+    const populateSearch = async (filter: StorageEntryFilter, fingerprint: string, budget: { remaining: number }) => {
+        const missing = missingSearch(filter, fingerprint)
+        // Old schemas need no DDL or history rewrite. Each bounded batch is resumable and idempotent.
+        // At most 24 backfill queries, leaving room for auth and snapshot reads on D1 Free.
+        while (budget.remaining > 0) {
+            budget.remaining--
+            const candidates = await rows<{ id: string; data: string; slug: string }>(
+                `SELECT r.id,r.data,r.slug ${missing.from} LIMIT 32`,
+                missing.params,
+            )
+            if (!candidates.length) return
+            const params = candidates.flatMap((candidate) => {
+                const text = searchText(decodeObject(candidate.data), decodeSlug(candidate.slug))
+                return [candidate.id, text.data, text.slug]
+            })
+            await execute([
+                {
+                    sql: `WITH candidates(id,data,slug) AS (VALUES ${candidates.map(() => '(?,?,?)').join(',')}) INSERT INTO site_admin_meta(key,value)
+                    SELECT '${searchPrefix}'||hex(c.id)||':'||?||':data',c.data FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1
+                    UNION ALL SELECT '${searchPrefix}'||hex(c.id)||':'||?||':slug',c.slug FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1 ON CONFLICT(key) DO NOTHING`,
+                    params: [...params, fingerprint, fingerprint],
+                },
+            ])
+        }
+    }
+    const readContent = async (
+        filter: StorageEntryFilter,
+        statements: (from: string, params: DatabaseValue[]) => AtomicStatement[],
+    ) => {
+        const fingerprint = filter.q ? await scope() : undefined
+        const where = entryFilter(filter)
+        const from = `${contentFrom}${fingerprint ? searchJoins : ''} WHERE ${where.sql}`
+        const params = [...(fingerprint ? [fingerprint, fingerprint] : []), ...where.params]
+        const budget = { remaining: 12 }
+        for (let attempt = 0; attempt < 3; attempt++) {
+            if (fingerprint) await populateSearch(filter, fingerprint, budget)
+            const missing = fingerprint ? missingSearch(filter, fingerprint) : undefined
+            const result = await execute([
+                ...(missing
+                    ? [{ sql: `SELECT COUNT(*) AS missing ${missing.from}`, params: missing.params, query: true }]
+                    : []),
+                ...statements(from, params),
+            ])
+            // A writer using a different projection can install a new head during backfill.
+            // Check completeness and count/page in the same native snapshot; never silently omit it.
+            if (!missing) return result
+            if (Number((result[0]!.rows[0] as { missing: number }).missing) === 0) return result.slice(1)
+            if (!budget.remaining)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_STORAGE_UNAVAILABLE',
+                    'Search metadata is still being prepared; retry the search.',
+                )
+        }
+        throw new SiteAdminError(
+            'SITE_ADMIN_STORAGE_UNAVAILABLE',
+            'Entries changed while preparing search metadata; retry the search.',
+        )
     }
     const leaseValue = (lease: StorageAssetSyncLease) => `${lease.expiresAt}|${lease.id}`
     const copyGuard = (guard?: StorageAssetCopyGuard) => {
@@ -182,22 +251,21 @@ export const sqliteStorage = (
             return value && entry(value)
         },
         entries: async (filter) => {
-            const where = entryFilter(filter)
-            return (
-                await rows<StoredEntry>(
-                    `SELECT ${entryColumns} FROM site_admin_entries e JOIN ${source} r ON r.id=e.current_revision_id WHERE ${where.sql} ORDER BY e.sort_order IS NULL,e.sort_order,e.updated_at DESC,e.id`,
-                    where.params,
-                )
-            ).map(entry)
+            const result = await readContent(filter ?? {}, (from, params) => [
+                {
+                    sql: `SELECT ${entryColumns} ${from} ORDER BY e.sort_order IS NULL,e.sort_order,e.updated_at DESC,e.id`,
+                    params,
+                    query: true,
+                },
+            ])
+            return (result[0]!.rows as StoredEntry[]).map(entry)
         },
         pageEntries: async (filter, page) => {
-            const where = entryFilter(filter)
-            const from = `FROM site_admin_entries e JOIN ${source} r ON r.id=e.current_revision_id WHERE ${where.sql}`
-            const results = await execute([
-                { sql: `SELECT COUNT(*) AS total ${from}`, params: where.params, query: true },
+            const results = await readContent(filter, (from, params) => [
+                { sql: `SELECT COUNT(*) AS total ${from}`, params, query: true },
                 {
                     sql: `SELECT ${entryColumns} ${from} ORDER BY e.sort_order IS NULL,e.sort_order,e.updated_at DESC,e.id LIMIT ? OFFSET ?`,
-                    params: [...where.params, page.limit, page.offset],
+                    params: [...params, page.limit, page.offset],
                     query: true,
                 },
             ])
@@ -236,6 +304,10 @@ export const sqliteStorage = (
                     sql: `DELETE FROM ${table} WHERE revision_id IN (SELECT value FROM json_each(?)) AND ${protectedRevision(`${table}.revision_id`)}`,
                     params: [JSON.stringify(candidates), entryId],
                 })),
+                {
+                    sql: `DELETE FROM site_admin_meta WHERE key IN (SELECT m.key FROM site_admin_revisions r JOIN site_admin_meta m ON m.key>='${searchPrefix}'||hex(r.id)||':' AND m.key<'${searchPrefix}'||hex(r.id)||':~' WHERE r.entry_id=? AND r.id IN (SELECT value FROM json_each(?)) AND ${protectedRevision('r.id')})`,
+                    params: [entryId, JSON.stringify(candidates), entryId],
+                },
                 {
                     sql: `DELETE FROM site_admin_revisions AS r WHERE entry_id=? AND id IN (SELECT value FROM json_each(?)) AND ${protectedRevision('r.id')} RETURNING id`,
                     params: [entryId, JSON.stringify(candidates), entryId],
@@ -407,6 +479,21 @@ export const sqliteStorage = (
                     sql: `${data.sql} AND ${guard.clause}`,
                     params: [...(data.params ?? []), ...guard.params],
                 })
+                const fingerprint = await scope()
+                const projected = Object.fromEntries(
+                    Object.keys(config.models[value.model]!.fields)
+                        .filter((name) => value.data[name] !== undefined && value.data[name] !== null)
+                        .map((name) => [name, value.data[name]]),
+                )
+                const text = searchText(projected, value.slug)
+                statements.push(
+                    gated('INSERT INTO site_admin_meta(key,value) SELECT column1,column2 FROM (VALUES (?,?),(?,?))', [
+                        searchKey(value.id, fingerprint, 'data'),
+                        text.data,
+                        searchKey(value.id, fingerprint, 'slug'),
+                        text.slug,
+                    ]),
+                )
                 for (const ref of value.relations)
                     statements.push(
                         gated(
@@ -464,6 +551,10 @@ export const sqliteStorage = (
                 }
             }
             if (input.delete) {
+                statements.push({
+                    sql: `DELETE FROM site_admin_meta WHERE key IN (SELECT m.key FROM site_admin_revisions r JOIN site_admin_meta m ON m.key>='${searchPrefix}'||hex(r.id)||':' AND m.key<'${searchPrefix}'||hex(r.id)||':~' WHERE r.entry_id=? AND ${guard.clause})`,
+                    params: [input.delete, ...guard.params],
+                })
                 statements.push(
                     ...['site_admin_asset_refs', 'site_admin_relations'].map((table) => ({
                         sql: `DELETE FROM ${table} WHERE revision_id IN (SELECT id FROM site_admin_revisions WHERE entry_id=?) AND ${guard.clause}`,

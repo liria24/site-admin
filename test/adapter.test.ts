@@ -12,9 +12,14 @@ import { defineSiteAdminConfig, text, file, relation, array } from '../packages/
 import { migrateTestDatabase, testAdapter } from './migrate'
 import { createMemoryDatabase } from './memory-storage'
 import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
-import { queryRows } from './sqlite-queries'
+import { queryRows, runAtomic } from './sqlite-queries'
 
 const cleanup: Array<() => Promise<void>> = []
+type BatchControls = {
+    beforeBatch?: (queries: readonly string[]) => Promise<void>
+    otherConnection?: () => Promise<SiteAdminDatabase>
+}
+const batchControls = new WeakMap<SiteAdminDatabase, BatchControls>()
 afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((close) => close()))
 })
@@ -53,6 +58,7 @@ async function backend(
     await migrateTestDatabase(database, definition)
     if (kind === 'sqlite') return testAdapter(database, definition)
     const native = (await database.getInstance()) as DatabaseSync
+    const controls: BatchControls = {}
     class Statement {
         params: SQLInputValue[] = []
         constructor(readonly sql: string) {}
@@ -68,6 +74,7 @@ async function backend(
     const binding = {
         prepare: (sql: string) => new Statement(sql),
         async batch(statements: Statement[]) {
+            await controls.beforeBatch?.(statements.map(({ sql }) => sql))
             native.exec('BEGIN IMMEDIATE')
             try {
                 const results = statements.map((statement) => ({
@@ -83,9 +90,21 @@ async function backend(
         },
     }
     Object.assign(globalThis, { __env__: { CONFORMANCE_DB: binding } })
+    controls.otherConnection = async () => {
+        const separate = {
+            prepare: (sql: string) => binding.prepare(sql),
+            batch: (statements: Statement[]) => binding.batch(statements),
+        }
+        Object.assign(globalThis, { __env__: { CONFORMANCE_DB: binding, CONFORMANCE_WRITER_DB: separate } })
+        const other = createDatabase(cloudflareD1({ bindingName: 'CONFORMANCE_WRITER_DB' }))
+        cleanup.push(() => other.dispose())
+        return testAdapter(other, definition)
+    }
     const d1 = createDatabase(cloudflareD1({ bindingName: 'CONFORMANCE_DB' }))
     cleanup.push(() => d1.dispose())
-    return testAdapter(d1, definition)
+    const adapter = await testAdapter(d1, definition)
+    batchControls.set(adapter, controls)
+    return adapter
 }
 async function setup(kind: 'memory' | 'sqlite' | 'd1') {
     const database = await backend(kind),
@@ -380,6 +399,182 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 ).toEqual(expected.slice(1, 2).map(({ id }) => id))
             }
         })
+
+        it('searches a normal 1000-character Greek title through management HTTP without long SQL work', async () => {
+            const { core } = await setup(kind)
+            await core.createEntry('posts', { locale: 'en', data: { title: 'ΣΟΣ '.repeat(250) } })
+            const started = performance.now()
+            const response = await handleManagementRequest(
+                core,
+                new Request(
+                    'https://example.test/manage/entries?locale=en&q=' + encodeURIComponent('σος') + '&limit=1',
+                ),
+                '/manage',
+            )
+            expect(response.status).toBe(200)
+            const result = await response.json()
+            expect(result.total).toBe(1)
+            expect(result.items[0].data.title).toBe('ΣΟΣ '.repeat(250))
+            expect(performance.now() - started).toBeLessThan(2000)
+        })
+
+        if (kind !== 'memory') {
+            it('backfills legacy search values in bounded batches without changing data/history or other authorized scopes', async () => {
+                const { core, storage, database, tick } = await setup(kind)
+                for (let index = 0; index < 65; index++) {
+                    tick()
+                    await core.createEntry('posts', { locale: 'en', data: { title: `École ${index}` } })
+                }
+                await core.createEntry('posts', { locale: 'ja', data: { title: 'École Japanese' } })
+                await core.createEntry('secrets', { data: { title: 'École private' } })
+                const physical = database as DrizzleSiteAdminDatabase
+                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                const before = await graph(storage)
+                const result = await storage.pageEntries(
+                    { models: ['posts'], locale: 'en', q: 'école' },
+                    { limit: 1, offset: 64 },
+                )
+                expect(result.total).toBe(65)
+                expect(result.items[0]!.data.title).toBe('École 0')
+                expect(await graph(storage)).toEqual(before)
+                const indexed = await queryRows(
+                    physical,
+                    "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'",
+                )
+                expect(indexed).toHaveLength(130)
+                expect((await storage.entries({ models: ['posts'], locale: 'en', q: 'ÉCOLE' })).length).toBe(65)
+                expect(
+                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
+                ).toEqual(indexed)
+            })
+
+            it('keeps old/new projections separate and updates, restores, prunes and deletes search values atomically', async () => {
+                const original = defineSiteAdminConfig({
+                    models: { posts: { fields: { title: text(), excerpt: text() } } },
+                })
+                const current = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+                const database = await backend(kind, original)
+                const old = createSiteAdmin({ config: original, database })
+                const first = await old.createEntry('posts', { data: { title: 'École', excerpt: 'RetiredSecret' } })
+                const active = createSiteAdmin({ config: current, database })
+                const storage = database.bind(current)
+                const physical = database as DrizzleSiteAdminDatabase
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'RetiredSecret' }, { limit: 1, offset: 0 }))
+                        .total,
+                ).toBe(0)
+                expect(
+                    (
+                        await database
+                            .bind(original)
+                            .pageEntries({ models: ['posts'], q: 'RetiredSecret' }, { limit: 1, offset: 0 })
+                    ).total,
+                ).toBe(1)
+                const historical = await old.listRevisions(first.id)
+                let entry = await active.updateEntry(first.id, {
+                    expectedVersion: first.version,
+                    data: { title: 'Changed' },
+                })
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 0 })).total,
+                ).toBe(0)
+                entry = await active.restoreRevision(entry.id, first.revisionId, { expectedVersion: entry.version })
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 0 })).total,
+                ).toBe(1)
+                expect((await old.listRevisions(first.id)).find(({ id }) => id === first.revisionId)).toEqual(
+                    historical[0],
+                )
+                const indexed = await queryRows(
+                    physical,
+                    "SELECT key,value FROM site_admin_meta WHERE key LIKE 'content_search:v1:%' ORDER BY key",
+                )
+                await expect(
+                    storage.commit({
+                        conditions: [{ kind: 'entryVersion', id: entry.id, version: entry.version - 1 }],
+                        revisions: [
+                            {
+                                id: 'conflict-revision',
+                                entryId: entry.id,
+                                model: 'posts',
+                                slug: '',
+                                data: { title: 'No partial cache' },
+                                actorId: null,
+                                createdAt: '2026-10-09T10:00:00Z',
+                                assets: [],
+                                relations: [],
+                            },
+                        ],
+                        updates: [{ id: entry.id, patch: { currentRevisionId: 'conflict-revision' } }],
+                    }),
+                ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
+                expect(
+                    await queryRows(
+                        physical,
+                        "SELECT key,value FROM site_admin_meta WHERE key LIKE 'content_search:v1:%' ORDER BY key",
+                    ),
+                ).toEqual(indexed)
+                await active.pruneRevisions(entry.id, 0)
+                expect(
+                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
+                ).toHaveLength(2)
+                await active.deleteEntry(entry.id, { expectedVersion: entry.version })
+                expect(
+                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
+                ).toEqual([])
+            })
+        }
+
+        if (kind !== 'memory')
+            it('finishes the exact cold-search budget and resumes larger legacy sets without returning a partial total', async () => {
+                const { core, storage, database } = await setup(kind)
+                for (let index = 0; index < 384; index++)
+                    await core.createEntry('posts', { data: { title: `École ${index}` } })
+                const physical = database as DrizzleSiteAdminDatabase
+                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 383 })).total,
+                ).toBe(384)
+                await core.createEntry('posts', { data: { title: 'École last' } })
+                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                const before = await graph(storage)
+                await expect(
+                    storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 384 }),
+                ).rejects.toMatchObject({ code: 'SITE_ADMIN_STORAGE_UNAVAILABLE', status: 503 })
+                expect(
+                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
+                ).toHaveLength(768)
+                expect(
+                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 384 })).total,
+                ).toBe(385)
+                expect(await graph(storage)).toEqual(before)
+            })
+
+        if (kind === 'd1')
+            it('retries when another schema writer installs an unindexed head before the page snapshot', async () => {
+                const original = defineSiteAdminConfig({
+                    models: { posts: { fields: { title: text(), excerpt: text() } } },
+                })
+                const current = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+                const database = await backend(kind, original)
+                const old = createSiteAdmin({ config: original, database })
+                await old.createEntry('posts', { data: { title: 'École initial', excerpt: 'old' } })
+                const controls = batchControls.get(database)!
+                const writer = createSiteAdmin({ config: original, database: await controls.otherConnection!() })
+                let injected = false
+                controls.beforeBatch = async (queries) => {
+                    if (injected || !queries.some((sql) => sql.includes('AS missing'))) return
+                    injected = true
+                    await writer.createEntry('posts', { data: { title: 'École concurrent', excerpt: 'old writer' } })
+                }
+                const result = await database
+                    .bind(current)
+                    .pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 1 })
+                expect(injected).toBe(true)
+                expect(result.total).toBe(2)
+                expect(result.items).toHaveLength(1)
+                expect(result.items[0]!.data).toEqual({ title: 'École initial' })
+            })
 
         it('filters authorized models, locale and search before paging and counts empty pages', async () => {
             const { core, storage, tick } = await setup(kind)
