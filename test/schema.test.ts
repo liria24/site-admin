@@ -1,7 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
-import { boolean, defineSiteAdminConfig, number, object, text } from '../packages/site-admin/src'
+import {
+    array,
+    boolean,
+    defineSiteAdminConfig,
+    markdown,
+    number,
+    object,
+    select,
+    text,
+} from '../packages/site-admin/src'
 import { createSiteAdmin } from '../packages/site-admin/src/server'
 import { generateSiteAdminSchema, generateCombinedSchema } from '../packages/site-admin/src/generate'
 import { createJiti } from 'jiti'
@@ -159,6 +168,90 @@ describe('application-owned Drizzle migrations', () => {
             name: string
         }>
         expect(columns.map((column) => column.name)).toContain('field_excerpt')
+    })
+    it('projects retired nested fields on public reads without rewriting history or loosening writes', async () => {
+        const db = database()
+        const original = defineSiteAdminConfig({
+            models: {
+                posts: {
+                    route: '/posts/:slug',
+                    fields: {
+                        title: text({ required: true }),
+                        body: markdown(),
+                        excerpt: text(),
+                        publication: object({ slug: select(['auto', 'manual']), excerpt: select(['auto', 'manual']) }),
+                        sections: array(object({ heading: text(), retired: text() })),
+                    },
+                },
+            },
+        })
+        const current = defineSiteAdminConfig({
+            models: {
+                posts: {
+                    route: '/posts/:slug',
+                    displayFields: { description: 'body' },
+                    fields: {
+                        title: text({ required: true }),
+                        body: markdown(),
+                        publication: object({ slug: select(['auto', 'manual']) }),
+                        sections: array(object({ heading: text() })),
+                    },
+                },
+            },
+        })
+        await migrateTestDatabase(db, original)
+        const oldMapping = await testAdapter(db, original)
+        const legacy = createSiteAdmin({ config: original, database: oldMapping })
+        let entry = await legacy.createEntry('posts', {
+            slug: 'historical',
+            data: {
+                title: 'Stored',
+                body: 'Introduction\n\n<!-- more -->\n\nFull historical body',
+                excerpt: 'Retired description',
+                publication: { slug: 'manual', excerpt: 'auto' },
+                sections: [{ heading: 'Active', retired: 'Historical secret' }],
+            },
+        })
+        entry = await legacy.publishEntry(entry.id, { expectedVersion: entry.version })
+        const history = () =>
+            db.prepare('SELECT * FROM site_admin_content_posts WHERE revision_id=?').get(entry.revisionId)
+        const before = await history()
+        for (const mapping of [oldMapping, await testAdapter(db, current)]) {
+            const admin = createSiteAdmin({ config: current, database: mapping })
+            const publicEntries = await admin.listPublicEntries('posts')
+            expect(publicEntries).toHaveLength(1)
+            expect(publicEntries[0]?.data.publication).toEqual({ slug: 'manual' })
+            expect(publicEntries[0]?.data.sections).toEqual([{ heading: 'Active' }])
+            const files = await (await admin.content('posts')).list()
+            expect(files).toHaveLength(1)
+            expect(files[0]?.data).toMatchObject({ _siteAdmin: { seo: { description: 'Introduction' } } })
+            expect(JSON.stringify(files)).not.toMatch(/Retired description|Historical secret|"excerpt"/u)
+            await expect(
+                admin.createEntry('posts', {
+                    data: {
+                        title: 'New',
+                        publication: { slug: 'manual', excerpt: 'auto' },
+                    },
+                }),
+            ).rejects.toMatchObject({ code: 'SITE_ADMIN_INVALID_INPUT' })
+            const latest = await admin.getEntry(entry.id)
+            await admin.updateEntry(entry.id, {
+                expectedVersion: latest.version,
+                data: {
+                    title: 'Edited',
+                    body: 'New body',
+                    publication: { slug: 'manual' },
+                    sections: [{ heading: 'New' }],
+                },
+            })
+            expect((await admin.getEntry(entry.id)).publishedRevisionId).toBe(entry.publishedRevisionId)
+            expect(await history()).toEqual(before)
+        }
+        await db
+            .prepare('UPDATE site_admin_content_posts SET field_publication=? WHERE revision_id=?')
+            .bind(JSON.stringify({ slug: 42, excerpt: 'auto' }), entry.revisionId)
+            .run()
+        expect(await createSiteAdmin({ config: current, database: oldMapping }).listPublicEntries('posts')).toEqual([])
     })
 
     it('permits retained defaulted columns but rejects required extras that prevent active-column inserts', async () => {
