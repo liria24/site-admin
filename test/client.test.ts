@@ -124,9 +124,7 @@ describe('Site Admin clients', () => {
             () => client.createEntry('posts', { data: {} }),
             () => client.updateEntry('entry', { data: {}, expectedVersion: 1 }),
             () => client.deleteEntry('entry', { expectedVersion: 1 }),
-            () => client.runAIAction('entry', 'suggest', {}),
-            () => client.generateMetadata('posts', { data: {}, generate: {} }),
-            () => client.proofreadDraft('posts', { data: {} }),
+            () => client.runAiAction('metadata', { props: {} }),
         ]
         for (const [index, operation] of operations.entries()) {
             await expect(operation()).rejects.toMatchObject({ code: 'SITE_ADMIN_SEARCH_PREPARING', status: 503 })
