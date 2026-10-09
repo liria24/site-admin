@@ -305,7 +305,9 @@ export const useSiteAdminForm = <
                         ? submittedSlug === undefined
                             ? {}
                             : { slug: submittedSlug }
-                        : { slug: submittedSlug ?? '' }),
+                        : !updating && !descriptor.value.publishing && submittedSlug === ''
+                          ? {}
+                          : { slug: submittedSlug ?? '' }),
                 }
                 if (
                     intent !== 'save' &&
