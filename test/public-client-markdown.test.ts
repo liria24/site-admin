@@ -57,11 +57,14 @@ describe('public client Markdown contract', () => {
             expect(document.frontmatter).toEqual({ label: 'Frontmatter' })
             expect(document.nodes).toContainEqual(['p', {}, ['strong', {}, 'Body']])
             expect(document.meta.summary).toEqual([['p', {}, 'Intro']])
+            const summary: import('comark').Node[] | undefined = fetched!.data.body.meta.summary
+            expect(summary).toEqual([['p', {}, 'Intro']])
             expect(fetched!.data.sections[0]!.body.nodes).toEqual([['h1', { id: 'section' }, 'Section']])
             const relatedMarkdown: string | undefined = fetched!.data.author?.data.bio
             expect(relatedMarkdown).toBe('Author **bio**')
             const standaloneAuthor = await client.get('authors', author.id)
             expect(standaloneAuthor!.data.bio.nodes).toEqual([['p', {}, 'Author ', ['strong', {}, 'bio']]])
+            expect(standaloneAuthor!.data.bio.meta.summary).toEqual([['p', {}, 'Author ', ['strong', {}, 'bio']]])
             // The direct server projection retains its separate string contract.
             expect((await admin.getPublicEntry('posts', post.id))!.data.body).toContain('**Body**')
         } finally {

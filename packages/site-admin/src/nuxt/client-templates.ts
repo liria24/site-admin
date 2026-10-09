@@ -336,12 +336,13 @@ export {}
 
 export interface SiteAdminSeoTemplateOptions {
     ogImage: boolean
+    seo?: boolean
 }
 
 /** Page-owned SEO stays reactive and framework integration never enters Core. */
 export const siteAdminNuxtSeoTemplate = (
     options: SiteAdminSeoTemplateOptions,
-): string => `import { useHead, useSeoMeta, useRoute, useRuntimeConfig, useRequestURL${options.ogImage ? ', useNuxtApp, defineOgImage' : ''} } from '#imports'
+): string => `import { useSeoMeta, useRoute, useRuntimeConfig, useRequestURL${options.seo === false ? '' : ', useHead'}${options.ogImage ? ', useNuxtApp, defineOgImage' : ''} } from '#imports'
 import { computed, toValue${options.ogImage ? ', getCurrentScope, ref, watch' : ''}, type MaybeRefOrGetter } from 'vue'
 import { createSiteAdminRouteResolver, mergeSiteAdminSeo } from '@liria24/site-admin/seo'
 import type { SiteAdminRouteRules } from '@liria24/site-admin/seo'
@@ -404,13 +405,11 @@ export const useSeo = (
   const imageUrl = () => typeof resolved.value.image === 'string' ? resolved.value.image : clearImage() ? null : undefined
   const clearImageDetails = () => typeof resolved.value.image === 'string' || clearImage() ? null : undefined
   useSeoMeta({
-    title: () => resolved.value.title,
+    ${options.seo === false ? '' : 'title: () => resolved.value.title, description: () => resolved.value.description, robots: () => resolved.value.robots,'}
     ogTitle: () => resolved.value.title,
-    description: () => resolved.value.description,
     ogDescription: () => resolved.value.description,
     twitterTitle: () => resolved.value.title,
     twitterDescription: () => resolved.value.description,
-    robots: () => resolved.value.robots,
     twitterCard: () => resolved.value.twitterCard ?? 'summary_large_image',
     ogType: () => resolved.value.type ?? 'website',
     ogImage: imageUrl,
@@ -422,9 +421,13 @@ export const useSeo = (
     ogImageSecureUrl: clearImageDetails,
     twitterImageAlt: clearImageDetails,
   }, priority)
-  useHead(() => ({ titleTemplate: resolved.value.titleTemplate, link: [
+  ${
+      options.seo === false
+          ? ''
+          : `useHead(() => ({ titleTemplate: resolved.value.titleTemplate, link: [
     ...(resolved.value.canonical ? [{ rel: 'canonical' as const, href: new URL(resolved.value.canonical, origin).href }] : []),
     ...(resolved.value.alternates ?? []).map(({ locale, path }) => ({ rel: 'alternate' as const, hreflang: locale, href: new URL(path, origin).href })),
-  ] }), priority)
+  ] }), priority)`
+  }
 }
 `

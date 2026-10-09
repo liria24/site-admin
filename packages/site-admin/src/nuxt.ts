@@ -58,6 +58,7 @@ import {
 } from './nuxt/client-templates'
 import type { SiteAdminActor } from './server/types'
 import { moduleMeta } from './meta'
+import { siteAdminNuxtMetadataTemplate, siteAdminNuxtRouteTemplate } from './nuxt/route-templates'
 
 export interface ModuleOptions {
     ai?: boolean
@@ -267,97 +268,6 @@ export function createDatabase(event) {
 }
 `
 
-const routeMiddleware = (options: ModuleOptions, locales: ReturnType<typeof localeOptions>): string => {
-    const imports = ['defineNuxtRouteMiddleware', 'navigateTo', 'useState']
-    if (options.i18n) imports.push('useNuxtApp')
-    const i18nLocale = options.i18n
-        ? `const i18n = useNuxtApp().$i18n
-  const currentLocale = typeof i18n?.locale === 'string' ? i18n.locale : i18n?.locale?.value
-  const pathLocale = to.path.split('/').filter(Boolean)[0]
-  const localeCodes = ${JSON.stringify(locales.supported)}
-  const locale = ${JSON.stringify(locales.strategy)} === 'no_prefix'
-    ? currentLocale
-    : localeCodes.includes(pathLocale)
-      ? pathLocale
-      : ${JSON.stringify(locales.strategy)} === 'prefix_except_default'
-        ? ${JSON.stringify(locales.defaultLocale)}
-        : currentLocale
-  if (locale && locale !== currentLocale && typeof i18n?.locale === 'object') i18n.locale.value = locale`
-        : 'const locale = undefined'
-    const metadata =
-        options.routing.metadata && (options.seo || options.ogImage || options.schemaOrg)
-            ? `const entry = result.entry
-  const models = await client.models()
-  const displayFields = models.models[entry.model]?.displayFields
-  const title = String(entry.data?.[displayFields?.title || 'title'] ?? entry.data?.name ?? '')
-  const description = String(entry.data?.[displayFields?.description || 'description'] ?? '')
-  const image = entry.data?.[displayFields?.image || 'image']
-  result.meta = { description, imageId: typeof image === 'string' ? image : image?.id, title }`
-            : ''
-    return `import { ${imports.join(', ')} } from '#imports'
-import { useSiteAdminClient } from '#build/site-admin/client'
-
-export default defineNuxtRouteMiddleware(async (to) => {
-  const client = useSiteAdminClient()
-  const state = useState('site-admin-route', () => null)
-  state.value = null
-  ${i18nLocale}
-  const result = await client.resolveRoute(to.path, { locale })
-  if (!result) return
-  if (result.kind === 'redirect') return navigateTo(result.target, { external: result.target.startsWith('http://') || result.target.startsWith('https://'), redirectCode: result.status })
-  ${metadata}
-  state.value = result
-})
-`
-}
-
-const metadataPlugin = (options: ModuleOptions): string => {
-    const imports = ['computed', 'defineNuxtPlugin', 'useRequestURL', 'useState']
-    if (options.seo) imports.push('useHead', 'useSeoMeta')
-    if (options.ogImage) imports.push('useSeoMeta')
-    if (options.schemaOrg) imports.push('useSchemaOrg')
-    return `import { ${[...new Set(imports)].join(', ')} } from '#imports'
-import { useSiteAdminClient } from '#build/site-admin/client'
-
-export default defineNuxtPlugin(() => {
-  const route = useState('site-admin-route', () => null)
-  const meta = computed(() => route.value?.meta)
-  const origin = ${JSON.stringify(options.client.origin ?? '')} || useRequestURL().origin
-  ${
-      options.seo
-          ? `useSeoMeta({
-    title: () => meta.value?.title,
-    description: () => meta.value?.description,
-  })
-  useHead(() => ({
-    htmlAttrs: route.value?.entry?.locale ? { lang: route.value.entry.locale } : {},
-    link: route.value?.kind === 'page' ? [
-      ...(route.value.entry?.path ? [{ rel: 'canonical', href: new URL(route.value.entry.path, origin).href }] : []),
-      ...(route.value.entry?.alternates || []).map((alternate) => ({ rel: 'alternate', hreflang: alternate.locale, href: new URL(alternate.path, origin).href })),
-    ] : [],
-    titleTemplate: (title) => meta.value?.title || title,
-  }))`
-          : ''
-  }
-  ${
-      options.ogImage
-          ? `const client = useSiteAdminClient()
-  useSeoMeta({
-    ogTitle: () => meta.value?.title,
-    ogDescription: () => meta.value?.description,
-    ogImage: () => meta.value?.imageId ? client.assetUrl(meta.value.imageId) : undefined,
-  })`
-          : ''
-  }
-  ${
-      options.schemaOrg
-          ? `useSchemaOrg(computed(() => meta.value ? [{ '@type': 'WebPage', name: meta.value.title, description: meta.value.description }] : []))`
-          : ''
-  }
-})
-`
-}
-
 export default defineNuxtModule<ModuleConfig>({
     meta: moduleMeta,
     defaults,
@@ -520,7 +430,7 @@ export default defineNuxtModule<ModuleConfig>({
         if (options.routing.metadata && (options.seo || options.ogImage || options.schemaOrg)) {
             const plugin = addTemplate({
                 filename: 'site-admin/metadata-plugin.mjs',
-                getContents: () => metadataPlugin(options),
+                getContents: () => siteAdminNuxtMetadataTemplate(options),
                 write: true,
             })
             addPlugin(plugin.dst)
@@ -636,7 +546,7 @@ export default defineNuxtModule<ModuleConfig>({
         if (options.routing.enabled && cmsConfigured) {
             const middleware = addTemplate({
                 filename: 'site-admin/route-middleware.mjs',
-                getContents: () => routeMiddleware(options, publicLocales),
+                getContents: () => siteAdminNuxtRouteTemplate(options, publicLocales),
                 write: true,
             })
             addRouteMiddleware({ global: true, name: 'site-admin-public-route', path: middleware.dst })
@@ -687,10 +597,10 @@ export default defineNuxtModule<ModuleConfig>({
             })
             addImports({ from: clientTemplate.dst, name: 'useAiAction' })
         }
-        if (options.seo) {
+        if (options.seo || options.ogImage) {
             const seoTemplate = addTemplate({
                 filename: 'site-admin/seo.ts',
-                getContents: () => siteAdminNuxtSeoTemplate({ ogImage: options.ogImage }),
+                getContents: () => siteAdminNuxtSeoTemplate({ seo: options.seo, ogImage: options.ogImage }),
                 write: true,
             })
             addImports({ from: seoTemplate.dst, name: 'useSeo' })

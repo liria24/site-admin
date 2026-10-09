@@ -1,5 +1,6 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import type { MarkdownDocument, ParserOptions } from 'comark'
+import type { MarkdownDocument, MergePluginMeta, ParserOptions } from 'comark'
+import type summary from 'comark/plugins/summary'
 import type { FilesEnvironmentConfig, FilesConfigInput, defineFilesConfig } from 'nuxt-files-sdk/config'
 import type { SiteAdminAIAction, SiteAdminAIModel } from './ai'
 import type { SiteAdminDatabaseConfig } from './runtime/database'
@@ -322,6 +323,12 @@ export type InferSiteAdminFormModels<Config extends SiteAdminConfig> = {
     [Name in keyof Config['models']]: FormFields<Config['models'][Name]['fields']>
 }
 
+/** Native summary AST or a bounded paragraph fallback; absent when disabled or without eligible paragraphs. */
+export type SiteAdminMarkdownDocument = MarkdownDocument<
+    Record<string, unknown> & Partial<MergePluginMeta<[ReturnType<typeof summary>]>>,
+    Record<string, unknown>
+>
+
 type PublicField<
     F extends AnyField,
     Models extends Record<string, ModelDefinition>,
@@ -332,7 +339,7 @@ type PublicField<
       ? PublicAsset[]
       : F['kind'] extends 'markdown'
         ? ParseMarkdown extends true
-            ? MarkdownDocument<Record<string, unknown>, Record<string, unknown>>
+            ? SiteAdminMarkdownDocument
             : InferField<F>
         : F extends RelationField<infer Name>
           ? Name extends keyof Models

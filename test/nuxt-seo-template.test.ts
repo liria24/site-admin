@@ -10,6 +10,10 @@ import {
 } from '../packages/site-admin/src/seo'
 import type { PublicEntrySeo } from '../packages/site-admin/src/server/types'
 import { siteAdminNuxtSeoTemplate } from '../packages/site-admin/src/nuxt/client-templates'
+import {
+    siteAdminNuxtMetadataTemplate,
+    siteAdminNuxtRouteTemplate,
+} from '../packages/site-admin/src/nuxt/route-templates'
 
 type Input = PublicEntrySeo | null | undefined
 interface ServerHead {
@@ -31,6 +35,7 @@ const initialize = (
     ogImage: boolean,
     config: { seo?: PublicEntrySeo; routeRules?: SiteAdminRouteRules } = {},
     head?: ServerHead,
+    seo = true,
 ) => {
     const route = reactive({ path: '/page' })
     const useHead = vi.fn((input: unknown, options: { tagPriority?: string }) =>
@@ -58,7 +63,7 @@ const initialize = (
         )
         return ['/generated.png']
     })
-    const source = siteAdminNuxtSeoTemplate({ ogImage }).replace(/^import .*\n/gmu, '')
+    const source = siteAdminNuxtSeoTemplate({ ogImage, seo }).replace(/^import .*\n/gmu, '')
     const compiled = stripTypeScriptTypes(source).replace(/^export /gmu, '')
     const create = new Function(
         'useHead',
@@ -122,6 +127,74 @@ const initialize = (
 }
 
 describe('generated Nuxt useSeo', () => {
+    it('automatic metadata consumes entry.seo through the same reactive defaults/route resolver', async () => {
+        const state = ref<{ kind: string; entry: { locale: string; seo: PublicEntrySeo; data: unknown } } | null>(null)
+        const result = {
+            kind: 'page',
+            entry: {
+                locale: 'ja',
+                seo: { title: 'Entry', description: 'Native summary' },
+                data: { body: { nodes: [] } },
+            },
+        }
+        const client = { resolveRoute: vi.fn(async () => result) }
+        const middleware = new Function(
+            'defineNuxtRouteMiddleware',
+            'useState',
+            'useSiteAdminClient',
+            'navigateTo',
+            siteAdminNuxtRouteTemplate({ i18n: false }, { supported: [], strategy: 'no_prefix' })
+                .replace(/^import .*\n/gmu, '')
+                .replace('export default ', 'return '),
+        )(
+            (value: unknown) => value,
+            () => state,
+            () => client,
+            vi.fn(),
+        ) as (route: { path: string }) => Promise<void>
+        await middleware({ path: '/page' })
+        expect(client.resolveRoute).toHaveBeenCalledOnce()
+        expect(state.value).toEqual(result)
+        const helper = initialize(false, {
+            seo: { titleTemplate: '%s | Global' },
+            routeRules: { '/page': { seo: { robots: 'noindex, follow' } } },
+        })
+        const plugin = new Function(
+            'defineNuxtPlugin',
+            'useState',
+            'useSeo',
+            'useHead',
+            siteAdminNuxtMetadataTemplate({ seo: true, ogImage: false, schemaOrg: false })
+                .replace(/^import .*\n/gmu, '')
+                .replace('export default ', 'return '),
+        )(
+            (value: unknown) => value,
+            () => state,
+            helper.useSeo,
+            helper.useHead,
+        ) as () => void
+        helper.scope.run(plugin)
+        expect(helper.meta()).toMatchObject({
+            title: 'Entry',
+            description: 'Native summary',
+            robots: 'noindex, follow',
+        })
+        expect((helper.useHead.mock.calls[0]![0] as () => unknown)()).toMatchObject({ titleTemplate: '%s | Global' })
+        state.value!.entry.seo = { title: 'Changed', description: 'Changed summary' }
+        expect(helper.meta()).toMatchObject({ title: 'Changed', description: 'Changed summary' })
+        state.value = null
+        expect(helper.meta().description).toBeUndefined()
+    })
+
+    it('keeps SEO head tags disabled when only the OG integration is enabled', () => {
+        const { useSeo, meta, useHead } = initialize(true, {}, undefined, false)
+        useSeo({ title: 'OG only', description: 'OG description', canonical: '/og', robots: 'noindex' })
+        expect(meta()).toMatchObject({ ogTitle: 'OG only', ogDescription: 'OG description' })
+        expect(meta()).not.toHaveProperty('title')
+        expect(meta()).not.toHaveProperty('description')
+        expect(meta()).not.toHaveProperty('robots')
+        expect(useHead).not.toHaveBeenCalled()
+    })
     it('merges global, entry/input, actual-path rules and explicit page overrides in order', () => {
         const { useSeo, route, meta, useHead } = initialize(false, {
             seo: {
