@@ -131,7 +131,19 @@ const management = useSiteAdminManagementClient()
 const entries = await management.listAllEntries('posts')
 ```
 
-Management APIs cover drafts, revisions, publishing, scheduling, ordering, assets and AI proposals. Pass the current `expectedVersion` for edits and publication. Install the optional `@tanstack/vue-form` peer for `await useSiteAdminForm('posts', { entry })` during component setup; see the [headless form API](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/form.ts). Build and style your own admin UI.
+Management APIs cover drafts, revisions, publishing, scheduling, ordering, assets and AI proposals. Pass the current `expectedVersion` for direct client edits and publication. Install the optional `@tanstack/vue-form` peer and await the model form during component setup:
+
+```ts
+const create = await useSiteAdminForm('posts', {})
+const editor = await useSiteAdminForm('posts', { id: () => props.id, onSuccess: () => navigateTo('/admin/posts') })
+const list = await useSiteAdminManagementList('posts')
+// editor.form fields and list.data.value?.items infer the selected model.
+// Assets expose field.value.url / item.data.image.url / uploaded.url.
+```
+
+The form loads its descriptor and entry, retains session drafts, tracks `dirty` and `baseVersion`, and saves with optimistic concurrency. `metadata` manages auto/manual modes; `ai.proposal`, `busy`, `error` and `stale` support explicit `ai.apply()` / `discard()` without saving. A dirty refresh preserves edits and reports version conflicts. Drafts are isolated by connection, actor, model, locale and ID; use `key` to separate simultaneous new entries. Layout, editor rendering, toasts and navigation remain application-owned. The `{ entry }` and Core descriptor overloads remain available; see the [headless form API](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/form.ts).
+
+Successful Nuxt management-client mutations clear and refresh affected model lists, entry data and dependent batches through native Nuxt APIs. Refresh failures do not undo a successful save. Nuxt's public key enumeration covers serialized payload data; `serialize: false` reads need explicit refresh, and an application-owned `getCachedData` or extracted static cache must invalidate its own cache. Native options and manual `refresh` remain available. Display URLs use the authenticated asset route and are stripped from schema-declared asset values on save; they do not grant public access.
 
 ## Optional settings and reference
 

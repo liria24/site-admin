@@ -57,6 +57,34 @@ describe('Site Admin clients', () => {
         expect(signals).toEqual([controller.signal, controller.signal, controller.signal])
     })
 
+    it('notifies successfully scheduled publications while keeping follow-up read errors separate from task success', async () => {
+        const mutations: Array<{ id: string; model?: string }> = []
+        const client = createSiteAdminManagementClient({
+            onMutation: (mutation) => {
+                mutations.push(mutation)
+            },
+            fetch: async (input, init) => {
+                if (init?.method === 'POST')
+                    return Response.json({
+                        published: ['readable', 'denied'],
+                        failed: [{ entryId: 'failed', message: 'Conflict' }],
+                    })
+                if (String(input).endsWith('/denied'))
+                    return Response.json(
+                        { error: { code: 'SITE_ADMIN_FORBIDDEN', message: 'Denied' } },
+                        { status: 403 },
+                    )
+                return Response.json({ id: 'readable', model: 'posts', version: 2 })
+            },
+        })
+        const result = await client.publishDue()
+        expect(result.published).toEqual(['readable', 'denied'])
+        expect(mutations).toEqual(
+            expect.arrayContaining([{ id: 'readable', model: 'posts', version: 2 }, { id: 'denied' }]),
+        )
+        expect(mutations.some(({ id }) => id === 'failed')).toBe(false)
+    })
+
     it('matches management CRUD, publication, sort and revision HTTP routes without assuming mutation data', async () => {
         const calls: Array<{ body?: unknown; headers: Headers; method: string; url: string }> = []
         const client = createSiteAdminManagementClient<Record<string, Record<string, unknown>>>({
@@ -323,7 +351,7 @@ describe('Site Admin clients', () => {
         const form = siteAdminNuxtFormTemplate()
         expect(form).toContain("from '@liria24/site-admin/form'")
         expect(form).toContain('modelName: modelOrOptions')
-        expect(form).toContain('management.models()')
+        expect(form).toContain('useSiteAdminModels(requestOptions, auth)')
         expect(form).not.toContain('const models:')
         expect(form).not.toContain('JSON.stringify')
         expect(form).not.toContain('default:')
@@ -332,5 +360,15 @@ describe('Site Admin clients', () => {
         expect(types).toContain('C:/project/site-admin.config.ts')
         expect(types).toContain('publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>')
         expect(types).toContain('readonly ["production", "preview"]')
+    })
+
+    it.each([
+        ['C:\\project name\\site-admin.config.ts', 'C:/project name/site-admin.config.ts'],
+        ['C:\\site-admin.config.ts', 'C:/site-admin.config.ts'],
+        ['\\\\server\\share\\site-admin.config.ts', '//server/share/site-admin.config.ts'],
+        ['/app/config #1%[preview].ts', '/app/config #1%[preview].ts'],
+    ])('preserves config import paths in generated model types: %s', (path, expected) => {
+        const types = siteAdminNuxtModelTypes(path)
+        expect(types).toContain(`typeof import(${JSON.stringify(expected)}).default`)
     })
 })

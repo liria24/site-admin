@@ -6,6 +6,7 @@ import { createSiteAdminDescriptor, defineSiteAdminConfig, text } from '../packa
 import type { SiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import { useSiteAdminForm, type UseSiteAdminFormOptions } from '../packages/site-admin/src/form'
 import { siteAdminNuxtFormTemplate } from '../packages/site-admin/src/nuxt/client-templates'
+import { createSiteAdminManagementClient, SiteAdminClientError } from '../packages/site-admin/src/client'
 
 type Controller = ReturnType<typeof useSiteAdminForm<Record<string, unknown>>>
 type GeneratedForm = {
@@ -21,21 +22,44 @@ const generatedForm = (
         .replace(/^import .*\n/gmu, '')
         .replace(/import\.meta\.server/gu, 'false')
     const compiled = stripTypeScriptTypes(source).replace(/^export /gmu, '')
-    const initialize = new Function(
-        'createForm',
-        'siteAdminManagementClientOptions',
-        'useSiteAdminManagementClient',
-        'useNuxtApp',
-        'Vue',
-        `${compiled}\nreturn useSiteAdminForm`,
-    ) as (...dependencies: unknown[]) => GeneratedForm
-    return initialize(
+    const asyncData = <Value>(handler: () => Promise<Value>) => {
+        const data = Vue.shallowRef<Value>()
+        const error = Vue.shallowRef<unknown>()
+        return Object.assign(
+            handler().then(
+                (value) => {
+                    data.value = value
+                },
+                (cause: unknown) => {
+                    error.value = cause
+                },
+            ),
+            { data, error },
+        )
+    }
+    const dependencies = {
         createForm,
-        () => ({ basePath: '/manage', origin: 'http://localhost' }),
-        () => ({ models }),
-        () => ({ runWithContext: (callback: () => unknown) => callback() }),
+        siteAdminManagementClientOptions: () => ({ basePath: '/manage', origin: 'http://localhost' }),
+        createNuxtSiteAdminManagementClient: () => ({
+            models,
+            assetUrl: (id: string) => '/manage/assets/' + id + '/content',
+        }),
+        createSiteAdminManagementClient,
+        SiteAdminClientError,
+        useSiteAdminAuthScope: () => Vue.ref('actor'),
+        useSiteAdminModels: () => asyncData(models),
+        siteAdminAsyncData: (
+            _key: unknown,
+            handler: (_app: unknown, context: { signal: AbortSignal }) => Promise<unknown>,
+        ) => asyncData(() => handler({}, { signal: new AbortController().signal })),
+        siteAdminManagementKey: () => 'test-key',
+        useState: (_key: string, initialize: () => unknown) => Vue.ref(initialize()),
+        useNuxtApp: () => ({ runWithContext: (callback: () => unknown) => callback(), hook: () => () => {} }),
         Vue,
-    )
+    }
+    return new Function(...Object.keys(dependencies), `${compiled}\nreturn useSiteAdminForm`)(
+        ...Object.values(dependencies),
+    ) as GeneratedForm
 }
 
 interface Node {

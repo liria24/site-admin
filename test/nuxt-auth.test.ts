@@ -2,9 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('node:module', async (importOriginal) => {
     const original = await importOriginal<typeof import('node:module')>()
+    const { fileURLToPath } = await import('node:url')
     return {
         findPackageJSON: (path: string | URL) =>
-            String(path).startsWith('file:///consumer/') ? '/consumer/package.json' : original.findPackageJSON(path),
+            String(path) === new URL('/consumer/module.mjs', import.meta.url).href
+                ? fileURLToPath(new URL('/consumer/package.json', import.meta.url))
+                : original.findPackageJSON(path),
     }
 })
 
@@ -47,7 +50,10 @@ vi.mock('../packages/site-admin/src/nuxt/files-source', async (importOriginal) =
 })
 
 import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import module from '../packages/site-admin/src/nuxt'
+
+const consumerModulePath = fileURLToPath(new URL('/consumer/module.mjs', import.meta.url))
 
 const setup = async (
     auth: boolean,
@@ -108,11 +114,11 @@ describe('native Better Auth integration', () => {
 
     it('prefers consumer modules, falls back only on resolution failure, and preserves setup errors', async () => {
         kit.has.mockReturnValue(false)
-        kit.resolve.mockResolvedValue('/consumer/module.mjs')
+        kit.resolve.mockResolvedValue(consumerModulePath)
         await setup(false)
-        expect(kit.install.mock.calls[0]?.[0]).toBe('/consumer/module.mjs')
+        expect(kit.install.mock.calls[0]?.[0]).toBe(consumerModulePath)
         expect(kit.install.mock.calls.at(-1)?.[1]).toEqual({
-            config: `${process.cwd()}/test/fixtures/nuxt/files.config.ts`,
+            config: resolve('test/fixtures/nuxt/files.config.ts'),
         })
         kit.resolve.mockResolvedValue(undefined)
         await setup(false)

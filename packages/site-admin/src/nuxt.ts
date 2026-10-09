@@ -2,6 +2,7 @@ import { dirname, relative, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
+import { normalize } from 'pathe'
 
 import {
     addImports,
@@ -552,7 +553,7 @@ export default defineNuxtModule<ModuleConfig>({
             })
             if (nuxt.options.dev) {
                 // ponytail: watch the config entrypoints; imported helpers can use Nuxt's watch option.
-                nuxt.options.watch.push(...configFiles.map((path) => path.replaceAll('\\', '/')))
+                nuxt.options.watch.push(...configFiles.map(normalize))
             }
             const jiti = createJiti(import.meta.url, {
                 alias: { ...nuxt.options.alias, ...filesConfigAliases },
@@ -646,6 +647,7 @@ export default defineNuxtModule<ModuleConfig>({
                     basePath: options.client.basePath,
                     managementBase: options.server.managementBase,
                     i18n: options.i18n,
+                    auth: options.auth,
                     ...(options.client.origin ? { origin: options.client.origin } : {}),
                 }),
             write: true,
@@ -658,6 +660,8 @@ export default defineNuxtModule<ModuleConfig>({
         addImports([
             { from: clientTemplate.dst, name: 'useSiteAdminClient' },
             { from: clientTemplate.dst, name: 'useSiteAdminManagementClient' },
+            { from: clientTemplate.dst, name: 'useSiteAdminManagementEntry' },
+            { from: clientTemplate.dst, name: 'useSiteAdminManagementList' },
             { from: clientTemplate.dst, name: 'useSiteAdminRoute' },
             { from: clientTemplate.dst, name: 'useSiteAdminEntry' },
             { from: clientTemplate.dst, name: 'useSiteAdminList' },
@@ -775,7 +779,7 @@ import { useServerHooks } from 'nuxt/server'
 ${authImport}
 ${filesImport}
 import { resolveSiteAdminDatabase } from '@liria24/site-admin/runtime/database'
-import inputConfig from ${JSON.stringify(configPath.replaceAll('\\', '/'))}
+import inputConfig from ${JSON.stringify(normalize(configPath))}
 import { resolveSiteAdminConfig } from '@liria24/site-admin/config-resolution'
 const domainConfig = resolveSiteAdminConfig(inputConfig, ${JSON.stringify(environments)})
 delete domainConfig.storage
@@ -897,6 +901,6 @@ export default defineNitroPlugin((nitroApp) => {
             await setupSiteAdminDevtools(nuxt)
         }
         addServerImports({ from: '@liria24/site-admin/nuxt/server', name: 'useSiteAdmin' })
-        nitro.externals.inline!.push(runtimeTemplate.dst.replaceAll('\\', '/'), configPath.replaceAll('\\', '/'))
+        nitro.externals.inline!.push(normalize(runtimeTemplate.dst), normalize(configPath))
     },
 })

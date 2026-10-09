@@ -162,6 +162,32 @@ try {
     )
     if (String(parallel) !== '3,0,1,0')
         throw new Error('Native authorization contexts leaked between concurrent requests.')
+    const formHeaders = { cookie, 'x-site-admin-test-role': 'editor' }
+    const formEntries = await fetch(`http://127.0.0.1:${port}/api/site-admin/entries?model=posts&locale=en`, {
+        headers: formHeaders,
+    }).then((entriesResponse) => entriesResponse.json())
+    const formId = formEntries.items[0]?.id
+    if (!formId) throw new Error('Form SSR fixture did not find its existing entry.')
+    const formResponse = await fetch(`http://127.0.0.1:${port}/form-probe?id=${encodeURIComponent(formId)}`, {
+        headers: formHeaders,
+    })
+    const formHtml = await formResponse.text()
+    if (
+        !formResponse.ok ||
+        !formHtml.includes('id="form-title">Hello') ||
+        !formHtml.includes(`id="form-id">${formId}`)
+    ) {
+        throw new Error(`High-level ID-only form SSR probe failed: ${formResponse.status} ${formHtml.slice(0, 1000)}`)
+    }
+    const newFormResponse = await fetch(`http://127.0.0.1:${port}/form-probe`, { headers: formHeaders })
+    const newFormHtml = await newFormResponse.text()
+    if (
+        !newFormResponse.ok ||
+        !newFormHtml.includes('id="form-id">new') ||
+        !newFormHtml.includes('id="form-version">new')
+    ) {
+        throw new Error(`New high-level form SSR probe failed: ${newFormResponse.status} ${newFormHtml.slice(0, 1000)}`)
+    }
     const background = await fetch(`http://127.0.0.1:${port}/api/__background`, { method: 'POST' })
     if (!background.ok || !Array.isArray((await background.json()).failed))
         throw new Error('Event-free native background runtime failed.')

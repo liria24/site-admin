@@ -5,6 +5,7 @@ import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { join as joinPath } from 'pathe'
 import { buildNuxt, loadNuxt } from 'nuxt/kit'
 import { generateCombinedSchema } from '../packages/site-admin/dist/generate.js'
 import domain from './fixtures/nuxt-d1/site-admin.config.ts'
@@ -15,8 +16,8 @@ const run = promisify(execFile)
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const fixture = fileURLToPath(new URL('./fixtures/nuxt-d1/', import.meta.url))
 const wrangler = join(workspace, 'node_modules/wrangler/bin/wrangler.js')
-const schemaPath = join(fixture, '.data/schema/schema.ts')
-const migrations = join(fixture, '.data/migrations')
+const schemaPath = joinPath(fixture, '.data/schema/schema.ts')
+const migrations = joinPath(fixture, '.data/migrations')
 const wranglerConfig = join(fixture, '.data/wrangler.json')
 const authSecret = 'site-admin-d1-integration-test-secret-0000000000000000'
 const wranglerEnvironment = {
