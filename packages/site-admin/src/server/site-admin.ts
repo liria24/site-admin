@@ -2233,20 +2233,18 @@ export class SiteAdmin<Context = unknown> {
         const cached = this.#content.get(cacheKey)
         if (cached?.generation === generation) return cached.content
         const entries = await this.#listPublicEntries(modelName, normalizedLocale, true)
-        const content = createMarkdownContent(modelName, definition, entries, this.config.markdown, (id) =>
-            this.#assetUrl(id),
+        const content = createMarkdownContent(
+            modelName,
+            definition,
+            entries,
+            this.config.markdown,
+            (id) => this.#assetUrl(id),
+            (id) => {
+                const parsed = this.#parsedContent.get(id)
+                return parsed?.generation === generation ? structuredClone(parsed.file) : undefined
+            },
         )
         this.#prepareContent(content, definition, generation)
-        for (const { file, generation: parsedGeneration } of this.#parsedContent.values()) {
-            const metadata = file.data['_siteAdmin']
-            if (
-                parsedGeneration === generation &&
-                isObject(metadata) &&
-                metadata.model === modelName &&
-                metadata.locale === normalizedLocale
-            )
-                await content.update(structuredClone(file))
-        }
         this.#content.set(cacheKey, { content, generation })
         if (this.#content.size > 64) this.#content.delete(this.#content.keys().next().value!)
         return content

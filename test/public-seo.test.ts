@@ -24,6 +24,43 @@ const database = () => {
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 describe('public entry SEO payload', () => {
+    it('retains the complete model list after sequential detail parsing and publication', async () => {
+        const plugin = vi.fn()
+        const admin = await createMigratedTestAdmin({
+            config: defineSiteAdminConfig({
+                markdown: { plugins: [{ name: 'detail-list-count', post: plugin }] },
+                models: {
+                    posts: {
+                        fields: { title: text(), body: markdown() },
+                        displayFields: { description: 'body' },
+                        route: '/posts/:slug',
+                    },
+                },
+            }),
+            database: database(),
+        })
+        const client = createSiteAdminClient<Record<string, PublicEntry>>({
+            origin: 'https://example.test',
+            fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
+        })
+        for (const slug of ['one', 'two']) {
+            const entry = await admin.createEntry('posts', {
+                slug,
+                data: { title: slug, body: `${slug} intro\n\n<!-- more -->\n\n${slug} full body` },
+            })
+            await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+            expect(await admin.resolvePath(`/posts/${slug}`)).toMatchObject({ entry: { slug } })
+            expect(await client.get('posts', slug)).toMatchObject({ slug })
+        }
+        expect((await client.list('posts')).map(({ slug }) => slug).sort()).toEqual(['one', 'two'])
+        const parsed = plugin.mock.calls.length
+        expect((await (await admin.content('posts')).list()).map(({ data }) => data.title).sort()).toEqual([
+            'one',
+            'two',
+        ])
+        expect(await client.get('posts', 'one')).toMatchObject({ seo: { description: 'one intro' } })
+        expect(plugin).toHaveBeenCalledTimes(parsed)
+    })
     it.each(['route-first', 'content-first'])(
         'shares Markdown summary SEO between route and content (%s)',
         async (order) => {
