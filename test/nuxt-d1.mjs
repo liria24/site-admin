@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import { join as joinPath } from 'pathe'
 import { buildNuxt, loadNuxt } from 'nuxt/kit'
 import { generateCombinedSchema } from '../packages/site-admin/dist/generate.js'
+import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import domain from './fixtures/nuxt-d1/site-admin.config.ts'
 import { assertNoNodeSQLiteDriver, verifyNodeSQLiteDriverCheck } from './fixtures/nuxt-d1/worker-imports.mjs'
 import { assertAiOmitted } from './assert-ai-omitted.mjs'
@@ -35,7 +36,13 @@ await Promise.all(
 )
 await mkdir(join(fixture, '.data/schema'), { recursive: true })
 // Consumer-owned generation does not import its DB helper or open a connection.
-await writeFile(schemaPath, await generateCombinedSchema(domain, { emailAndPassword: { enabled: true } }))
+await writeFile(
+    schemaPath,
+    await generateCombinedSchema(domain, {
+        database: drizzleAdapter({}, { provider: 'sqlite', transaction: false }),
+        emailAndPassword: { enabled: true },
+    }),
+)
 await run(
     process.execPath,
     [

@@ -59,7 +59,9 @@ describe('application-owned database resolution', () => {
                 runtimeConfig: Record<string, unknown>
             }) => BetterAuthOptions
         >(resolve('test/fixtures/nuxt/server/auth.config.ts'), { default: true })
-        expect(createAuth({ db: undefined, runtimeConfig: {} })).not.toHaveProperty('database')
+        const inspected = createAuth({ db: undefined, runtimeConfig: {} })
+        expect(inspected.database).toBeTypeOf('function')
+        expect(await generateCombinedSchema({ models: {} }, inspected)).toContain('export const user = sqliteTable')
         expect(() => createAuth({ db: undefined, runtimeConfig: {}, requestOrigin: 'https://example.test' })).toThrow(
             'Application driver requested',
         )
@@ -126,7 +128,12 @@ describe('application-owned database resolution', () => {
         const appDatabaseFactory = vi.fn(() => {
             throw new Error('Schema generation must not call the app database factory.')
         })
-        await writeFile(schemaPath, await generateCombinedSchema(config, { database: appDatabaseFactory }))
+        await writeFile(
+            schemaPath,
+            await generateCombinedSchema(config, ({ requestOrigin }) => ({
+                database: authAdapter(requestOrigin ? appDatabaseFactory() : {}, { provider: 'sqlite' }),
+            })),
+        )
         expect(appDatabaseFactory).not.toHaveBeenCalled()
         const schema = await createJiti(import.meta.url, { fsCache: false }).import<Record<string, unknown>>(schemaPath)
         const client = new DatabaseSync(':memory:')

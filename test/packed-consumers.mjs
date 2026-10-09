@@ -259,7 +259,11 @@ for (const module of ['assets', 'content', 'document', 'plugins']) {
     await writeFile(
         join(temporary, 'server/auth.config.ts'),
         `import { defineServerAuth } from '@nuxtjs/better-auth/config'
-export default defineServerAuth({ emailAndPassword: { enabled: true } })
+import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
+export default defineServerAuth({
+  database: drizzleAdapter({}, { provider: 'sqlite', usePlural: true, transaction: false }),
+  emailAndPassword: { enabled: true },
+})
 `,
     )
     exec([
@@ -271,7 +275,6 @@ export default defineServerAuth({ emailAndPassword: { enabled: true } })
         'server/schema.ts',
         '--auth',
         'server/auth.config.ts',
-        '--auth-use-plural',
     ])
     await writeFile(
         join(temporary, 'server/drizzle.config.ts'),

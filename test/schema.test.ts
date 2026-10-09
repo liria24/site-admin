@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { drizzleAdapter as authAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
 import {
@@ -27,13 +28,16 @@ const database = () => {
     databases.push(value)
     return value
 }
-const authConfig = () => ({ account: { additionalFields: { issuer: { type: 'string' as const } } } })
+const authConfig = () => ({
+    database: authAdapter({}, { provider: 'sqlite', usePlural: true }),
+    account: { additionalFields: { issuer: { type: 'string' as const } } },
+})
 
 describe('application-owned Drizzle migrations', () => {
     it('generates auth plugins and content in one deterministic, importable schema without a database', async () => {
         const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
-        const source = await generateCombinedSchema(config, authConfig, { usePlural: true })
-        expect(source).toBe(await generateCombinedSchema(config, authConfig, { usePlural: true }))
+        const source = await generateCombinedSchema(config, authConfig)
+        expect(source).toBe(await generateCombinedSchema(config, authConfig))
         const directory = await mkdtemp(resolve('test/.schema-'))
         try {
             const file = resolve(directory, 'schema.ts')
@@ -51,11 +55,38 @@ describe('application-owned Drizzle migrations', () => {
             await rm(directory, { recursive: true, force: true })
         }
         await expect(
-            generateCombinedSchema(config, { user: { modelName: 'entrie' } }, { usePlural: true }),
+            generateCombinedSchema(config, { ...authConfig(), user: { modelName: 'entrie' } }),
         ).rejects.toThrow('Duplicate schema export')
         await expect(
-            generateCombinedSchema(config, { user: { modelName: 'site_admin_entrie' } }, { usePlural: true }),
+            generateCombinedSchema(config, { ...authConfig(), user: { modelName: 'site_admin_entrie' } }),
         ).rejects.toThrow('Duplicate schema table')
+    })
+    it('uses the selected native factory and its options without accessing the application database', async () => {
+        const config = defineSiteAdminConfig({ models: {} })
+        const access = vi.fn(() => {
+            throw Error('Schema generation must not access a database')
+        })
+        const disconnected = new Proxy({}, { get: access })
+        const native = authAdapter(disconnected, { provider: 'sqlite', usePlural: false })
+        const factory = vi.fn((options: import('better-auth').BetterAuthOptions) => native(options))
+        const source = await generateCombinedSchema(config, { database: factory, user: { modelName: 'member' } })
+        expect(factory).toHaveBeenCalledOnce()
+        expect(source).toContain('export const member = sqliteTable("member"')
+        expect(source).not.toContain('export const users =')
+        expect(access).not.toHaveBeenCalled()
+        await expect(generateCombinedSchema(config, {})).rejects.toThrow('application-selected native adapter')
+        await expect(
+            generateCombinedSchema(config, {
+                database: (options: import('better-auth').BetterAuthOptions) => {
+                    const adapter = native(options)
+                    delete adapter.createSchema
+                    return adapter
+                },
+            }),
+        ).rejects.toThrow('does not implement createSchema')
+        await expect(generateCombinedSchema(config, { database: authAdapter({}, { provider: 'pg' }) })).rejects.toThrow(
+            'Drizzle SQLite only',
+        )
     })
     it('accepts numeric cleanup ages and rejects ambiguous or invalid durations', async () => {
         const db = await testAdapter(database(), { models: {} })
