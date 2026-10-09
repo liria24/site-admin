@@ -111,7 +111,9 @@ const descriptorIssues = (
     data: Record<string, unknown>,
     parent = '',
 ): SiteAdminIssue[] => {
-    const issues: SiteAdminIssue[] = []
+    const issues: SiteAdminIssue[] = Object.keys(data)
+        .filter((name) => !Object.hasOwn(fields, name))
+        .map((name) => ({ path: [parent, name].filter(Boolean).join('.'), message: 'Unknown field.' }))
     for (const [name, field] of Object.entries(fields)) {
         const path = [parent, name].filter(Boolean).join('.')
         const value = data[name]
@@ -561,15 +563,10 @@ export const useSiteAdminForm = <
                     'A form action must return a data proposal.',
                     502,
                 )
-            const issues = Object.keys(result.data)
-                .filter((name) => !Object.hasOwn(descriptor.value.fields, name))
-                .map((path) => ({ path, message: 'Unknown field.' }))
-            issues.push(
-                ...descriptorIssues(descriptor.value.fields, {
-                    ...data,
-                    ...serialize(result.data as Data),
-                }),
-            )
+            const issues = descriptorIssues(descriptor.value.fields, {
+                ...data,
+                ...serialize(result.data as Data),
+            })
             proposalSnapshot = snapshot
             proposalProps = props
             proposalPropsSnapshot = propsSnapshot

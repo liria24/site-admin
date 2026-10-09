@@ -2,7 +2,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { MockLanguageModelV4 } from 'ai/test'
 import { Output } from 'ai'
 import { z } from 'zod'
-import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
+import {
+    array,
+    createSiteAdminDescriptor,
+    defineSiteAdminConfig,
+    object,
+    select,
+    text,
+} from '../packages/site-admin/src'
 import { executeSiteAdminAiAction } from '../packages/site-admin/src/ai'
 import { handleAiActionRequest } from '../packages/site-admin/src/server/ai-actions-http'
 import { useSiteAdminForm } from '../packages/site-admin/src/form'
@@ -59,6 +66,40 @@ const setup = (run: MockLanguageModelV4['doGenerate']) => {
 }
 
 describe('native named actions in form sessions', () => {
+    it.each([
+        [{ publication: { slug: 'manual', unknown: 'hidden' } }, 'publication.unknown'],
+        [{ sections: [{ text: 'Valid', unknown: 'hidden' }] }, 'sections.0.unknown'],
+        [{ matrix: [[{ text: 'Valid', unknown: 'hidden' }]] }, 'matrix.0.0.unknown'],
+    ])('rejects nested unknown proposal fields at %s %s before apply or save', async (data, path) => {
+        const config = defineSiteAdminConfig({
+            models: {
+                notes: {
+                    fields: {
+                        title: text({ required: true }),
+                        publication: object({ slug: select(['auto', 'manual']) }),
+                        sections: array(object({ text: text() })),
+                        matrix: array(array(object({ text: text() }))),
+                    },
+                },
+            },
+        })
+        const fetch = vi.fn(async () => Response.json({ data }))
+        const controller = useSiteAdminForm<Record<string, unknown>>({
+            descriptor: createSiteAdminDescriptor(config).models.notes!,
+            modelName: 'notes',
+            defaultValues: { title: 'Manual' },
+            fetch,
+        })
+        const before = structuredClone(controller.form.state.values)
+        await controller.ai.run('prepare', { content: 'Manual' })
+        expect(controller.ai.proposal.value?.issues).toEqual([{ path, message: 'Unknown field.' }])
+        expect(controller.ai.apply()).toBe(false)
+        expect(controller.form.state.values).toEqual(before)
+        expect(controller.dirty.value).toBe(false)
+        expect(fetch).toHaveBeenCalledOnce()
+        expect(controller.entryId.value).toBeNull()
+    })
+
     it.each(['pending', 'proposed'] as const)('rejects changed native props during %s generation', async (when) => {
         const reply = Promise.withResolvers<Response>()
         const props = reactive({ content: 'Before', settings: ['one'] })
