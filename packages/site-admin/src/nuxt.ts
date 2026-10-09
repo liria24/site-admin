@@ -843,7 +843,7 @@ export default defineNitroPlugin((nitroApp) => {
     publicBase: ${JSON.stringify(options.client.basePath)},
     tasks: ${JSON.stringify(domainConfig.tasks ?? {})},
     getSiteAdmin,
-    initializeRequest: ${options.auth && !domainConfig.database && cmsConfigured ? 'async (event) => { nativeEvents.set(event.context, event); await databases.prepare(event) }' : '(event) => { nativeEvents.set(event.context, event) }'},
+    initializeRequest: ${options.auth && !domainConfig.database && Object.keys(domainConfig.models).length > 0 ? 'async (event) => { nativeEvents.set(event.context, event); await databases.prepare(event) }' : '(event) => { nativeEvents.set(event.context, event) }'},
     ${
         namedAiActions
             ? `runAiAction: async (event, name, input) => executeSiteAdminAiAction(domainConfig, name, input, {
