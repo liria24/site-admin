@@ -146,32 +146,61 @@ describe('public client Markdown contract', () => {
         }
     })
 
-    it('returns empty rendering nodes when summary is disabled, including related Markdown', async () => {
-        const database = createDatabase(nodeSqlite({ name: ':memory:' }))
-        try {
-            const admin = await createMigratedTestAdmin({
-                config: { ...config, markdown: { summary: { enabled: false } } },
-                database,
-            })
-            const author = await admin.createEntry('authors', { data: { name: 'Author', bio: 'FULL_DISABLED_AUTHOR' } })
-            await admin.publishEntry(author.id, { expectedVersion: author.version })
-            const post = await admin.createEntry('posts', {
-                data: { title: 'Post', body: 'FULL_DISABLED_POST', sections: [], author: author.id },
-            })
-            await admin.publishEntry(post.id, { expectedVersion: post.version })
-            const response = await handlePublicRequest(
-                admin,
-                new Request('http://localhost/api/content/posts?markdown=summary'),
-            )
-            const payload = await response.text()
-            expect(payload).not.toContain('FULL_DISABLED_')
-            const [item] = JSON.parse(payload) as Array<{
-                data: { body: { nodes: unknown[] }; author: { data: { bio: { nodes: unknown[] } } } }
-            }>
-            expect(item!.data.body.nodes).toEqual([])
-            expect(item!.data.author.data.bio.nodes).toEqual([])
-        } finally {
-            await database.dispose()
-        }
-    })
+    it.each([false, true])(
+        'returns empty rendering nodes when summary is disabled, including related Markdown (custom plugin: %s)',
+        async (custom) => {
+            const database = createDatabase(nodeSqlite({ name: ':memory:' }))
+            try {
+                const admin = await createMigratedTestAdmin({
+                    config: {
+                        ...config,
+                        markdown: {
+                            summary: { enabled: false },
+                            ...(custom
+                                ? {
+                                      plugins: [
+                                          {
+                                              name: 'custom-summary',
+                                              post(state) {
+                                                  state.tree.meta.summary = [['p', {}, 'FULL_DISABLED_PLUGIN']]
+                                                  state.tree.meta.custom = 'kept'
+                                              },
+                                          },
+                                      ],
+                                  }
+                                : {}),
+                        },
+                    },
+                    database,
+                })
+                const author = await admin.createEntry('authors', {
+                    data: { name: 'Author', bio: 'FULL_DISABLED_AUTHOR' },
+                })
+                await admin.publishEntry(author.id, { expectedVersion: author.version })
+                const post = await admin.createEntry('posts', {
+                    data: { title: 'Post', body: 'FULL_DISABLED_POST', sections: [], author: author.id },
+                })
+                await admin.publishEntry(post.id, { expectedVersion: post.version })
+                const response = await handlePublicRequest(
+                    admin,
+                    new Request('http://localhost/api/content/posts?markdown=summary'),
+                )
+                const payload = await response.text()
+                expect(payload).not.toContain('FULL_DISABLED_')
+                const [item] = JSON.parse(payload) as Array<{
+                    data: { body: { nodes: unknown[] }; author: { data: { bio: { nodes: unknown[] } } } }
+                }>
+                expect(item!.data.body.nodes).toEqual([])
+                expect(item!.data.author.data.bio.nodes).toEqual([])
+                if (custom) {
+                    const full = await (await admin.content('posts')).list()
+                    expect(full[0]?.data.body).toMatchObject({
+                        meta: { custom: 'kept', summary: [['p', {}, 'FULL_DISABLED_PLUGIN']] },
+                    })
+                }
+            } finally {
+                await database.dispose()
+            }
+        },
+    )
 })

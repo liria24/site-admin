@@ -32,7 +32,7 @@ export const projectMarkdownListSummary = async (
             // Relations are opaque to markdown-fields; parse their source through the same native plugin pipeline.
             const document =
                 typeof value === 'string' ? await parseMarkdown(value, { plugins }) : markdownDocument(value)
-            const summary = document?.meta?.summary
+            const summary = config.markdown?.summary?.enabled === false ? undefined : document?.meta?.summary
             const nodes = Array.isArray(summary) ? structuredClone(summary as Node[]) : []
             const result: SiteAdminMarkdownSummary = {
                 nodes,

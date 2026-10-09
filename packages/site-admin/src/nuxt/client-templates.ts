@@ -128,10 +128,11 @@ export function useSiteAdminList(model: PublicModelName, options: AsyncDataOptio
   const locale = useSiteAdminLocale(options.locale)
   const key = computed(() => siteAdminDataKey(clientOptions, 'list', model, null, locale.value, options.markdown))
   const { locale: _locale, markdown: _markdown, ...asyncOptions } = options
-  return siteAdminAsyncData(() => key.value, (_app, { signal }) => {
+  return siteAdminAsyncData(() => key.value, (_app, { signal }): Promise<SiteAdminPublicModels[PublicModelName][] | SiteAdminPublicSummaryModels[keyof SiteAdminPublicSummaryModels][]> => {
     const effectiveLocale = locale.value
     const request = { signal, ...(effectiveLocale === undefined ? {} : { locale: effectiveLocale }) }
-    return options.markdown === 'summary' ? client.list(model, { ...request, markdown: 'summary' }) : client.list(model, request)
+    if (options.markdown === 'summary') return client.list<PublicModelName & keyof SiteAdminPublicSummaryModels>(model, { ...request, markdown: 'summary' })
+    return client.list<PublicModelName>(model, request)
   }, asyncOptions)
 }
 
@@ -179,10 +180,11 @@ export interface SiteAdminBatchItem<Data> {
   data: Data
   error: SiteAdminBatchItemError | null
 }
+type SiteAdminBatchListData<Name extends PublicModelName, Mode> = Mode extends 'summary'
+  ? SiteAdminPublicSummaryModels[Name & keyof SiteAdminPublicSummaryModels][]
+  : SiteAdminPublicModels[Name][]
 type SiteAdminBatchRequestData<Request> = Request extends { list: infer Name extends PublicModelName }
-  ? Request extends { markdown: 'summary' }
-    ? Name extends keyof SiteAdminPublicSummaryModels ? SiteAdminPublicSummaryModels[Name][] : never
-    : SiteAdminPublicModels[Name][]
+  ? SiteAdminBatchListData<Name, Request extends { markdown: infer Mode } ? Mode : Request extends { markdown?: infer Mode } ? Mode | undefined : 'full'>
   : Request extends { entry: infer Name extends PublicModelName }
     ? SiteAdminPublicModels[Name] | null
     : never

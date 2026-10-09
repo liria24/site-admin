@@ -117,7 +117,7 @@ Public entries have typed `entry.data.value?.data.title`; Markdown fields are pa
 
 `entry.data.value?.data.body.meta.summary` is typed as `Node[] | undefined`. An explicit native Comark summary before `<!-- more -->` wins, including an empty summary. Otherwise it contains up to two body paragraphs and 280 graphemes, excluding images, code and raw HTML. The body AST is unchanged; `markdown.summary.enabled: false` disables both. Render the AST with Comark and use CSS for the visible line limit; no AI runs.
 
-Use `useSiteAdminList('posts', { markdown: 'summary' })` or `{ list: 'posts', markdown: 'summary' }` in a batch to send rendering documents whose `nodes` contain only the summary, including nested and related Markdown. Missing summaries have empty nodes. Source, frontmatter and other Markdown plugin metadata are omitted on the server before HTTP/SSR serialization; default lists and details retain full content and separate native cache keys. This reduces payloads, not database reads or parsing.
+Use `useSiteAdminList('posts', { markdown: 'summary' })` or `{ list: 'posts', markdown: 'summary' }` in a batch to send rendering documents whose `nodes` contain only the summary, including nested and related Markdown. Missing summaries and `summary.enabled: false` have empty nodes, including when custom plugins provide summaries. Source, frontmatter and other Markdown plugin metadata are omitted on the server before HTTP/SSR serialization; default lists and details retain full content and separate native cache keys. This reduces payloads, not database reads or parsing.
 
 Native transformations preserve their output type:
 

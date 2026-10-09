@@ -28,7 +28,7 @@ declare module '#imports' {
     await writeFile(
         join(directory, 'consumer.ts'),
         `import { computed, ref } from 'vue'
-import { array, datetime, defineSiteAdminConfig, image, images, markdown, text, textarea, url, type InferSiteAdminPublicModels } from '@liria24/site-admin'
+import { array, datetime, defineSiteAdminConfig, image, images, markdown, relation, text, textarea, url, type InferSiteAdminPublicModels } from '@liria24/site-admin'
 import type { AsyncData } from '#app/composables/asyncData'
 import type { NuxtError } from '#app'
 import { useSiteAdminBatch, useSiteAdminEntry, useSiteAdminList } from './client'
@@ -37,7 +37,8 @@ const config = defineSiteAdminConfig({ models: {
   socials: { fields: { href: url({ required: true }), icon: text({ required: true }), label: text({ required: true }) } },
   careers: { fields: { period: text({ required: true }), position: text({ required: true }), company: text({ required: true }) } },
   ranks: { fields: { game: text({ required: true }), season: text(), rank: text({ required: true }), image: image({ required: true }), href: url() } },
-  posts: { fields: { title: text({ required: true }), excerpt: textarea(), content: markdown({ required: true }), tags: array(text(), { required: true, default: [] }), image: image(), authorUserId: text(), createdAt: datetime() } },
+  posts: { fields: { title: text({ required: true }), excerpt: textarea(), content: markdown({ required: true }), tags: array(text(), { required: true, default: [] }), image: image(), author: relation('authors'), authorUserId: text(), createdAt: datetime() } },
+  authors: { fields: { bio: markdown({ required: true }) } },
   private: { fields: { secret: text() }, public: false },
 } })
 declare module '@liria24/site-admin/client' {
@@ -122,6 +123,15 @@ summaryBatch.data.value?.posts.data[0]?.data.content.meta.rawSource
 // @ts-expect-error Batch detail requests retain their full contract.
 useSiteAdminBatch({ featured: { entry: 'posts', slugOrId: slug, markdown: 'summary' } })
 void [summaryNodes, summaryTitleList, batchSummaryNodes]
+declare const mode: 'full' | 'summary'
+const mixedBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: mode } })
+const mixedBio: string | import('@liria24/site-admin').SiteAdminMarkdownSummary | undefined = mixedBatch.data.value?.posts.data[0]?.data.author?.data.bio
+// @ts-expect-error A runtime union mode cannot promise a raw relation string.
+const rawMixedBio: string | undefined = mixedBatch.data.value?.posts.data[0]?.data.author?.data.bio
+const fullBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: 'full' } })
+const fullBio: string | undefined = fullBatch.data.value?.posts.data[0]?.data.author?.data.bio
+const summaryBio: import('@liria24/site-admin').SiteAdminMarkdownSummary | undefined = summaryBatch.data.value?.posts.data[0]?.data.author?.data.bio
+void [mixedBio, rawMixedBio, fullBio, summaryBio]
 // @ts-expect-error Unknown batch models must fail.
 useSiteAdminBatch({ item: { list: 'missing' } })
 // @ts-expect-error Private batch models must fail.
