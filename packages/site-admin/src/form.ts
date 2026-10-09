@@ -2,6 +2,7 @@ import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { useForm } from '@tanstack/vue-form'
 import { ref, toRaw, type Ref } from 'vue'
 
+import { createSiteAdminManagementClient, SiteAdminClientError } from './client'
 import type { FieldDescriptor, ModelDescriptor } from './descriptor'
 import type { SiteAdminIssue } from './errors'
 import type { AssetRecord, EntryRecord, EntryMutationResult } from './server/types'
@@ -21,6 +22,7 @@ export interface UseSiteAdminFormOptions<Data extends Record<string, unknown>> {
     locale?: string
     managementBase?: string
     modelName: string
+    origin?: string
     onSuccess?: (entry: EntryMutationResult) => Promise<void> | void
     slug?: string
 }
@@ -47,27 +49,6 @@ export const siteAdminFormDefaults = <Data extends Record<string, unknown>>(
     model: ModelDescriptor,
     values: Partial<Data> = {},
 ): Data => ({ ...defaultsFromFields(model.fields), ...values }) as Data
-
-const readError = async (response: Response): Promise<SiteAdminFormError> => {
-    const payload: unknown = await response.json().catch(() => null)
-    if (
-        typeof payload === 'object' &&
-        payload !== null &&
-        'error' in payload &&
-        typeof payload.error === 'object' &&
-        payload.error !== null &&
-        'code' in payload.error &&
-        'message' in payload.error
-    ) {
-        const error = payload.error as { code: unknown; issues?: unknown; message: unknown }
-        return {
-            code: String(error.code),
-            ...(Array.isArray(error.issues) ? { issues: error.issues as SiteAdminIssue[] } : {}),
-            message: String(error.message),
-        }
-    }
-    return { code: 'SITE_ADMIN_REQUEST_FAILED', message: `Request failed with status ${response.status}.` }
-}
 
 const descriptorIssues = (
     fields: Record<string, FieldDescriptor>,
@@ -169,8 +150,13 @@ const uploadWithProgress = (url: string, file: File, progress: Ref<number | null
     })
 
 export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: UseSiteAdminFormOptions<Data>) => {
-    const request = options.fetch ?? globalThis.fetch
-    const base = `/${(options.managementBase ?? '/api/site-admin').split('/').filter(Boolean).join('/')}`
+    const basePath = `/${(options.managementBase ?? '/api/site-admin').split('/').filter(Boolean).join('/')}`
+    const base = `${options.origin?.replace(/\/$/u, '') ?? ''}${basePath}`
+    const client = createSiteAdminManagementClient<Record<string, Record<string, unknown>>>({
+        basePath,
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.origin ? { origin: options.origin } : {}),
+    })
     const entryId = ref(options.entry?.id ?? null)
     const version = ref(options.entry?.version ?? null)
     const serverError = ref<SiteAdminFormError | null>(null)
@@ -187,23 +173,25 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             serverError.value = null
             conflict.value = false
             const updating = entryId.value !== null
-            const response = await request(
-                updating
-                    ? `${base}/entries/${encodeURIComponent(entryId.value!)}`
-                    : `${base}/entries/${encodeURIComponent(options.modelName)}`,
-                {
-                    body: JSON.stringify({
-                        data: value,
-                        ...(updating ? { expectedVersion: version.value } : {}),
-                        ...(!updating && options.locale ? { locale: options.locale } : {}),
-                        ...(options.slug === undefined ? {} : { slug: options.slug }),
-                    }),
-                    headers: { 'content-type': 'application/json' },
-                    method: updating ? 'PATCH' : 'POST',
-                },
-            )
-            if (!response.ok) {
-                const error = await readError(response)
+            let entry: EntryMutationResult
+            try {
+                const input = {
+                    data: value,
+                    ...(options.slug === undefined ? {} : { slug: options.slug }),
+                }
+                entry = updating
+                    ? await client.updateEntry(entryId.value!, { ...input, expectedVersion: version.value! })
+                    : await client.createEntry(options.modelName, {
+                          ...input,
+                          ...(options.locale ? { locale: options.locale } : {}),
+                      })
+            } catch (cause) {
+                if (!(cause instanceof SiteAdminClientError)) throw cause
+                const error: SiteAdminFormError = {
+                    code: cause.code,
+                    ...(cause.issues ? { issues: cause.issues } : {}),
+                    message: cause.message,
+                }
                 serverError.value = error
                 conflict.value = error.code === 'SITE_ADMIN_CONFLICT'
                 if (error.issues?.length) {
@@ -214,7 +202,6 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                 }
                 return createValidationError({ fields: {}, form: error.message })
             }
-            const entry = (await response.json()) as EntryMutationResult
             entryId.value = entry.id
             version.value = entry.version
             form.reset(('data' in entry ? entry.data : value) as Data)
@@ -230,13 +217,7 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             if (!options.fetch && typeof XMLHttpRequest !== 'undefined') {
                 asset = await uploadWithProgress(`${base}/assets`, file, uploadProgress)
             } else {
-                const response = await request(`${base}/assets`, {
-                    body: file,
-                    headers: { 'x-filename': encodeURIComponent(file.name), 'x-upload-size': String(file.size) },
-                    method: 'POST',
-                })
-                if (!response.ok) throw new Error((await readError(response)).message)
-                asset = (await response.json()) as AssetRecord
+                asset = await client.uploadAsset(file)
             }
             uploadProgress.value = 1
             return asset
@@ -262,14 +243,7 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
         form,
         relation: {
             search: async (model: string, query = '', locale?: string, limit = 20): Promise<EntryRecord[]> => {
-                const url = new URL(`${base}/entries`, globalThis.location?.origin ?? 'http://localhost')
-                url.searchParams.set('model', model)
-                url.searchParams.set('q', query)
-                url.searchParams.set('limit', String(limit))
-                if (locale) url.searchParams.set('locale', locale)
-                const response = await request(`${url.pathname}${url.search}`)
-                if (!response.ok) throw new Error((await readError(response)).message)
-                return ((await response.json()) as { items: EntryRecord[] }).items
+                return (await client.listEntries(model, { q: query, limit, ...(locale ? { locale } : {}) })).items
             },
         },
         serverError,

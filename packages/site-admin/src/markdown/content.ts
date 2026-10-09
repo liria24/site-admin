@@ -54,12 +54,14 @@ export const createMarkdownContent = (
             {
                 ...entry.data,
                 _siteAdmin: {
+                    ...(entry.alternates ? { alternates: entry.alternates } : {}),
                     id: entry.id,
                     locale: entry.locale,
                     model: entry.model,
                     path: entry.path,
                     publishedAt: entry.publishedAt,
                     revisionId: entry.revisionId,
+                    ...(entry.seo ? { seo: entry.seo } : {}),
                     slug: entry.slug,
                 },
             },

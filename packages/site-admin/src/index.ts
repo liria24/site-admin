@@ -9,12 +9,18 @@ export type {
     ModelDisplayFields,
     ModelRouteOptions,
     SiteAdminAssetAction,
+    SiteAdminAIConfig,
+    SiteAdminSeoOptions,
+    ModelSeoOptions,
     SiteAdminAuthorization,
     SiteAdminConfig,
+    SiteAdminConfigInput,
+    ResolvedSiteAdminConfig,
     SiteAdminModelAction,
     SiteAdminRoleDefinition,
     SiteAdminSystemAction,
 } from './config'
+export type { SiteAdminRouteRule, SiteAdminRouteRules } from './seo'
 export { SiteAdminError } from './errors'
 export type { SiteAdminErrorCode, SiteAdminIssue } from './errors'
 export { createSiteAdminDescriptor } from './descriptor'
@@ -36,4 +42,12 @@ export {
     url,
 } from './fields'
 export type { AnyField, AssetInput, AssetValue, PublicAsset, FieldRecord, InferField, InferFields } from './fields'
-export type { PublicEntry, EntryMutationReceipt, EntryMutationResult, EntryPage } from './server/types'
+export type {
+    PublicEntry,
+    PublicEntrySeo,
+    PublicEntrySeoImage,
+    PublicEntrySeoValue,
+    EntryMutationReceipt,
+    EntryMutationResult,
+    EntryPage,
+} from './server/types'

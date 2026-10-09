@@ -7,6 +7,9 @@ import { join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { verifyStandalone } from './standalone-consumer.mjs'
+import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
+import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
+import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
@@ -36,7 +39,7 @@ const install = async (cwd = temporary, production = false) => {
         // npm cannot reify Nitro's traced links; install the generated production manifest into a clean tree.
         if (production) await rm(join(cwd, 'node_modules'), { force: true, recursive: true })
     }
-    return run(
+    const result = run(
         packageManager,
         [
             'install',
@@ -45,6 +48,8 @@ const install = async (cwd = temporary, production = false) => {
         ],
         cwd,
     )
+    if (!production) await applyNuxt46VerificationPatch(cwd)
+    return result
 }
 const exec = (args, cwd = temporary) =>
     run(
@@ -120,17 +125,22 @@ try {
     }
     if (!(await stat(tarball)).isFile()) throw new Error('SITE_ADMIN_TARBALL must be a package file.')
     console.log(`Testing ${tarball} with ${packageManager}`)
-    if (packageManager === 'npm') await verifyStandalone(tarball)
+    if (packageManager === 'npm') {
+        await verifyStandalone(tarball)
+        await verifyOwnedDependencies(tarball)
+        await verifyPublicDataConsumer(tarball)
+    }
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
     await writeFile(
         join(temporary, 'package.json'),
         JSON.stringify({
             dependencies: {
                 '@liria24/site-admin': `file:${tarball.replaceAll('\\', '/')}`,
-                '@better-auth/drizzle-adapter': '1.7.6',
+                '@better-auth/drizzle-adapter': '1.7.7',
                 '@nuxtjs/better-auth': '0.3.7',
                 '@tanstack/vue-form': '2.0.0-alpha.2',
                 'drizzle-orm': '1.0.0-rc.4',
+                'drizzle-kit': '1.0.0-rc.4',
                 nuxt: '4.6.0',
                 nitropack: '2.13.4',
                 typescript: '7.0.2',
@@ -226,8 +236,11 @@ export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], siteAdm
 import { registerHooks } from 'node:module'
 registerHooks({ resolve(specifier, context, next) {
   if (specifier.includes('drizzle')) throw new Error('Core imported Drizzle: ' + specifier)
+  if (specifier === 'ai' || specifier.startsWith('ai/') || specifier.startsWith('@ai-sdk/') || specifier.startsWith('workers-ai-provider')) throw new Error('Core eagerly imported AI: ' + specifier)
   return next(specifier, context)
 } })
+await import('@liria24/site-admin')
+await import('@liria24/site-admin/client')
 await import('@liria24/site-admin/server')
 await import('@liria24/site-admin/adapter')
 for (const module of ['assets', 'content', 'document', 'plugins']) {
@@ -264,11 +277,11 @@ export default defineServerAuth({ emailAndPassword: { enabled: true } })
         `export default { dialect: 'sqlite', schema: './schema.ts', out: './migrations', dbCredentials: { url: './.data/content.sqlite3' } }`,
     )
     await mkdir(join(temporary, 'server/.data'), { recursive: true })
-    // Resolve from the installed package, not the workspace, including hoisted installs.
+    // Resolve the application's declared migration tool, never Site Admin's dependency directory.
     const kitBin = run(process.execPath, [
         '--input-type=module',
         '-e',
-        `import {createRequire} from 'node:module'; import {dirname,join} from 'node:path'; const require=createRequire(import.meta.resolve('@liria24/site-admin')); console.log(join(dirname(require.resolve('drizzle-kit')),'bin.cjs'))`,
+        `import {createRequire} from 'node:module'; import {dirname,join} from 'node:path'; const require=createRequire(import.meta.url); console.log(join(dirname(require.resolve('drizzle-kit')),'bin.cjs'))`,
     ])
     run(process.execPath, [kitBin, 'generate'], join(temporary, 'server'))
     run(process.execPath, [kitBin, 'migrate'], join(temporary, 'server'))

@@ -1,5 +1,6 @@
 import type { ModelDefinition, SiteAdminConfig } from './config'
 import type { AnyField, FieldRecord } from './fields'
+import { resolveSiteAdminAssets } from './assets-config'
 
 export interface FieldDescriptor {
     accept?: readonly string[]
@@ -66,7 +67,7 @@ export const createSiteAdminDescriptor = (config: SiteAdminConfig): SiteAdminDes
     assets: config.assets
         ? {
               ...(config.assets.maxUploadSize === undefined ? {} : { maxUploadSize: config.assets.maxUploadSize }),
-              storage: config.assets.storage,
+              storage: config.assets.storage ?? resolveSiteAdminAssets(config.assets, config)!.storage!,
               separateDrafts: config.assets.separateDrafts === true,
           }
         : false,

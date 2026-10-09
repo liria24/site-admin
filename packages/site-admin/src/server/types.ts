@@ -2,7 +2,7 @@ import type { SiteAdminDatabase as Database } from '../adapter'
 import type { Body, Files, StoredFile } from 'files-sdk'
 
 import type { SiteAdminConfig } from '../config'
-import type { SiteAdminAIConfig } from '../ai'
+import type { SiteAdminAIActionConfig, SiteAdminAIRuntime } from '../ai'
 import type { SiteAdminIssue } from '../errors'
 
 export interface SiteAdminActor {
@@ -13,8 +13,10 @@ export interface SiteAdminActor {
 export type FilesResolver = (storage: string) => Promise<Files>
 
 export interface SiteAdminOptions<Context = unknown> {
-    aiActions?: SiteAdminAIConfig
+    aiActions?: SiteAdminAIActionConfig
     aiEnabled?: boolean
+    /** Resolved for each operation so request-scoped provider bindings are never cached. */
+    aiRuntime?: SiteAdminAIRuntime | ((context?: Context) => Promise<SiteAdminAIRuntime>)
     authorize?: (request: Request, context?: Context) => Promise<SiteAdminActor | null> | SiteAdminActor | null
     config: SiteAdminConfig
     database: Database
@@ -100,6 +102,36 @@ export interface EntryPage {
     total: number
 }
 
+/** JSON-only page metadata. Server configuration and resolver functions never enter this DTO. */
+export type PublicEntrySeoValue =
+    | boolean
+    | number
+    | string
+    | null
+    | PublicEntrySeoValue[]
+    | {
+          [key: string]: PublicEntrySeoValue
+      }
+
+export interface PublicEntrySeoImage {
+    component: string
+    options?: Record<string, PublicEntrySeoValue> | Array<Record<string, PublicEntrySeoValue>>
+    props?: Record<string, PublicEntrySeoValue>
+}
+
+export interface PublicEntrySeo {
+    alternates?: Array<{ locale: string; path: string }>
+    canonical?: string
+    description?: string
+    /** Omitted inherits the public model image; false disables page image metadata. */
+    image?: string | false | PublicEntrySeoImage
+    robots?: string
+    title?: string
+    titleTemplate?: string | null
+    twitterCard?: 'summary' | 'summary_large_image'
+    type?: 'article' | 'website'
+}
+
 export interface PublicEntry<Data = Record<string, unknown>> {
     alternates?: Array<{ locale: string; path: string }>
     data: Data
@@ -109,6 +141,7 @@ export interface PublicEntry<Data = Record<string, unknown>> {
     path: string | null
     publishedAt: string
     revisionId: string
+    seo?: PublicEntrySeo
     slug: string
 }
 

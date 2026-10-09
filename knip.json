@@ -3,7 +3,17 @@
     "ignoreExportsUsedInFile": true,
     "workspaces": {
         ".": {
-            "entry": ["*.config.ts", "test/**/*.test.ts", "test/*.mjs", "test/types.ts", "test/fixtures/**/*.{ts,vue}"],
+            "entry": [
+                "*.config.ts",
+                "test/**/*.test.ts",
+                "test/*.mjs",
+                "test/types.ts",
+                "test/fixtures/**/*.{ts,vue}",
+                "test/client-types.ts",
+                "test/config-types.ts",
+                "test/ai-client-types.ts",
+                "test/seo-types.ts"
+            ],
             "project": ["*.ts", "test/**/*.{ts,mjs,vue}"],
             "ignoreDependencies": ["@takumi-rs/core", "@vue/compiler-sfc", "tailwindcss"],
             "ignore": ["test/fixtures/**/.nuxt/**", "test/fixtures/**/.wrangler/**"]
@@ -15,14 +25,17 @@
                 "src/server/index.ts!",
                 "src/nuxt/server.ts!",
                 "src/adapters/drizzle.ts!",
-                "src/devtools/{index,dock,client/app}.ts!"
+                "src/devtools/{index,dock,client/app}.ts!",
+                "src/runtime/tasks/*.ts!",
+                "src/ai/operations.ts!",
+                "src/dependency-aliases.ts!",
+                "src/seo.ts!"
             ],
             "project": ["src/**/*.ts!", "*.config.ts"],
             "ignoreDependencies": [
                 "@nuxtjs/i18n",
                 "@nuxtjs/robots",
                 "@nuxtjs/sitemap",
-                "nuxt-files-sdk",
                 "nuxt-og-image",
                 "nuxt-schema-org",
                 "nuxt-seo-utils"

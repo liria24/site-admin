@@ -1,4 +1,4 @@
 import { defineEventHandler } from 'nuxt/server'
-import { useSiteAdmin } from '@liria24/site-admin/nuxt/server'
+import { runTask } from 'nitropack/runtime'
 
-export default defineEventHandler(async () => (await useSiteAdmin()).publishDue())
+export default defineEventHandler(async () => (await runTask('site-admin:publish-due')).result)

@@ -5,6 +5,7 @@ import { astText, cleanText, collectMarkdown, markdownDocument, type MarkdownDoc
 import { addRoute, createRouter, findRoute, type RouterContext } from 'rou3'
 import type { SiteAdminStorage } from '../adapter'
 import { prepareUpload } from './upload'
+import { resolveSiteAdminAssets } from '../assets-config'
 import type { Files } from 'files-sdk'
 
 import type {
@@ -14,9 +15,16 @@ import type {
     SiteAdminModelAction,
     SiteAdminSystemAction,
 } from '../config'
-import type { SiteAdminAIProposal } from '../ai'
+import type {
+    SiteAdminAIDraftProposal,
+    SiteAdminAIProposal,
+    SiteAdminAIRuntime,
+    SiteAdminMetadataInput,
+    SiteAdminProofreadInput,
+} from '../ai'
 import { createSiteAdminDescriptor, type SiteAdminDescriptor } from '../descriptor'
 import { SiteAdminError, type SiteAdminIssue } from '../errors'
+import { createSiteAdminRouteResolver, serializeSiteAdminSeo, type SiteAdminRouteResolver } from '../seo'
 import type { AnyField, AssetInput, FieldRecord } from '../fields'
 import {
     applyFieldDefaults,
@@ -35,6 +43,7 @@ import type {
     EntryRecord,
     IncomingReference,
     PublicEntry,
+    PublicEntrySeo,
     PublishDueResult,
     RevisionRecord,
     SiteAdminDiagnostic,
@@ -134,6 +143,7 @@ interface MetaRow {
 }
 
 interface ProjectionBudget {
+    alternates?: Map<string, Array<{ locale: string; path: string }>>
     nodes: number
 }
 
@@ -258,11 +268,17 @@ export class SiteAdmin<Context = unknown> {
     readonly diagnostics: SiteAdminDiagnostic[] = []
     readonly #options: SiteAdminOptions<Context>
     readonly #descriptor: SiteAdminDescriptor
+    readonly #resolveRouteRule: SiteAdminRouteResolver
     readonly #content = new Map<string, { content: ComarkContent; generation: number }>()
     readonly #routes = new Map<string, { generation: number; router: RouterContext<RouteRow> }>()
     #initializer: Promise<void> | undefined
 
     constructor(options: SiteAdminOptions<Context>) {
+        if (options.config.assets)
+            options = {
+                ...options,
+                config: { ...options.config, assets: resolveSiteAdminAssets(options.config.assets, options.config)! },
+            }
         if (
             options.database?.dialect !== 'sqlite' ||
             typeof options.database.bind !== 'function' ||
@@ -286,6 +302,7 @@ export class SiteAdmin<Context = unknown> {
         if (maxSize !== undefined && (!Number.isSafeInteger(maxSize) || maxSize <= 0))
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'maxUploadSize must be a positive safe integer.')
         this.#options = options
+        this.#resolveRouteRule = createSiteAdminRouteResolver(options.config.routeRules)
         this.#descriptor = createSiteAdminDescriptor(options.config)
     }
 
@@ -523,7 +540,7 @@ export class SiteAdmin<Context = unknown> {
     ): Promise<SiteAdminAIProposal> {
         await this.initialize()
         const entry = await this.getEntry(entryId)
-        const action = this.#options.aiActions?.models[entry.model]?.[actionName]
+        const action = (this.#options.aiActions?.models ?? this.config.ai?.models)?.[entry.model]?.[actionName]
         if (!action) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `AI action "${actionName}" does not exist.`)
         const output = await action({ entry, input })
         const definition = this.#model(entry.model)
@@ -541,6 +558,71 @@ export class SiteAdmin<Context = unknown> {
             issues,
             slug,
             version: entry.version,
+        }
+    }
+
+    /** Proposes changes to an unsaved draft without reading, saving, or publishing an entry. */
+    async generateMetadata(
+        modelName: string,
+        input: SiteAdminMetadataInput,
+        context?: Context,
+    ): Promise<SiteAdminAIDraftProposal> {
+        const definition = this.#model(modelName)
+        if (!isObject(input) || !isObject(input.data))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
+        if (!isObject(input.generate))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"generate" must be an object.')
+        for (const [field, value] of Object.entries(input.generate))
+            if (!['slug', 'excerpt'].includes(field) || typeof value !== 'boolean')
+                throw new SiteAdminError(
+                    'SITE_ADMIN_INVALID_INPUT',
+                    '"generate" may contain only boolean slug and excerpt flags.',
+                )
+        if (input.slug !== undefined && typeof input.slug !== 'string')
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"slug" must be a string.')
+        return this.#runDraftAI(context, (runtime) =>
+            runtime.generateMetadata(modelName, definition, input, this.config.modelDefaults?.slug?.maxLength ?? 80),
+        )
+    }
+
+    /** Proposes proofreading edits. The caller must explicitly apply and save the proposal. */
+    async proofreadDraft(
+        modelName: string,
+        input: SiteAdminProofreadInput,
+        context?: Context,
+    ): Promise<SiteAdminAIDraftProposal> {
+        const definition = this.#model(modelName)
+        if (!isObject(input) || !isObject(input.data))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
+        if (
+            input.fields !== undefined &&
+            (!Array.isArray(input.fields) || input.fields.some((field) => typeof field !== 'string'))
+        )
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"fields" must be an array of strings.')
+        return this.#runDraftAI(context, (runtime) => runtime.proofreadDraft(modelName, definition, input))
+    }
+
+    async #runDraftAI(
+        context: Context | undefined,
+        operation: (runtime: SiteAdminAIRuntime) => Promise<SiteAdminAIDraftProposal>,
+    ): Promise<SiteAdminAIDraftProposal> {
+        if (this.#options.aiEnabled === false || !this.#options.aiRuntime)
+            throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'AI operations are not available.')
+        try {
+            const runtime =
+                typeof this.#options.aiRuntime === 'function'
+                    ? await this.#options.aiRuntime(context)
+                    : this.#options.aiRuntime
+            return await operation(runtime)
+        } catch (error) {
+            if (error instanceof SiteAdminError) {
+                if (error.code === 'SITE_ADMIN_INVALID_INPUT') throw error
+                if (error.code === 'SITE_ADMIN_AI_UNAVAILABLE')
+                    throw new SiteAdminError(error.code, 'AI operations are not available.')
+                if (error.code === 'SITE_ADMIN_AI_OUTPUT_INVALID')
+                    throw new SiteAdminError(error.code, 'AI returned an invalid response.')
+            }
+            throw new SiteAdminError('SITE_ADMIN_AI_FAILED', 'AI operation failed.')
         }
     }
 
@@ -1746,6 +1828,119 @@ export class SiteAdmin<Context = unknown> {
         return candidates
     }
 
+    async #publicEntryGraph(roots: PublishedRow[]): Promise<Map<string, PublishedRow>> {
+        const groups = new Map<string, Set<string>>()
+        for (const row of roots) {
+            if (!this.#publicModel(row.model)?.localized) continue
+            const modelGroups = groups.get(row.model) ?? new Set<string>()
+            modelGroups.add(row.translation_group)
+            groups.set(row.model, modelGroups)
+        }
+        const rows = new Map(roots.map((row) => [row.id, row]))
+        for (const [model, translationGroups] of groups) {
+            const groupIds = [...translationGroups]
+            // D1 permits 100 bound parameters per query; reserve one for the model.
+            for (let offset = 0; offset < groupIds.length; offset += 99) {
+                const chunk = groupIds.slice(offset, offset + 99)
+                const alternates = await queryRows<PublishedRow>(
+                    this.#options.database,
+                    `SELECT e.id, e.model, e.locale, e.published_at, e.translation_group,
+                        r.id AS revision_id, r.data, r.slug
+                 FROM site_admin_entries e
+                 JOIN ${this.#revisionSource} r ON r.id = e.published_revision_id
+                 WHERE e.model = ? AND e.translation_group IN (${placeholders(chunk.length)})
+                       AND e.published_at IS NOT NULL`,
+                    [model, ...chunk],
+                )
+                for (const row of alternates) rows.set(row.id, row)
+            }
+        }
+        return this.#publicSnapshot([...rows.values()])
+    }
+
+    #publishedPath(row: PublishedRow): string | null {
+        const definition = this.#publicModel(row.model)
+        if (!definition) return null
+        const redirect = routeRedirect(definition, parseObject(row.data))
+        const basePath =
+            this.#options.routing?.enabled === false || (redirect && this.#options.routing?.redirects === false)
+                ? null
+                : entryPath(row.model, definition, row.slug, this.#apiBases())
+        return basePath === null ? null : this.#localizedPath(definition, basePath, row.locale)
+    }
+
+    #seoUrl(value: string): string | undefined {
+        try {
+            const url = new URL(value, this.#options.site?.url ?? 'http://site-admin.local')
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+            return this.#options.site?.url || /^[a-z][a-z\d+.-]*:/iu.test(value) ? url.href : value
+        } catch {
+            return undefined
+        }
+    }
+
+    #entryDescription(definition: ModelDefinition, data: Record<string, unknown>): string | undefined {
+        for (const key of [definition.displayFields?.description, 'description', 'summary']) {
+            if (!key) continue
+            const value = data[key]
+            const document = markdownDocument(value)
+            const description = document
+                ? cleanText(astText(document.meta?.summary ?? document.nodes))
+                : typeof value === 'string' && definition.fields[key]?.kind !== 'markdown'
+                  ? cleanText(value)
+                  : ''
+            if (description) return description
+        }
+        return undefined
+    }
+
+    #entrySeo(definition: ModelDefinition, entry: PublicEntry): PublicEntrySeo {
+        const model = typeof definition.seo === 'function' ? definition.seo(structuredClone(entry)) : definition.seo
+        const result = serializeSiteAdminSeo(model)
+        const text = (keys: Array<string | undefined>): string | undefined =>
+            keys
+                .map((key) => (key && typeof entry.data[key] === 'string' ? cleanText(entry.data[key]) : ''))
+                .find(Boolean)
+        const title = text([definition.displayFields?.title, 'title', 'name'])
+        const description = this.#entryDescription(definition, entry.data)
+        if (title !== undefined) result.title = title
+        if (description !== undefined) result.description = description
+        if (entry.path) result.canonical = entry.path
+        if (entry.alternates) result.alternates = entry.alternates
+        if (result.image !== false && !isObject(result.image)) {
+            const imageKeys = [
+                definition.displayFields?.image,
+                ...Object.entries(definition.fields)
+                    .filter(([, field]) => field.kind === 'image' || field.kind === 'images')
+                    .map(([name]) => name),
+            ]
+            for (const key of imageKeys) {
+                const value = key ? entry.data[key] : undefined
+                const image = Array.isArray(value) ? value[0] : value
+                if (isObject(image) && typeof image.url === 'string') {
+                    result.image = image.url
+                    break
+                }
+            }
+        }
+        if (typeof result.image === 'string') {
+            const image = this.#seoUrl(result.image)
+            if (image === undefined) delete result.image
+            else result.image = image
+        }
+        if (result.canonical !== undefined) {
+            const canonical = this.#seoUrl(result.canonical)
+            if (canonical === undefined) delete result.canonical
+            else result.canonical = canonical
+        }
+        if (result.alternates)
+            result.alternates = result.alternates.flatMap((alternate) => {
+                const path = this.#seoUrl(alternate.path)
+                return path ? [{ locale: alternate.locale, path }] : []
+            })
+        return result
+    }
+
     #assetUrl(id: string): string {
         return `${this.#publicBase()}/_assets/${encodeURIComponent(id)}`
     }
@@ -1834,12 +2029,7 @@ export class SiteAdmin<Context = unknown> {
             )
         const definition = this.#publicModel(row.model)
         if (!definition) throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${row.model}" is private.`)
-        const redirect = routeRedirect(definition, parseObject(row.data))
-        const basePath =
-            this.#options.routing?.enabled === false || (redirect && this.#options.routing?.redirects === false)
-                ? null
-                : entryPath(row.model, definition, row.slug, this.#apiBases())
-        const path = basePath === null ? null : this.#localizedPath(definition, basePath, row.locale)
+        const path = this.#publishedPath(row)
         if (parentTrail.has(row.id)) {
             return {
                 data: {},
@@ -1853,7 +2043,7 @@ export class SiteAdmin<Context = unknown> {
             }
         }
         const trail = new Set(parentTrail).add(row.id)
-        return {
+        const entry: PublicEntry = {
             data: this.#hydrateFields(definition.fields, parseObject(row.data), graph, trail, budget, markdownSource),
             id: row.id,
             locale: row.locale,
@@ -1863,6 +2053,26 @@ export class SiteAdmin<Context = unknown> {
             revisionId: row.revision_id,
             slug: row.slug,
         }
+        if (definition.localized && path) {
+            // A transient projection index keeps large localized lists linear, without another content cache.
+            if (!budget.alternates) {
+                budget.alternates = new Map()
+                for (const alternate of graph.values()) {
+                    if (!this.#publicModel(alternate.model)?.localized) continue
+                    const alternatePath = this.#publishedPath(alternate)
+                    if (!alternatePath) continue
+                    const key = `${alternate.model}\0${alternate.translation_group}`
+                    const alternates = budget.alternates.get(key) ?? []
+                    alternates.push({ locale: alternate.locale, path: alternatePath })
+                    budget.alternates.set(key, alternates)
+                }
+            }
+            entry.alternates = (budget.alternates.get(`${row.model}\0${row.translation_group}`) ?? []).map(
+                (alternate) => ({ ...alternate }),
+            )
+        }
+        entry.seo = this.#entrySeo(definition, entry)
+        return entry
     }
 
     async listPublicEntries(modelName: string, locale?: string): Promise<PublicEntry[]> {
@@ -1876,7 +2086,7 @@ export class SiteAdmin<Context = unknown> {
             throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${modelName}" is private.`)
         const normalizedLocale = this.#locale(definition, locale)
         const rows = await this.#publishedRows(modelName, undefined, normalizedLocale)
-        const graph = await this.#publicSnapshot(rows)
+        const graph = await this.#publicEntryGraph(rows)
         const budget = { nodes: 0 }
         return rows
             .filter((row) => graph.has(row.id))
@@ -1900,7 +2110,7 @@ export class SiteAdmin<Context = unknown> {
             [modelName, normalizedLocale, slugOrId, slugOrId],
         )
         if (!row) return null
-        const graph = await this.#publicSnapshot([row])
+        const graph = await this.#publicEntryGraph([row])
         return graph.has(row.id) ? this.#projectPublished(row, graph) : null
     }
 
@@ -1927,6 +2137,13 @@ export class SiteAdmin<Context = unknown> {
         const content = createMarkdownContent(modelName, definition, entries, this.config.markdown, (id) =>
             this.#assetUrl(id),
         )
+        content.hooks.hook('file:parsed', ({ file }) => {
+            if (!file) return
+            const metadata = file.data['_siteAdmin']
+            const description = this.#entryDescription(definition, file.data)
+            if (isObject(metadata) && description !== undefined)
+                metadata.seo = { ...serializeSiteAdminSeo(metadata.seo), description }
+        })
         this.#content.set(cacheKey, { content, generation })
         if (this.#content.size > 64) this.#content.delete(this.#content.keys().next().value!)
         return content
@@ -1964,29 +2181,13 @@ export class SiteAdmin<Context = unknown> {
         const rows = await this.#publishedRows(undefined, [route.entry_id])
         const entry = rows[0]
         if (!entry) return null
-        const graph = await this.#publicSnapshot([entry])
+        const graph = await this.#publicEntryGraph([entry])
         if (!graph.has(entry.id)) return null
         if (route.kind === 'page') {
-            const alternates = await queryRows<PublishedRow>(
-                this.#options.database,
-                `SELECT e.id, e.model, e.locale, e.published_at, e.translation_group,
-                        r.id AS revision_id, r.data, r.slug
-                 FROM site_admin_entries e
-                 JOIN ${this.#revisionSource} r ON r.id = e.published_revision_id
-                 WHERE e.model = ? AND e.translation_group = ? AND e.published_at IS NOT NULL`,
-                [entry.model, entry.translation_group],
-            )
-            const alternateGraph = await this.#publicSnapshot(alternates)
             const budget = { nodes: 0 }
             const projected = this.#projectPublished(entry, graph, new Set(), budget)
-            projected.alternates = alternates.flatMap((alternate) => {
-                if (!alternateGraph.has(alternate.id)) return []
-                const alternatePath =
-                    alternate.id === entry.id
-                        ? projected.path
-                        : this.#projectPublished(alternate, alternateGraph, new Set(), budget).path
-                return alternatePath ? [{ locale: alternate.locale, path: alternatePath }] : []
-            })
+            // Keep the existing route DTO's self alternate for nonlocalized entries.
+            projected.alternates ??= projected.path ? [{ locale: projected.locale, path: projected.path }] : []
             return { entry: projected, kind: 'page' }
         }
         if (!route.target_path) return null
@@ -2006,7 +2207,9 @@ export class SiteAdmin<Context = unknown> {
             const row = byId.get(route.entry_id)
             const definition = row && this.#publicModel(row.model)
             const options = definition ? modelRouteOptions(definition) : null
-            return row && graph.has(row.id) && options?.sitemap !== false
+            return row &&
+                graph.has(row.id) &&
+                (this.#resolveRouteRule(route.path).sitemap ?? options?.sitemap) !== false
                 ? [{ lastmod: row.published_at, loc: decodeURI(route.path) }]
                 : []
         })
@@ -2087,7 +2290,7 @@ export class SiteAdmin<Context = unknown> {
         for (const [modelName, definition] of Object.entries(this.config.models)) {
             if (definition.public === false || !definition.route) continue
             const route = modelRouteOptions(definition)
-            if (route?.redirect || route?.llms === false) continue
+            if (route?.redirect) continue
             const locales = definition.localized
                 ? (this.#options.locales?.supported ?? [this.#locale(definition)])
                 : ['']
@@ -2099,6 +2302,7 @@ export class SiteAdmin<Context = unknown> {
                     if (!isObject(metadata)) continue
                     const path = metadata.path
                     if (typeof path !== 'string') continue
+                    if ((this.#resolveRouteRule(path).llms ?? route?.llms) === false) continue
                     const titleKeys = [definition.displayFields?.title, 'title', 'name']
                     const title =
                         titleKeys
@@ -2147,7 +2351,7 @@ export class SiteAdmin<Context = unknown> {
         if (!assets || !this.#options.getFiles) {
             throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
         }
-        const storage = assets.separateDrafts === true ? 'draft' : assets.storage
+        const storage = assets.separateDrafts === true ? 'draft' : assets.storage!
         const files = await this.#options.getFiles(storage)
         const upload = await prepareUpload(input, assets.maxUploadSize)
         const id = this.#id()
@@ -2510,7 +2714,7 @@ export class SiteAdmin<Context = unknown> {
                     assetId: id,
                     key: `site-admin/public/${id}/${token}`,
                     state: 'copying',
-                    storage: this.config.assets.storage,
+                    storage: this.config.assets.storage!,
                 }
                 const guard = owner()
                 let recorded = false

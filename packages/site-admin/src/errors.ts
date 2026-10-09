@@ -4,6 +4,9 @@ export interface SiteAdminIssue {
 }
 
 export type SiteAdminErrorCode =
+    | 'SITE_ADMIN_AI_FAILED'
+    | 'SITE_ADMIN_AI_OUTPUT_INVALID'
+    | 'SITE_ADMIN_AI_UNAVAILABLE'
     | 'SITE_ADMIN_ASSET_IN_USE'
     | 'SITE_ADMIN_ASSET_NOT_READY'
     | 'SITE_ADMIN_AUTH_REQUIRED'
@@ -23,6 +26,9 @@ export type SiteAdminErrorCode =
     | 'SITE_ADMIN_STORAGE_UNAVAILABLE'
 
 const statuses: Record<SiteAdminErrorCode, number> = {
+    SITE_ADMIN_AI_FAILED: 502,
+    SITE_ADMIN_AI_OUTPUT_INVALID: 502,
+    SITE_ADMIN_AI_UNAVAILABLE: 503,
     SITE_ADMIN_ASSET_IN_USE: 409,
     SITE_ADMIN_ASSET_NOT_READY: 409,
     SITE_ADMIN_AUTH_REQUIRED: 401,

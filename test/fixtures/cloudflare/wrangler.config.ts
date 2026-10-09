@@ -1,6 +1,7 @@
 import { defineWranglerConfig } from 'wrangler/experimental-config'
 
 export default defineWranglerConfig({
+    dev: { inspectorPort: 0 },
     alias: {
         '@aws-sdk/client-s3': './unused-aws.ts',
         '@aws-sdk/lib-storage': './unused-aws.ts',

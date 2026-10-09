@@ -122,6 +122,8 @@ if (platform === 'cloudflare') {
         config,
         '--port',
         String(port),
+        '--inspector-port',
+        '0',
     ]
 } else args = [join(fixture, '.output/server/index.mjs')]
 const output = []

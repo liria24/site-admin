@@ -1,0 +1,41 @@
+diff --git a/dist/app/composables/asyncData.js b/dist/app/composables/asyncData.js
+index b22b0f4cbf3842c23090c308ea7de982e6f8c8a5..344d661bfc966c0ffef45e8e8b1b0a74cf9d026e 100644
+--- a/dist/app/composables/asyncData.js
++++ b/dist/app/composables/asyncData.js
+@@ -93,8 +93,16 @@ function _createUseAsyncData(options = {}) {
+ 				const existing = nuxtApp._asyncData[key.value];
+ 				if (!existing?._init) {
+ 					initialFetchOptions.cachedData = opts.getCachedData(key.value, nuxtApp, { cause: "initial" });
+-					nuxtApp._asyncData[key.value] = buildAsyncData(nuxtApp, key.value, _handler, opts, initialFetchOptions.cachedData);
+-					nuxtApp._asyncData[key.value]._initialCachedData = initialFetchOptions.cachedData;
++					const candidate = buildAsyncData(nuxtApp, key.value, _handler, opts, initialFetchOptions.cachedData);
++					// Construction can synchronously deliver another subscriber for the same key.
++					const current = nuxtApp._asyncData[key.value];
++					if (current?._init) {
++						candidate._off();
++						initialFetchOptions.cachedData = current._initialCachedData;
++					} else {
++						candidate._initialCachedData = initialFetchOptions.cachedData;
++						nuxtApp._asyncData[key.value] = candidate;
++					}
+ 				} else if (nuxtApp._asyncDataPromises[key.value]) initialFetchOptions.cachedData = existing._initialCachedData;
+ 				return () => nuxtApp._asyncData[key.value].execute(initialFetchOptions);
+ 			}
+@@ -163,8 +171,15 @@ function _createUseAsyncData(options = {}) {
+ 							const cachedData = opts.getCachedData(newKey, nuxtApp, { cause: "initial" });
+ 							initialFetchOptions.cachedData = cachedData;
+ 							const initialValue = oldKey && hadData && cachedData === void 0 ? nuxtApp._asyncData[oldKey].data.value : cachedData;
+-							nuxtApp._asyncData[newKey] = buildAsyncData(nuxtApp, newKey, _handler, opts, initialValue);
+-							nuxtApp._asyncData[newKey]._initialCachedData = cachedData;
++							const candidate = buildAsyncData(nuxtApp, newKey, _handler, opts, initialValue);
++							const current = nuxtApp._asyncData[newKey];
++							if (current?._init) {
++								candidate._off();
++								initialFetchOptions.cachedData = current._initialCachedData;
++							} else {
++								candidate._initialCachedData = cachedData;
++								nuxtApp._asyncData[newKey] = candidate;
++							}
+ 						}
+ 						nuxtApp._asyncData[newKey]._deps++;
+ 						if (oldKey) unregister(oldKey);

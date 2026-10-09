@@ -10,17 +10,13 @@ const workspace = fileURLToPath(new URL('../../', import.meta.url))
 await mkdir(join(workspace, '.tmp'), { recursive: true })
 const fixture = await mkdtemp(join(workspace, '.tmp/nuxt-module-'))
 const lifecycleFile = `${fixture}-lifecycle.jsonl`
-const config = (title: string) => `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
+const config = (title: string, aiChanged = false) => `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
 import { required } from '#policy'
-export default defineSiteAdminConfig({ models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
+export default defineSiteAdminConfig({ ai: { models: { posts: ${aiChanged ? "{ suggest: () => ({ data: { title: 'AI server sentinel' } }) }" : '{}'} } }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
 await mkdir(join(fixture, 'server/api'), { recursive: true })
 await mkdir(join(fixture, 'app'), { recursive: true })
 await writeFile(join(fixture, 'policy.ts'), 'export const required = true\n')
 await writeFile(join(fixture, 'site-admin.config.ts'), config('Before'))
-await writeFile(
-    join(fixture, 'site-admin.ai.ts'),
-    "import { defineSiteAdminAIConfig } from '@liria24/site-admin/ai'\nexport default defineSiteAdminAIConfig({ models: {} })\n",
-)
 await writeFile(
     join(fixture, 'nuxt.config.ts'),
     `import { defineNuxtConfig } from 'nuxt/config'
@@ -49,14 +45,18 @@ export default defineNuxtConfig({
     nuxt.hook('site-admin:config', (config) => { nuxt.options.runtimeConfig.probe.title = String(config.models.posts?.fields.title?.default) }) }, '@liria24/site-admin/nuxt'],
   devtools: { enabled: false },
   alias: { '#policy': fileURLToPath(new URL('./policy.ts', import.meta.url)) },
-  siteAdmin: { auth: false, i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false }, ai: {} },
+  typescript: { nodeTsConfig: { compilerOptions: { paths: { '#policy': [fileURLToPath(new URL('./policy.ts', import.meta.url))] } } } },
+  siteAdmin: { auth: false, i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false }, ai: true },
   runtimeConfig: { probe: { title: '', generation: randomUUID() } },
 })`,
 )
 await writeFile(join(fixture, 'app/app.vue'), '<template><div>module integration</div></template>')
 await writeFile(
     join(fixture, 'server/api/probe.get.ts'),
-    'export default defineEventHandler(() => useRuntimeConfig().probe)\n',
+    `import { useServerFiles as nativeFiles } from 'nuxt-files-sdk/runtime'
+import { useServerFiles as bridgedFiles } from '#nuxt-files-sdk/runtime'
+export default defineEventHandler(() => ({ ...useRuntimeConfig().probe, filesReady: nativeFiles() === bridgedFiles() && nativeFiles() === useServerFiles() }))
+`,
 )
 await writeFile(
     join(fixture, 'server/types.ts'),
@@ -84,6 +84,31 @@ await writeFile(
 const route = useSiteAdminRoute()
 // @ts-expect-error No such public client method.
 client.missing()
+const checkModels = async () => {
+  const posts = await client.list('posts')
+  const title: string = posts[0]!.data.title
+  // @ts-expect-error Public model names come from the domain config.
+  await client.list('missing')
+  // @ts-expect-error The public field type is inferred without consumer generics.
+  const invalidTitle: number = posts[0]!.data.title
+  const management = useSiteAdminManagementClient()
+  await management.createEntry('posts', { data: { title: 'Typed' } })
+  // @ts-expect-error Unknown management model.
+  await management.createEntry('missing', { data: {} })
+  // @ts-expect-error Required model field is missing.
+  await management.createEntry('posts', { data: {} })
+  // @ts-expect-error The management field type is inferred.
+  await management.createEntry('posts', { data: { title: 123 } })
+  const entry = (await management.listEntries('posts')).items[0]!
+  const controller = await useSiteAdminForm('posts', { entry })
+  const formTitle: string = controller.form.state.values.title
+  // @ts-expect-error Unknown form model.
+  await useSiteAdminForm('missing', {})
+  // @ts-expect-error Form default values use the configured model field types.
+  await useSiteAdminForm('posts', { defaultValues: { title: 123 } })
+  void [title, invalidTitle, formTitle]
+}
+void checkModels
 void route
 `,
 )
@@ -136,8 +161,9 @@ it('delivers Vue component updates through the live Vite HMR connection', async 
 })
 
 it('reloads aliased domain and AI config and exposes generated Nuxt/Nitro types', async () => {
-    const before = await $fetch<{ title: string; generation: string }>('/api/probe')
+    const before = await $fetch<{ title: string; generation: string; filesReady: boolean }>('/api/probe')
     expect(before.title).toBe('Before')
+    expect(before.filesReady).toBe(true)
     await writeFile(join(fixture, 'site-admin.config.ts'), config('After'))
     try {
         await expect
@@ -147,10 +173,7 @@ it('reloads aliased domain and AI config and exposes generated Nuxt/Nitro types'
         throw new Error(`${await readFile(lifecycleFile, 'utf8')}\n${getServerLogs().join('\n')}`, { cause: error })
     }
     const after = await $fetch<{ generation: string }>('/api/probe')
-    await writeFile(
-        join(fixture, 'site-admin.ai.ts'),
-        "import { defineSiteAdminAIConfig } from '@liria24/site-admin/ai'\nexport default defineSiteAdminAIConfig({ models: { posts: {} } })\n",
-    )
+    await writeFile(join(fixture, 'site-admin.config.ts'), config('After', true))
     await expect
         .poll(
             async () => {
@@ -176,6 +199,7 @@ it('reloads aliased domain and AI config and exposes generated Nuxt/Nitro types'
         } catch (error) {
             throw new Error(await readFile(lifecycleFile, 'utf8'), { cause: error })
         }
+        expect((await $fetch<{ filesReady: boolean }>('/api/probe')).filesReady).toBe(true)
     }
     const activeBuilders = new Set<number>()
     for (const line of (await readFile(lifecycleFile, 'utf8')).trim().split('\n')) {

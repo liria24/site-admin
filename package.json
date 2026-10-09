@@ -18,7 +18,7 @@
         "preview:package": "pkg-pr-new publish ./packages/site-admin --bun --no-compact --previewVersion --comment=update",
         "package:check": "publint packages/site-admin && attw --pack packages/site-admin --profile esm-only",
         "test": "vp test run",
-        "test:cloudflare": "node test/cloudflare-local.mjs && node test/native-stream.mjs cloudflare",
+        "test:cloudflare": "node test/cloudflare-local.mjs && node test/native-stream.mjs cloudflare && node test/nuxt-d1.mjs",
         "test:nuxt": "vp test run --config vitest.nuxt.config.ts && node test/nuxt-build.mjs && node test/native-stream.mjs node",
         "test:packed": "node test/packed-consumers.mjs",
         "typecheck": "bun --filter @liria24/site-admin typecheck && tsc --noEmit -p test/tsconfig.json"
@@ -34,10 +34,12 @@
         "@tanstack/vue-form": "2.0.0-alpha.2",
         "@types/node": "^26.6.4",
         "@vue/compiler-sfc": "3.6.0-rc.9",
+        "ai": "^7.0.0",
         "better-auth": "^1.7.7",
         "cf": "1.0.0-beta.12",
         "comark": "^0.7.0",
         "db0": "^0.4.1",
+        "drizzle-kit": "1.0.0-rc.4",
         "drizzle-orm": "1.0.0-rc.4",
         "files-sdk": "^2.6.2",
         "h3": "^1.15.11",
@@ -45,7 +47,7 @@
         "knip": "6.39.0",
         "nitropack": "2.13.4",
         "nuxt": "4.6.0",
-        "nuxt-files-sdk": "^0.1.1",
+        "nuxt-files-sdk": "^0.2.0",
         "pkg-pr-new": "0.0.90",
         "publint": "^0.3.25",
         "sherif": "1.13.0",
@@ -70,5 +72,8 @@
         "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
         "vitest": "5.0.3",
         "vite-plus": "1.1.0"
+    },
+    "patchedDependencies": {
+        "nuxt@4.6.0": "patches/nuxt@4.6.0.patch"
     }
 }
