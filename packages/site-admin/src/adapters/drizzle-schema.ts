@@ -17,7 +17,8 @@ import {
     routes,
 } from './drizzle-tables'
 
-const nullDefault = (value: string | null): boolean => value === null || /^\(*\s*null\s*\)*$/iu.test(value)
+const nullDefault = (value: string | null): boolean =>
+    value === null || value.replace(/[\s()]/gu, '').toLowerCase() === 'null'
 const constantDefault = (value: string | null): boolean =>
     value !== null &&
     /^\(*\s*(?:'(?:[^']|'')*'|"(?:[^"]|"")*"|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|0x[\da-f]+|true|false|x'[\da-f]*')\s*\)*$/iu.test(
@@ -155,11 +156,7 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
                 indexed.length &&
                 indexed.every(({ name }) => {
                     const column = columns.find((item) => item.name === name)
-                    return (
-                        column &&
-                        !required.some((item) => item.name === name) &&
-                        constantDefault(column.dflt_value)
-                    )
+                    return column && !required.some((item) => item.name === name) && constantDefault(column.dflt_value)
                 })
             )
                 throw new SiteAdminError(

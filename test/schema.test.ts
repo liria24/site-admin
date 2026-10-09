@@ -186,15 +186,18 @@ describe('application-owned Drizzle migrations', () => {
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
     })
 
-    it.each(['NULL', '(NULL)', '((null))'])('rejects retained NOT NULL DEFAULT %s before any writes', async (value) => {
-        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
-        const db = database()
-        await migrateTestDatabase(db, config)
-        await db.exec(`ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT NOT NULL DEFAULT ${value}`)
-        const admin = createSiteAdmin({ config, database: await testAdapter(db, config) })
-        await expect(admin.initialize()).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
-        expect(await db.prepare('SELECT COUNT(*) AS count FROM site_admin_entries').get()).toEqual({ count: 0 })
-    })
+    it.each(['NULL', '(NULL)', '((null))', '( ( NULL ) )'])(
+        'rejects retained NOT NULL DEFAULT %s before any writes',
+        async (value) => {
+            const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+            const db = database()
+            await migrateTestDatabase(db, config)
+            await db.exec(`ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT NOT NULL DEFAULT ${value}`)
+            const admin = createSiteAdmin({ config, database: await testAdapter(db, config) })
+            await expect(admin.initialize()).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+            expect(await db.prepare('SELECT COUNT(*) AS count FROM site_admin_entries').get()).toEqual({ count: 0 })
+        },
+    )
 
     it.each(["'constant'", '42', 'TRUE'])(
         'rejects retained UNIQUE constant default %s while retaining history',
