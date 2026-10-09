@@ -58,7 +58,9 @@ describe('Site Admin owned dependency namespaces', () => {
             ),
         ).toBe(result)
         expect(calls[0]?.[0]).toBe('better-auth/client/plugins')
-        expect(calls[0]?.[1]).toContain('/site-admin/src/dependency-aliases.ts')
+        expect(calls[0]?.[1]).toBe(
+            fileURLToPath(new URL('../packages/site-admin/src/dependency-aliases.ts', import.meta.url)),
+        )
         expect(calls[0]?.[2]).toEqual({ skipSelf: true })
     })
 
@@ -172,7 +174,7 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, parseMa
     it('delegates only verified native Files exports and generated runtime aliases', async () => {
         const native = {
             modulePath: fileURLToPath(import.meta.resolve('nuxt-files-sdk')),
-            buildDir: '/app/.nuxt',
+            buildDir: resolve('/app/.nuxt'),
             dev: true,
         }
         const node = nativeFilesConfigAliases(native.modulePath)
@@ -180,8 +182,11 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, parseMa
         expect(node['#files-sdk/providers']).toBeTruthy()
         expect(Object.keys(node).some((id) => id.includes('*'))).toBe(false)
         const generated = {
-            '#nuxt-files-sdk/registry': '/app/.nuxt/nuxt-files-sdk/registry.dev.mjs',
-            'nuxt-files-sdk/runtime': '/app/.nuxt/nuxt-files-sdk/runtime.dev.mjs',
+            '#nuxt-files-sdk/registry': resolve(native.buildDir, 'nuxt-files-sdk/registry.dev.mjs').replaceAll(
+                '\\',
+                '/',
+            ),
+            'nuxt-files-sdk/runtime': resolve(native.buildDir, 'nuxt-files-sdk/runtime.dev.mjs').replaceAll('\\', '/'),
         }
         for (const aliases of [node, browser]) {
             const owned = createSiteAdminDependencyAliases()
@@ -205,8 +210,13 @@ export default [adminClient, admin, defineServerAuth, defineFilesConfig, parseMa
             { '#files-sdk/providers': '/foreign/files-sdk/providers.js' },
             { '#files-sdk/private': node['#files-sdk'] },
             { '#files-sdk/*': node['#files-sdk'] },
-            { '#nuxt-files-sdk/registry': '/other/.nuxt/nuxt-files-sdk/registry.dev.mjs' },
-            { 'nuxt-files-sdk/runtime': '/app/.nuxt/nuxt-files-sdk/runtime.mjs' },
+            {
+                '#nuxt-files-sdk/registry': resolve('/other/.nuxt/nuxt-files-sdk/registry.dev.mjs').replaceAll(
+                    '\\',
+                    '/',
+                ),
+            },
+            { 'nuxt-files-sdk/runtime': resolve(native.buildDir, 'nuxt-files-sdk/runtime.mjs').replaceAll('\\', '/') },
             { 'files-sdk/providers': node['#files-sdk/providers'] },
             [{ find: /^#files-sdk\//u, replacement: node['#files-sdk']! }],
             [{ find: /^#files-sdk\/providers$/u, replacement: node['#files-sdk/providers']! }],

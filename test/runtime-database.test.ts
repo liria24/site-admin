@@ -154,8 +154,8 @@ describe('application-owned database resolution', () => {
                 resolve('packages/site-admin/node_modules/drizzle-kit/bin.cjs'),
                 'generate',
                 '--dialect=sqlite',
-                `--schema=${schemaPath}`,
-                `--out=${output}`,
+                `--schema=${schemaPath.replaceAll('\\', '/')}`,
+                `--out=${output.replaceAll('\\', '/')}`,
             ],
             { stdio: 'pipe' },
         )

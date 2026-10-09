@@ -40,8 +40,8 @@ await run(
         join(workspace, 'packages/site-admin/node_modules/drizzle-kit/bin.cjs'),
         'generate',
         '--dialect=sqlite',
-        `--schema=${schemaPath}`,
-        `--out=${migrations}`,
+        `--schema=${schemaPath.replaceAll('\\', '/')}`,
+        `--out=${migrations.replaceAll('\\', '/')}`,
     ],
     { cwd: fixture, timeout: 60_000, env: wranglerEnvironment },
 )
