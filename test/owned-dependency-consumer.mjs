@@ -76,6 +76,13 @@ assert.equal(aliases['#better-auth/dist/index.mjs'], undefined)
 `,
         )
         run(process.execPath, ['check-owned.mjs'])
+        // Exercise the complete semantic test backend through public packed types.
+        const memorySource = (await readFile(new URL('./memory-storage.ts', import.meta.url), 'utf8'))
+            .replaceAll('../packages/site-admin/src/config', '@liria24/site-admin')
+            .replaceAll('../packages/site-admin/src/adapter', '@liria24/site-admin/adapter')
+            .replaceAll('../packages/site-admin/src/server/types', '@liria24/site-admin/server')
+            .replaceAll('../packages/site-admin/src/errors', '@liria24/site-admin')
+        await put('server/memory-storage.ts', memorySource)
         await put(
             'nuxt.config.ts',
             `
@@ -95,15 +102,12 @@ import { defineFilesConfig } from '#nuxt-files-sdk/config'
 import { getProvider } from '#files-sdk/providers'
 import { parseMarkdown } from '#comark/parse'
 import type { BetterAuthOptions } from '#better-auth'
-import type { SiteAdminDatabase } from '@liria24/site-admin/adapter'
+import { createMemoryDatabase } from './server/memory-storage'
 if (!getProvider('memory')) throw new Error('Native owned provider alias failed')
 const files = defineFilesConfig({ storage: { adapter: 'memory' } })
 const auth: Pick<BetterAuthOptions, 'emailAndPassword'> = { emailAndPassword: { enabled: true } }
 void auth; void parseMarkdown
-// This build consumer never initializes database storage.
-const database: SiteAdminDatabase = {
-  bind() { throw new Error('Owned consumer does not initialize storage.') },
-}
+const database = createMemoryDatabase()
 export default defineSiteAdminConfig({
   ...files, assets: {},
   database,
