@@ -27,6 +27,15 @@ interface State {
     refresh(options?: { cachedData?: unknown; signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
 }
 interface Helpers {
+    siteAdminManagementKey(
+        connection: import('../packages/site-admin/src/client').SiteAdminManagementClientOptions,
+        scope: string,
+        operation: string,
+        model: string | null,
+        identity: unknown,
+        locale?: string,
+    ): string
+    siteAdminManagementClientOptions(): import('../packages/site-admin/src/client').SiteAdminManagementClientOptions
     useAiAction(name: string, options: Record<string, unknown>): State & Promise<State>
     useSiteAdminForm(
         model: string,
@@ -43,12 +52,12 @@ interface Helpers {
     useSiteAdminBatch(requests: Record<string, unknown>, options?: Record<string, unknown>): State
     useSiteAdminManagementClient(): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     createNuxtSiteAdminManagementClient(
-        connection: { origin: string; basePath: string; fetch: typeof fetch },
+        connection: { origin: string; basePath: string; fetch: typeof fetch; credentials?: RequestCredentials },
         auth: Vue.MaybeRefOrGetter<string>,
     ): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
 }
 
-const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions = false) => {
+const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions = false, serverFetch = false) => {
     const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
     const root = dirname(requireNuxt.resolve('nuxt/package.json'))
     const script = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
@@ -135,23 +144,39 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions 
         .replace(/^import .*$/gmu, '')
         .replace(/^export const siteAdminAsyncData = createUseAsyncData\(\)\s*$/gmu, '')
         .replace(/^export /gmu, '')
-        .replaceAll('import.meta.server', 'false')
+        .replaceAll('import.meta.server', String(serverFetch))
+    let managementFactories = 0
+    let requestFetches = 0
     const dependencies = {
         ...Object.fromEntries(Object.entries(Vue).filter(([name]) => /^[a-zA-Z_$][a-zA-Z_$0-9]*$/u.test(name))),
         ...runtime,
         hashKey: nativeDependencies.hashKey,
         siteAdminAsyncData: runtime.useAsyncData,
         createSiteAdminClient,
-        createSiteAdminManagementClient,
+        createSiteAdminManagementClient: (...args: Parameters<typeof createSiteAdminManagementClient>) => {
+            managementFactories += 1
+            return createSiteAdminManagementClient(...args)
+        },
         presentSiteAdminData,
         SiteAdminClientError,
         useNuxtApp: () => app,
         useRequestURL: () => new URL('http://site.test'),
+        useRequestFetch: () => {
+            requestFetches += 1
+            return async (
+                url: string,
+                options: RequestInit & { onResponse: (context: { response: Response }) => void },
+            ) => {
+                const response = await request(new URL(url, 'http://site.test'), options)
+                options.onResponse({ response })
+                return response
+            }
+        },
         globalThis: { fetch: request },
     }
     const helpers = new Function(
         ...Object.keys(dependencies),
-        `${generated}; return { ${aiActions ? 'useAiAction,' : ''} useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
+        `${generated}; return { ${aiActions ? 'useAiAction,' : ''} useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminReadModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
     )(...Object.values(dependencies)) as Helpers
     const states = new Map<string, Vue.Ref<unknown>>()
     const formDependencies = {
@@ -171,7 +196,13 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions 
     helpers.useSiteAdminForm = new Function(...Object.keys(formDependencies), `${formSource}; return useSiteAdminForm`)(
         ...Object.values(formDependencies),
     ) as Helpers['useSiteAdminForm']
-    return { app, helpers, refreshSubscribers: () => hooks.get('app:data:refresh')?.size ?? 0 }
+    return {
+        app,
+        helpers,
+        refreshSubscribers: () => hooks.get('app:data:refresh')?.size ?? 0,
+        managementFactories: () => managementFactories,
+        requestFetches: () => requestFetches,
+    }
 }
 const flush = async () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -502,6 +533,143 @@ const modelDescriptor = createSiteAdminDescriptor(
 )
 
 describe('native management AsyncData and mutation invalidation', () => {
+    it('reuses clients within a request and auth scope, separating transport identity and credentials', async () => {
+        const request = async () => Response.json({ items: [], total: 0, limit: 50, offset: 0 })
+        const environment = await nativeEnvironment(request)
+        const auth = Vue.ref('alice')
+        const connection = {
+            origin: 'http://site.test',
+            basePath: '/manage',
+            fetch: request,
+            credentials: 'same-origin' as RequestCredentials,
+        }
+        const a = environment.helpers.createNuxtSiteAdminManagementClient(connection, auth)
+        const b = environment.helpers.createNuxtSiteAdminManagementClient({ ...connection }, auth)
+        await Promise.all([a.listEntries('posts'), b.listEntries('posts')])
+        expect(environment.managementFactories()).toBe(1)
+        auth.value = 'bob'
+        await a.listEntries('posts')
+        expect(environment.managementFactories()).toBe(2)
+        connection.credentials = 'omit'
+        await a.listEntries('posts')
+        expect(environment.managementFactories()).toBe(3)
+        connection.credentials = 'same-origin'
+        await a.listEntries('posts')
+        expect(environment.managementFactories()).toBe(3)
+        environment.helpers.createNuxtSiteAdminManagementClient({ ...connection, fetch: async () => request() }, auth)
+        expect(environment.managementFactories()).toBe(4)
+        const otherRequest = await nativeEnvironment(request)
+        otherRequest.helpers.createNuxtSiteAdminManagementClient(connection, auth)
+        expect(otherRequest.managementFactories()).toBe(1)
+    })
+
+    it('shares one native request-fetch wrapper per SSR app without retaining it across requests', async () => {
+        const request = async () => Response.json(modelDescriptor)
+        const first = await nativeEnvironment(request, false, false, true)
+        const a = first.helpers.siteAdminManagementClientOptions()
+        const b = first.helpers.siteAdminManagementClientOptions()
+        expect(a.fetch).toBe(b.fetch)
+        expect(first.requestFetches()).toBe(1)
+        await first.helpers
+            .createNuxtSiteAdminManagementClient(
+                a as typeof a & { origin: string; basePath: string; fetch: typeof fetch },
+                'alice',
+            )
+            .models()
+        const second = await nativeEnvironment(request, false, false, true)
+        const c = second.helpers.siteAdminManagementClientOptions()
+        expect(c.fetch).not.toBe(a.fetch)
+        expect(second.requestFetches()).toBe(1)
+    })
+
+    it('shares descriptors across parallel lists/entries and ID switches without aborting another consumer', async () => {
+        const descriptorReply = Promise.withResolvers<Response>()
+        let models = 0
+        let modelSignal: AbortSignal | undefined
+        const { helpers } = await nativeEnvironment(async (input, init) => {
+            const url = new URL(String(input))
+            if (url.pathname.endsWith('/models')) {
+                models += 1
+                modelSignal = init?.signal ?? undefined
+                return descriptorReply.promise
+            }
+            const id = url.pathname.split('/').at(-1)!
+            const record = { id, model: 'posts', locale: '', version: 1, slug: id, data: { title: id, image: 'asset' } }
+            return Response.json(
+                url.pathname === '/manage/entries' ? { items: [record], total: 1, limit: 50, offset: 0 } : record,
+            )
+        })
+        const scope = Vue.effectScope()
+        const id = Vue.ref('one')
+        const states = scope.run(() => ({
+            list: helpers.useSiteAdminManagementList('posts', { authScope: 'alice' }),
+            entry: helpers.useSiteAdminManagementEntry('posts', id, { authScope: 'alice' }),
+        }))!
+        await flush()
+        expect(models).toBe(1)
+        id.value = 'two'
+        await flush()
+        expect(modelSignal?.aborted).toBe(false)
+        descriptorReply.resolve(Response.json(modelDescriptor))
+        await flush()
+        expect((states.entry.data.value as { id: string }).id).toBe('two')
+        expect(
+            (states.list.data.value as { items: Array<{ data: { image: { url: string } } }> }).items[0]?.data.image.url,
+        ).toBe('http://site.test/manage/assets/asset/content')
+        expect(models).toBe(1)
+        scope.stop()
+    })
+
+    it('rejects an old auth descriptor reply and loads the new scope without sharing its transport', async () => {
+        const oldReply = Promise.withResolvers<Response>()
+        const actor = Vue.ref('alice')
+        let modelCalls = 0
+        let oldSignal: AbortSignal | undefined
+        const environment = await nativeEnvironment(async (input, init) => {
+            if (String(input).endsWith('/models')) {
+                modelCalls += 1
+                if (modelCalls === 1) {
+                    oldSignal = init?.signal ?? undefined
+                    return oldReply.promise
+                }
+                return Response.json(modelDescriptor)
+            }
+            return Response.json({ items: [{ id: 'one', model: 'posts', data: { title: actor.value } }], total: 1 })
+        })
+        const scope = Vue.effectScope()
+        const state = scope.run(() => environment.helpers.useSiteAdminManagementList('posts', { authScope: actor }))!
+        await flush()
+        expect(modelCalls).toBe(1)
+        actor.value = 'bob'
+        await flush()
+        expect(oldSignal?.aborted).toBe(true)
+        expect(modelCalls).toBe(2)
+        expect(environment.managementFactories()).toBe(2)
+        oldReply.resolve(Response.json({ models: {} }))
+        await flush()
+        expect(state.error.value).toBeUndefined()
+        expect((state.data.value as { items: Array<{ data: { title: string } }> }).items[0]?.data.title).toBe('bob')
+        expect(Object.keys(environment.app.payload.data).every((key) => !key.includes('alice'))).toBe(true)
+        scope.stop()
+    })
+
+    it.each([401, 403, 404])('preserves descriptor status %s in typed management reads', async (status) => {
+        let models = 0
+        const { helpers } = await nativeEnvironment(async (input) => {
+            if (String(input).endsWith('/models')) {
+                models += 1
+                return Response.json({ error: { code: 'DESCRIPTOR_FAILED', message: 'Denied' } }, { status })
+            }
+            return Response.json({ items: [], total: 0, limit: 50, offset: 0 })
+        })
+        const scope = Vue.effectScope()
+        const state = scope.run(() => helpers.useSiteAdminManagementList('posts'))!
+        await flush()
+        expect(state.error.value).toMatchObject({ statusCode: status })
+        expect(state.data.value).toBeUndefined()
+        expect(models).toBe(1)
+        scope.stop()
+    })
     it('uses only explicit management locales while public helpers keep reactive i18n defaults', async () => {
         const urls: URL[] = []
         const { app, helpers } = await nativeEnvironment(async (input) => {
@@ -869,7 +1037,14 @@ describe('native management AsyncData and mutation invalidation', () => {
             helpers.useSiteAdminManagementList('posts', { authScope: 'alice', serialize: false }),
         )!
         await flush()
-        expect(Object.keys(app.payload.data)).toEqual([])
+        const descriptorKey = helpers.siteAdminManagementKey(
+            { origin: 'http://site.test', basePath: '/manage' },
+            'alice',
+            'models',
+            null,
+            null,
+        )
+        expect(Object.keys(app.payload.data)).toEqual([descriptorKey])
         const client = helpers.createNuxtSiteAdminManagementClient(
             { origin: 'http://site.test', basePath: '/manage', fetch: request },
             Vue.ref('alice'),
@@ -878,7 +1053,7 @@ describe('native management AsyncData and mutation invalidation', () => {
         expect(reads).toBe(1)
         await local.refresh()
         expect(reads).toBe(2)
-        expect(Object.keys(app.payload.data)).toEqual([])
+        expect(Object.keys(app.payload.data)).toEqual([descriptorKey])
         const cached = { items: [{ data: { title: 'App cache' } }], total: 1 }
         const ownCache = scope.run(() =>
             helpers.useSiteAdminManagementList('posts', {
