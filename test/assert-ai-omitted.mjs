@@ -1,4 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** Inspect actual bundled/traced Node or Worker output; externalized size probes are insufficient. */
@@ -9,6 +9,7 @@ export async function assertAiOmitted(fixture) {
         if (/(?:^|\/)node_modules\/(?:ai\/|@ai-sdk\/)/u.test(normalized))
             throw new Error('Unused AI package traced into output: ' + name)
         if (!/\.(?:mjs|js|json)$/u.test(name)) continue
+        if (!(await stat(join(fixture, '.output', name))).isFile()) continue
         const source = await readFile(join(fixture, '.output', name), 'utf8')
         bytes += Buffer.byteLength(source)
         if (source.includes('AI_NoOutputGeneratedError') || source.includes('AI_APICallError'))
