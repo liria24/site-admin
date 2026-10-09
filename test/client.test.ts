@@ -298,7 +298,7 @@ describe('Site Admin clients', () => {
         await client.models()
         await client.inspect()
         await client.routeSnapshot()
-        await client.runAIAction('entry', 'suggest/title', { instruction: 'Shorten' })
+        await client.runAiAction('suggest/title', { props: { instruction: 'Shorten' } })
         await client.publishDue()
         await client.runAssetGC()
         expect(urls).toEqual([
@@ -308,7 +308,7 @@ describe('Site Admin clients', () => {
             '/api/site-admin/models',
             '/api/site-admin/diagnostics',
             '/api/site-admin/routes',
-            '/api/site-admin/entries/entry/ai/suggest%2Ftitle',
+            '/api/site-admin/ai/actions/suggest%2Ftitle',
             '/api/site-admin/tasks/publish-due',
             '/api/site-admin/tasks/asset-gc',
         ])

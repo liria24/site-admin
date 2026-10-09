@@ -21,10 +21,16 @@ it('infers high-level form, management list, field and successful save types fro
     await writeFile(
         join(directory, 'config.ts'),
         `import { array, defineSiteAdminConfig, file, image, images, markdown, object, text } from '@liria24/site-admin'
+import { Output } from 'ai'
+import { z } from 'zod'
 export default defineSiteAdminConfig({ models: {
   posts: { fields: { title: text({ required: true }), copy: markdown({ required: true }), image: image(), gallery: images(), sections: array(object({ attachment: file() })) } },
   authors: { fields: { name: text({ required: true }) } },
-}, ai: { models: { posts: { publication: ({ entry }) => ({ data: entry.data }), correct: ({ entry }) => ({ data: entry.data }) } } } })
+}, ai: { actions: {
+  publication: { type: 'text-generation', props: { mode: z.enum(['automatic', 'manual']) }, prompt: ({ mode }) => mode, output: Output.object({ schema: z.object({ data: z.object({ title: z.string().optional(), copy: z.string().optional() }), slug: z.string().optional() }) }) },
+  correct: { type: 'text-generation', props: { content: z.string(), fields: z.array(z.enum(['copy'])) }, prompt: ({ content }) => content, output: Output.object({ schema: z.object({ data: z.object({ copy: z.string() }) }) }) },
+  plain: { type: 'text-generation', props: {}, prompt: () => 'Plain' },
+} } })
 `,
     )
     await writeFile(
@@ -61,7 +67,7 @@ const assetUrl: string | undefined = editor.form.state.values.image?.url
 const nestedUrl: string | undefined = editor.form.state.values.sections?.[0]?.attachment?.url
 editor.form.setFieldValue('title', 'Typed')
 editor.form.setFieldValue('image', { id: 'asset', url: '/manage/assets/asset/content' })
-editor.ai.proofread(['copy'])
+editor.ai.run('correct', { content: editor.form.state.values.copy, fields: ['copy'] })
 editor.ai.run('publication', { mode: 'automatic' })
 editor.ai.apply({ fields: ['title'], slug: false })
 const snapshot = editor.draft.serialize()
@@ -70,7 +76,11 @@ const published = await editor.publish()
 const scheduled = await editor.schedule('2099-01-01T00:00:00Z')
 if (published && 'data' in published) { const title: string = published.data.title; void title }
 // @ts-expect-error Configured action names are inferred for this model.
-editor.ai.run('unconfigured')
+editor.ai.run('unconfigured', {})
+// @ts-expect-error Native form props preserve required input types.
+editor.ai.run('publication', { mode: 1 })
+// @ts-expect-error Plain text output cannot be applied as a data proposal.
+editor.ai.run('plain', {})
 // @ts-expect-error The app selects descriptor-backed fields to apply.
 editor.ai.apply({ fields: ['missing'] })
 // @ts-expect-error Draft serialization returns raw asset references, without presentation URLs.
@@ -96,7 +106,7 @@ editor.form.setFieldValue('title', 123)
 // @ts-expect-error Unknown fields fail.
 editor.form.setFieldValue('missing', 'x')
 // @ts-expect-error AI field selection follows this model.
-editor.ai.proofread(['name'])
+editor.ai.run('correct', { content: copy, fields: ['name'] })
 // @ts-expect-error Raw initialization must not accept transform.
 await useSiteAdminForm('posts', { transform: () => ({}) })
 // @ts-expect-error Raw initialization must not accept pick.

@@ -1,72 +1,41 @@
-import { describe, expect, it } from 'vitest'
-
+import { describe, expect, it, vi } from 'vitest'
 import { createSiteAdminManagementClient } from '../packages/site-admin/src/client'
 
-describe('built-in AI management client', () => {
-    it('serializes typed unsaved metadata and proofreading requests with same-origin credentials', async () => {
-        const calls: Array<{ body: unknown; method: string; url: string }> = []
-        const client = createSiteAdminManagementClient<
-            Record<string, { body: string; summary: string; title: string }>
-        >({
+describe('native named AI management client', () => {
+    it('posts explicit props with native cancellation and same-origin credentials without invalidating saved data', async () => {
+        const onMutation = vi.fn()
+        const calls: Array<{ body: unknown; url: string }> = []
+        const signal = new AbortController().signal
+        const proposal = { data: { title: 'Proposed' }, issues: [] }
+        const client = createSiteAdminManagementClient({
             basePath: '/manage/',
+            onMutation,
             fetch: async (input, init) => {
                 expect(init?.credentials).toBe('same-origin')
-                expect(new Headers(init?.headers).get('content-type')).toBe('application/json')
-                calls.push({
-                    body: JSON.parse(String(init?.body)) as unknown,
-                    method: init!.method!,
-                    url: String(input),
-                })
-                return Response.json({ data: { title: 'Proposed title' }, issues: [], slug: 'proposed' })
-            },
-        })
-        const input = { data: { title: 'Manual', summary: '' }, generate: { excerpt: false, slug: true }, slug: '' }
-        expect(await client.generateMetadata('posts/example', input)).toEqual({
-            data: { title: 'Proposed title' },
-            issues: [],
-            slug: 'proposed',
-        })
-        await client.proofreadDraft('posts/example', { data: { body: 'Draf' }, fields: ['body'] })
-        expect(calls).toEqual([
-            { body: input, method: 'POST', url: '/manage/models/posts%2Fexample/ai/metadata' },
-            {
-                body: { data: { body: 'Draf' }, fields: ['body'] },
-                method: 'POST',
-                url: '/manage/models/posts%2Fexample/ai/proofread',
-            },
-        ])
-    })
-
-    it('returns the whole proposed draft and validation issues without sending a save or publication request', async () => {
-        const urls: string[] = []
-        const proposal = {
-            data: { body: 'Original body', title: 'Proofread title' },
-            issues: [{ message: 'Required.', path: 'summary' }],
-        }
-        const client = createSiteAdminManagementClient<Record<string, Record<string, unknown>>>({
-            fetch: async (input) => {
-                urls.push(String(input))
+                expect(init?.signal).toBe(signal)
+                expect(init?.method).toBe('POST')
+                calls.push({ url: String(input), body: JSON.parse(String(init?.body)) })
                 return Response.json(proposal)
             },
         })
-        expect(await client.proofreadDraft('posts', { data: { body: 'Original body', title: 'Draf' } })).toEqual(
+        expect(await client.runAiAction('correct/title', { props: { content: 'Manual' } }, { signal })).toEqual(
             proposal,
         )
-        expect(urls).toEqual(['/api/site-admin/models/posts/ai/proofread'])
+        expect(calls).toEqual([{ url: '/manage/ai/actions/correct%2Ftitle', body: { props: { content: 'Manual' } } }])
+        expect(onMutation).not.toHaveBeenCalled()
+        expect(client).not.toHaveProperty('generateMetadata')
+        expect(client).not.toHaveProperty('proofreadDraft')
+        expect(client).not.toHaveProperty('runAIAction')
     })
-
-    it('preserves AI error codes, status and issues through the existing client error transport', async () => {
-        const client = createSiteAdminManagementClient({
-            fetch: async () =>
-                Response.json(
-                    { error: { code: 'SITE_ADMIN_AI_OUTPUT_INVALID', message: 'AI returned an invalid response.' } },
-                    { status: 502 },
-                ),
+    it('preserves native action errors without a save or retry', async () => {
+        const request = vi.fn(async () =>
+            Response.json({ error: { code: 'SITE_ADMIN_AI_UNAVAILABLE', message: 'Unavailable' } }, { status: 503 }),
+        )
+        const client = createSiteAdminManagementClient({ fetch: request })
+        await expect(client.runAiAction('metadata', { props: {} })).rejects.toMatchObject({
+            code: 'SITE_ADMIN_AI_UNAVAILABLE',
+            status: 503,
         })
-        await expect(client.generateMetadata('posts', { data: {}, generate: {} })).rejects.toMatchObject({
-            code: 'SITE_ADMIN_AI_OUTPUT_INVALID',
-            message: 'AI returned an invalid response.',
-            status: 502,
-        })
+        expect(request).toHaveBeenCalledOnce()
     })
 })

@@ -3,7 +3,6 @@ export type {
     InferModelData,
     InferPublicModelData,
     InferSiteAdminModels,
-    InferSiteAdminAIActions,
     InferSiteAdminFormModels,
     InferSiteAdminPublicModels,
     ModelDefinition,

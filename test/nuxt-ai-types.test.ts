@@ -43,6 +43,7 @@ declare module '#imports' {
         `import { ref } from 'vue'
 import { useAiAction } from './client'
 import { runAiAction } from '@liria24/site-admin/nuxt/server'
+import { createSiteAdminManagementClient } from '@liria24/site-admin/client'
 declare const event: Parameters<typeof runAiAction>[0]
 const content = ref('Typed')
 const { data, status, error, execute } = await useAiAction('proofread', { props: () => ({ content: content.value }), immediate: false })
@@ -52,6 +53,12 @@ const controller = new AbortController()
 const executed: void = await execute({ signal: controller.signal, dedupe: 'cancel' })
 const server = await runAiAction(event, 'proofread', { props: { content: 'Typed' } })
 const serverContent: string = server.content
+const client = createSiteAdminManagementClient()
+const directContent: string = (await client.runAiAction('proofread', { props: { content: 'Typed' } })).content
+// @ts-expect-error Direct clients preserve configured action names.
+client.runAiAction('unknown', { props: {} })
+// @ts-expect-error Direct clients preserve native schema input.
+client.runAiAction('proofread', { props: { content: 1 } })
 const plain = await useAiAction('plain', { props: { content: 'Typed' }, server: false })
 const text: string | undefined = plain.data.value
 const choice = await useAiAction('classify', { props: { content: 'Typed' } })
@@ -72,7 +79,7 @@ const wrong: string = data.value
 runAiAction(event, 'unknown', { props: {} })
 // @ts-expect-error server props use schema input
 runAiAction(event, 'proofread', { props: { content: 1 } })
-void [output, nativeStatus, error, executed, serverContent, text, category, wrong]
+void [output, nativeStatus, error, executed, serverContent, directContent, text, category, wrong]
 `,
     )
     await writeFile(

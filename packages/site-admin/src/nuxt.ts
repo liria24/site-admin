@@ -174,18 +174,7 @@ const localeOptions = (nuxt: Nuxt): { defaultLocale?: string; strategy: string; 
 }
 
 const accessControl = (config: SiteAdminConfig): string => {
-    const modelActions = [
-        'ai',
-        'create',
-        'delete',
-        'publish',
-        'prune',
-        'readDraft',
-        'restore',
-        'schedule',
-        'sort',
-        'update',
-    ]
+    const modelActions = ['create', 'delete', 'publish', 'prune', 'readDraft', 'restore', 'schedule', 'sort', 'update']
     const assetActions = ['delete', 'gc', 'read', 'upload']
     const systemActions = ['diagnostics', 'publishDue']
     const resources = {
@@ -609,7 +598,6 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
 
         const aiEnabled = options.ai ?? Boolean(domainConfig?.ai)
         const namedAiActions = aiEnabled && Boolean(Object.keys(domainConfig?.ai?.actions ?? {}).length)
-        const legacyAiModel = aiEnabled && Boolean(domainConfig?.ai?.model)
         const cmsConfigured =
             !domainConfig ||
             Boolean(Object.keys(domainConfig.models).length || domainConfig.assets || domainConfig.database)
@@ -770,7 +758,7 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
 import { useServerHooks } from 'nuxt/server'
 ${authImport}
 ${filesImport}
-${namedAiActions || legacyAiModel ? `import { ${[namedAiActions ? 'executeSiteAdminAiAction' : '', legacyAiModel ? 'createSiteAdminAI' : ''].filter(Boolean).join(', ')} } from '@liria24/site-admin/ai'` : ''}
+${namedAiActions ? "import { executeSiteAdminAiAction } from '@liria24/site-admin/ai'" : ''}
 import { createSiteAdminDatabaseScope } from '@liria24/site-admin/runtime/database'
 import inputConfig from ${JSON.stringify(normalize(configPath))}
 import { resolveSiteAdminConfig } from '@liria24/site-admin/config-resolution'
@@ -804,9 +792,7 @@ export default defineNitroPlugin((nitroApp) => {
     let siteAdmin = instances.get(database)
     if (siteAdmin) return siteAdmin
     siteAdmin = createSiteAdmin({
-    aiEnabled: ${JSON.stringify(aiEnabled)},
     authorize,
-    ${legacyAiModel ? 'aiExecution: (context) => createSiteAdminAI(domainConfig.ai.model, context).generateText,' : ''}
     config: { ...domainConfig, assets: ${JSON.stringify(domainConfig.assets)} },
     database,
     ${filesOption}

@@ -38,11 +38,11 @@ describe('common Site Admin configuration', () => {
         expect(resolved.ai.actions.proofread.props.content).toBe(schema)
         expect(resolved.ai.actions.proofread.prompt({ content: 'Typed' })).toBe('Typed')
     })
-    const action = () => ({ data: { title: 'server-only suggestion' } })
+    const action = () => 'server-only suggestion'
     const config = defineSiteAdminConfig({
         storage: { content: { adapter: 'fs', config: { root: './.data/files' } } },
         assets: { maxUploadSize: 100 },
-        ai: { models: { posts: { suggest: action } } },
+        ai: { actions: { suggest: { type: 'text-generation', props: {}, prompt: action } } },
         models: { posts: { fields: { title: text({ required: true, default: 'base' }) } } },
         $development: { assets: { maxUploadSize: 200 } },
         $production: {
@@ -63,7 +63,7 @@ describe('common Site Admin configuration', () => {
     ] as const)('resolves the entire configuration for %j', (environments, maxUploadSize) => {
         const resolved = resolveSiteAdminConfig(config, environments)
         expect(resolved.assets?.maxUploadSize).toBe(maxUploadSize)
-        expect(resolved.ai?.models?.posts?.suggest).toBe(action)
+        expect(resolved.ai?.actions?.suggest.prompt).toBe(action)
         expect(Object.keys(resolved).some((key) => key.startsWith('$'))).toBe(false)
         expect(resolved.storage).toEqual(config.storage)
     })

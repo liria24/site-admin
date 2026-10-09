@@ -1,7 +1,6 @@
 import { SiteAdminError } from '../errors'
 import { projectStoredFields } from '../stored-data'
 import { projectMarkdownListSummary } from '../markdown/list-summary'
-import type { SiteAdminMetadataInput, SiteAdminProofreadInput } from '../ai'
 import type { SiteAdmin } from './site-admin'
 
 const jsonResponse = (value: unknown, init: ResponseInit = {}): Response => {
@@ -135,22 +134,6 @@ const handleManagementRequestInner = async <Context>(
             return entry
         }
         if (method === 'GET' && path.length === 1 && path[0] === 'models') return json(siteAdmin.descriptorFor(actor))
-        if (
-            method === 'POST' &&
-            path.length === 4 &&
-            path[0] === 'models' &&
-            path[2] === 'ai' &&
-            (path[3] === 'metadata' || path[3] === 'proofread')
-        ) {
-            const model = requiredString(path[1], 'model')
-            siteAdmin.assertPermission(actor, 'model', 'ai', model)
-            const body = await bodyObject(request)
-            return json(
-                path[3] === 'metadata'
-                    ? await siteAdmin.generateMetadata(model, body as unknown as SiteAdminMetadataInput, context)
-                    : await siteAdmin.proofreadDraft(model, body as unknown as SiteAdminProofreadInput, context),
-            )
-        }
         if (method === 'GET' && path.length === 1 && path[0] === 'diagnostics') {
             siteAdmin.assertPermission(actor, 'system', 'diagnostics')
             return json(await siteAdmin.inspect())
@@ -358,21 +341,6 @@ const handleManagementRequestInner = async <Context>(
                     throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"sortOrder" must be a number or null.')
                 }
                 return json(await siteAdmin.setSortOrder(id, order, expectedVersion(body.expectedVersion)))
-            }
-            if (method === 'POST' && path.length === 4 && path[2] === 'ai') {
-                await entryFor(id, 'ai')
-                await entryFor(id, 'readDraft')
-                return json(
-                    await siteAdmin.runAIAction(id, requiredString(path[3], 'action'), await bodyObject(request), {
-                        request,
-                        ...(context && typeof context === 'object'
-                            ? {
-                                  platformContext:
-                                      isObject(context) && isObject(context.context) ? context.context : context,
-                              }
-                            : {}),
-                    }),
-                )
             }
             if (method === 'POST' && path.length === 5 && path[2] === 'revisions' && path[4] === 'restore') {
                 await entryFor(id, 'restore')
