@@ -17,6 +17,13 @@ import {
     routes,
 } from './drizzle-tables'
 
+const nullDefault = (value: string | null): boolean => value === null || /^\(*\s*null\s*\)*$/iu.test(value)
+const constantDefault = (value: string | null): boolean =>
+    value !== null &&
+    /^\(*\s*(?:'(?:[^']|'')*'|"(?:[^"]|"")*"|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|0x[\da-f]+|true|false|x'[\da-f]*')\s*\)*$/iu.test(
+        value,
+    )
+
 export function contentTables(database: Database, config: SiteAdminConfig) {
     validateContentNames(config)
     return Object.fromEntries(
@@ -125,12 +132,40 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
             columns.some(
                 (column) =>
                     !required.some((item) => item.name === column.name) &&
-                    (column.pk || (column.notnull && column.dflt_value === null)),
+                    (column.pk || (column.notnull && nullDefault(column.dflt_value))),
             )
         )
             throw new SiteAdminError(
                 'SITE_ADMIN_MIGRATION_REQUIRED',
                 `Database table "${expected.name}" does not match the generated schema. Generate and apply its Drizzle migrations explicitly.`,
             )
+        // An omitted constant in a retained UNIQUE key makes the second revision fail.
+        // NULL defaults remain compatible with SQLite's distinct-NULL UNIQUE behavior.
+        const indexes = await queryRows<{ name: string; unique: number; partial: number }>(
+            database,
+            `PRAGMA index_list(${JSON.stringify(expected.name)})`,
+        )
+        for (const index of indexes) {
+            if (!index.unique || index.partial) continue
+            const indexed = await queryRows<{ name: string | null }>(
+                database,
+                `PRAGMA index_info(${JSON.stringify(index.name)})`,
+            )
+            if (
+                indexed.length &&
+                indexed.every(({ name }) => {
+                    const column = columns.find((column) => column.name === name)
+                    return (
+                        column &&
+                        !required.some((required) => required.name === name) &&
+                        constantDefault(column.dflt_value)
+                    )
+                })
+            )
+                throw new SiteAdminError(
+                    'SITE_ADMIN_MIGRATION_REQUIRED',
+                    `Retained UNIQUE columns in "${expected.name}" prevent active-column inserts. Generate and apply its Drizzle migrations explicitly.`,
+                )
+        }
     }
 }

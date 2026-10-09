@@ -168,6 +168,7 @@ describe('application-owned Drizzle migrations', () => {
         await db.exec("ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT NOT NULL DEFAULT 'preserved'")
         const admin = createSiteAdmin({ config, database: await testAdapter(db, config) })
         await admin.createEntry('posts', { data: { title: 'new' } })
+        await admin.createEntry('posts', { data: { title: 'second' } })
         expect(await db.prepare('SELECT legacy FROM site_admin_content_posts').get()).toEqual({ legacy: 'preserved' })
 
         const blocked = database()
@@ -183,5 +184,47 @@ describe('application-owned Drizzle migrations', () => {
         await expect(
             createSiteAdmin({ config, database: await testAdapter(constrained, config) }).initialize(),
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+    })
+
+    it.each(['NULL', '(NULL)', '((null))'])('rejects retained NOT NULL DEFAULT %s before any writes', async (value) => {
+        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+        const db = database()
+        await migrateTestDatabase(db, config)
+        await db.exec(`ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT NOT NULL DEFAULT ${value}`)
+        const admin = createSiteAdmin({ config, database: await testAdapter(db, config) })
+        await expect(admin.initialize()).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+        expect(await db.prepare('SELECT COUNT(*) AS count FROM site_admin_entries').get()).toEqual({ count: 0 })
+    })
+
+    it.each(["'constant'", '42', 'TRUE'])(
+        'rejects retained UNIQUE constant default %s while retaining history',
+        async (value) => {
+            const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+            const db = database()
+            await migrateTestDatabase(db, config)
+            await db.exec(`ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT DEFAULT ${value}`)
+            await db.exec('CREATE UNIQUE INDEX retained_unique ON site_admin_content_posts(legacy)')
+            await expect(
+                createSiteAdmin({ config, database: await testAdapter(db, config) }).initialize(),
+            ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+            expect(await db.prepare('SELECT COUNT(*) AS count FROM site_admin_entries').get()).toEqual({ count: 0 })
+        },
+    )
+
+    it('permits retained nullable UNIQUE columns and a constant key paired with revision ID', async () => {
+        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+        const db = database()
+        await migrateTestDatabase(db, config)
+        await db.exec("ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT DEFAULT 'NULL'")
+        await db.exec('ALTER TABLE site_admin_content_posts ADD COLUMN optional TEXT DEFAULT (NULL)')
+        await db.exec('CREATE UNIQUE INDEX retained_nullable ON site_admin_content_posts(optional)')
+        await db.exec('CREATE UNIQUE INDEX retained_revision ON site_admin_content_posts(legacy,revision_id)')
+        const admin = createSiteAdmin({ config, database: await testAdapter(db, config) })
+        await admin.createEntry('posts', { data: { title: 'one' } })
+        await admin.createEntry('posts', { data: { title: 'two' } })
+        expect(await db.prepare('SELECT legacy,optional FROM site_admin_content_posts').all()).toEqual([
+            { legacy: 'NULL', optional: null },
+            { legacy: 'NULL', optional: null },
+        ])
     })
 })
