@@ -101,7 +101,7 @@ export const createMarkdownContent = (
             get: async (key) => {
                 const item = items.get(key)
                 if (!item) return null
-                return parsed(item._siteAdmin.id) ?? raw.get(key)
+                return parsed(item['_siteAdmin'].id) ?? raw.get(key)
             },
         },
     })

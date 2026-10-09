@@ -54,7 +54,7 @@ describe('public entry SEO payload', () => {
         }
         expect((await client.list('posts')).map(({ slug }) => slug).sort()).toEqual(['one', 'two'])
         const parsed = plugin.mock.calls.length
-        expect((await (await admin.content('posts')).list()).map(({ data }) => data.title).sort()).toEqual([
+        expect((await (await admin.content('posts')).list()).map(({ data }) => String(data.title)).sort()).toEqual([
             'one',
             'two',
         ])
