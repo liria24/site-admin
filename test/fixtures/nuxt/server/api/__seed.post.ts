@@ -5,7 +5,11 @@ export default defineEventHandler(async (event) => {
     const admin = await useSiteAdmin(event)
     if ((await admin.listEntries('posts')).length === 0) {
         const en = await admin.createEntry('posts', {
-            data: { description: 'English description', title: 'Hello' },
+            data: {
+                description: 'English description',
+                title: 'Hello',
+                body: '---\nprivate: FULL_SSR_FRONTMATTER\n---\nNative summary\n\n<!-- more -->\n\nFULL_SSR_BODY_SENTINEL',
+            },
             locale: 'en',
             translationGroup: 'hello',
         })

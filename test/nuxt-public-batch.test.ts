@@ -18,6 +18,7 @@ interface ResolvedRequest {
     operation: 'list' | 'entry'
     model: string
     slug: string | null
+    markdown?: 'summary'
 }
 interface BatchItem {
     data: PublicEntry[] | PublicEntry | null
@@ -27,7 +28,8 @@ interface BatchHelpers {
     snapshot(
         requests: Record<
             string,
-            { list: string } | { entry: string; slugOrId: string | ReturnType<typeof ref<string>> | (() => string) }
+            | { list: string; markdown?: 'full' | 'summary' }
+            | { entry: string; slugOrId: string | ReturnType<typeof ref<string>> | (() => string) }
         >,
     ): ResolvedRequest[]
     key(
@@ -55,6 +57,35 @@ const helpers = initialize(SiteAdminClientError, toValue)
 const document = (model: string, id: string) => ({ data: { _siteAdmin: { id, model, slug: id }, title: id } })
 
 describe('generated public batch transport', () => {
+    it('captures list summary mode in transport and native keys without changing full/detail requests', async () => {
+        const modes: Array<string | null> = []
+        const client = createSiteAdminClient({
+            fetch: async (input) => {
+                const url = new URL(String(input), 'http://localhost')
+                modes.push(url.searchParams.get('markdown'))
+                return Response.json(
+                    url.pathname.endsWith('/entry') ? document('posts', 'entry') : [document('posts', 'list')],
+                )
+            },
+        })
+        const full = helpers.snapshot({ posts: { list: 'posts' }, featured: { entry: 'posts', slugOrId: 'entry' } })
+        const summary = helpers.snapshot({
+            posts: { list: 'posts', markdown: 'summary' },
+            featured: { entry: 'posts', slugOrId: 'entry' },
+        })
+        expect(helpers.key({}, full)).not.toBe(helpers.key({}, summary))
+        expect(helpers.key({}, full)).toBe(
+            helpers.key(
+                {},
+                helpers.snapshot({
+                    posts: { list: 'posts', markdown: 'full' },
+                    featured: { entry: 'posts', slugOrId: 'entry' },
+                }),
+            ),
+        )
+        await helpers.resolve(client, summary, undefined, new AbortController().signal)
+        expect(modes).toEqual([null, 'summary'])
+    })
     it('keeps successful requests, serializes item failures, and distinguishes a missing entry', async () => {
         const signal = new AbortController().signal
         const calls: Array<{ path: string; signal: AbortSignal | null | undefined }> = []

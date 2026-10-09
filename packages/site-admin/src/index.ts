@@ -20,6 +20,7 @@ export type {
     ResolvedSiteAdminConfig,
     SiteAdminModelAction,
     SiteAdminMarkdownDocument,
+    SiteAdminMarkdownSummary,
     SiteAdminRoleDefinition,
     SiteAdminSystemAction,
 } from './config'

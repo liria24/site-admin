@@ -71,4 +71,107 @@ describe('public client Markdown contract', () => {
             await database.dispose()
         }
     })
+
+    it('projects nested and related list summaries without body/frontmatter/plugin copies and preserves the full cache', async () => {
+        const database = createDatabase(nodeSqlite({ name: ':memory:' }))
+        const configured = defineSiteAdminConfig({
+            ...config,
+            markdown: {
+                plugins: [
+                    {
+                        name: 'source-copy',
+                        post(state) {
+                            state.tree.meta.rawSource = state.markdown
+                        },
+                    },
+                ],
+            },
+            models: { ...config.models, posts: { ...config.models.posts, displayFields: { description: 'body' } } },
+        })
+        try {
+            const admin = await createMigratedTestAdmin({ config: configured, database })
+            const source = (label: string) =>
+                `---\nprivate: FULL_FRONTMATTER_${label}\n---\n${label} summary\n\n<!-- more -->\n\nFULL_BODY_${label}`
+            const author = await admin.createEntry('authors', { data: { name: 'Author', bio: source('AUTHOR') } })
+            await admin.publishEntry(author.id, { expectedVersion: author.version })
+            const post = await admin.createEntry('posts', {
+                data: {
+                    title: 'Post',
+                    body: source('POST'),
+                    sections: [{ body: source('NESTED') }],
+                    author: author.id,
+                },
+            })
+            await admin.publishEntry(post.id, { expectedVersion: post.version })
+            const client = createSiteAdminClient<
+                InferSiteAdminPublicModels<typeof configured>,
+                InferSiteAdminPublicModels<typeof configured, 'summary'>
+            >({
+                origin: 'http://localhost',
+                fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
+            })
+            const content = await admin.content('posts')
+            const cached = await content.list()
+            const before = JSON.stringify(cached)
+            const response = await handlePublicRequest(
+                admin,
+                new Request('http://localhost/api/content/posts?markdown=summary'),
+            )
+            const payload = await response.text()
+            expect(response.ok).toBe(true)
+            expect(payload).not.toContain('FULL_BODY_')
+            expect(payload).not.toContain('FULL_FRONTMATTER_')
+            expect(payload).not.toContain('rawSource')
+            expect(JSON.stringify(await content.list())).toBe(before)
+            const [item] = await client.list('posts', { markdown: 'summary' })
+            expect(item!.data.body).toEqual({
+                nodes: [['p', {}, 'POST summary']],
+                frontmatter: {},
+                meta: { summary: [['p', {}, 'POST summary']] },
+            })
+            expect(item!.data.sections[0]!.body.nodes).toEqual([['p', {}, 'NESTED summary']])
+            const relatedNodes: import('comark').Node[] | undefined = item!.data.author?.data.bio?.nodes
+            expect(relatedNodes).toEqual([['p', {}, 'AUTHOR summary']])
+            expect(item!.seo?.description).toBe('POST summary')
+            item!.data.body.nodes.push(['p', {}, 'local mutation'])
+            expect(JSON.stringify(await client.get('posts', post.id))).toContain('FULL_BODY_POST')
+            expect(JSON.stringify(await client.list('posts'))).toContain('FULL_BODY_POST')
+            expect(JSON.stringify(await content.list())).toBe(before)
+            expect(
+                (await handlePublicRequest(admin, new Request('http://localhost/api/content/posts?markdown=invalid')))
+                    .status,
+            ).toBe(400)
+        } finally {
+            await database.dispose()
+        }
+    })
+
+    it('returns empty rendering nodes when summary is disabled, including related Markdown', async () => {
+        const database = createDatabase(nodeSqlite({ name: ':memory:' }))
+        try {
+            const admin = await createMigratedTestAdmin({
+                config: { ...config, markdown: { summary: { enabled: false } } },
+                database,
+            })
+            const author = await admin.createEntry('authors', { data: { name: 'Author', bio: 'FULL_DISABLED_AUTHOR' } })
+            await admin.publishEntry(author.id, { expectedVersion: author.version })
+            const post = await admin.createEntry('posts', {
+                data: { title: 'Post', body: 'FULL_DISABLED_POST', sections: [], author: author.id },
+            })
+            await admin.publishEntry(post.id, { expectedVersion: post.version })
+            const response = await handlePublicRequest(
+                admin,
+                new Request('http://localhost/api/content/posts?markdown=summary'),
+            )
+            const payload = await response.text()
+            expect(payload).not.toContain('FULL_DISABLED_')
+            const [item] = JSON.parse(payload) as Array<{
+                data: { body: { nodes: unknown[] }; author: { data: { bio: { nodes: unknown[] } } } }
+            }>
+            expect(item!.data.body.nodes).toEqual([])
+            expect(item!.data.author.data.bio.nodes).toEqual([])
+        } finally {
+            await database.dispose()
+        }
+    })
 })

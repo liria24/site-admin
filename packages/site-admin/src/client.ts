@@ -33,6 +33,9 @@ export type SiteAdminNamedAiActions = SiteAdminClientRegistry extends { namedAiA
 export type SiteAdminPublicModels = SiteAdminClientRegistry extends { publicModels: infer Models }
     ? Models
     : Record<string, PublicEntry>
+export type SiteAdminPublicSummaryModels = SiteAdminClientRegistry extends { publicSummaryModels: infer Models }
+    ? Models
+    : Record<string, PublicEntry>
 export type SiteAdminManagementModels = SiteAdminClientRegistry extends { managementModels: infer Models }
     ? Models
     : Record<string, Record<string, unknown>>
@@ -104,6 +107,10 @@ export interface SiteAdminRequestOptions {
 export interface PublicListOptions {
     locale?: string
     signal?: AbortSignal
+}
+
+export interface PublicMarkdownListOptions extends PublicListOptions {
+    markdown?: 'full' | 'summary'
 }
 
 export interface PublicRouteResult {
@@ -252,7 +259,7 @@ const entry = <Value>(document: { data: Record<string, unknown> } | null): Value
     return { ..._siteAdmin, data } as Value
 }
 
-export interface SiteAdminClient<Models = SiteAdminPublicModels> {
+export interface SiteAdminClient<Models = SiteAdminPublicModels, SummaryModels = SiteAdminPublicSummaryModels> {
     assetUrl(id: string): string
     get<Name extends ModelName<Models>>(
         model: Name,
@@ -260,7 +267,14 @@ export interface SiteAdminClient<Models = SiteAdminPublicModels> {
         options?: PublicListOptions,
     ): Promise<Models[Name] | null>
     get<Value>(model: ModelName<Models>, slugOrId: string, options?: PublicListOptions): Promise<Value | null>
-    list<Name extends ModelName<Models>>(model: Name, options?: PublicListOptions): Promise<Models[Name][]>
+    list<Name extends ModelName<Models> & keyof SummaryModels>(
+        model: Name,
+        options: PublicMarkdownListOptions & { markdown: 'summary' },
+    ): Promise<SummaryModels[Name][]>
+    list<Name extends ModelName<Models>>(
+        model: Name,
+        options?: PublicListOptions & { markdown?: 'full' },
+    ): Promise<Models[Name][]>
     list<Value>(model: ModelName<Models>, options?: PublicListOptions): Promise<Value[]>
     models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
     resolveRoute(path: string, options?: PublicListOptions): Promise<PublicRouteResult | null>
@@ -268,9 +282,10 @@ export interface SiteAdminClient<Models = SiteAdminPublicModels> {
 
 export const createSiteAdminClient = <
     Models extends { [Name in keyof Models]: PublicEntry<unknown> } = SiteAdminPublicModels,
+    SummaryModels = SiteAdminPublicSummaryModels,
 >(
     options: SiteAdminClientOptions = {},
-): SiteAdminClient<Models> => {
+): SiteAdminClient<Models, SummaryModels> => {
     const { base, json } = transport(options, '/api/content')
     return {
         assetUrl: (id) => `${base}/_assets/${encodeURIComponent(id)}`,
@@ -281,12 +296,17 @@ export const createSiteAdminClient = <
                 { locale: requestOptions.locale },
                 true,
             ).then(entry),
-        list: (model: ModelName<Models>, requestOptions: PublicListOptions = {}) =>
-            json<Array<{ data: Record<string, unknown> }>>(
+        list: (model: ModelName<Models>, requestOptions?: PublicMarkdownListOptions) => {
+            const listOptions = requestOptions ?? {}
+            return json<Array<{ data: Record<string, unknown> }>>(
                 `/${encodeURIComponent(model)}`,
-                { method: 'GET', ...(requestOptions.signal ? { signal: requestOptions.signal } : {}) },
-                { locale: requestOptions.locale },
-            ).then((items) => (items ?? []).map((item) => entry(item)!)),
+                { method: 'GET', ...(listOptions.signal ? { signal: listOptions.signal } : {}) },
+                {
+                    locale: listOptions.locale,
+                    ...(listOptions.markdown === 'summary' ? { markdown: 'summary' } : {}),
+                },
+            ).then((items) => (items ?? []).map((item) => entry(item)!))
+        },
         models: (requestOptions = {}) =>
             json<SiteAdminDescriptor>('/models', {
                 method: 'GET',
@@ -299,7 +319,7 @@ export const createSiteAdminClient = <
                 { locale: requestOptions.locale, path },
                 true,
             ),
-    } as SiteAdminClient<Models>
+    } as SiteAdminClient<Models, SummaryModels>
 }
 
 export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
