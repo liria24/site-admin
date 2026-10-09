@@ -154,10 +154,10 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
             if (
                 indexed.length &&
                 indexed.every(({ name }) => {
-                    const column = columns.find((column) => column.name === name)
+                    const column = columns.find((item) => item.name === name)
                     return (
                         column &&
-                        !required.some((required) => required.name === name) &&
+                        !required.some((item) => item.name === name) &&
                         constantDefault(column.dflt_value)
                     )
                 })
