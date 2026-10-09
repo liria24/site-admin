@@ -1,3 +1,5 @@
+import { normalize } from 'pathe'
+
 export interface SiteAdminClientTemplateOptions {
     basePath: string
     managementBase: string
@@ -261,7 +263,7 @@ export const siteAdminNuxtModelTypes = (
 ): string => `import '@liria24/site-admin/client'
 import type { InferSiteAdminModels, InferSiteAdminPublicModels, ResolvedSiteAdminConfig } from '@liria24/site-admin'
 
-type SiteAdminDomainConfig = ResolvedSiteAdminConfig<typeof import(${JSON.stringify(configPath.replaceAll('\\', '/'))}).default, readonly [${environments.map((environment) => JSON.stringify(environment)).join(', ')}]>
+type SiteAdminDomainConfig = ResolvedSiteAdminConfig<typeof import(${JSON.stringify(normalize(configPath))}).default, readonly [${environments.map((environment) => JSON.stringify(environment)).join(', ')}]>
 
 declare module '@liria24/site-admin/client' {
   interface SiteAdminClientRegistry {

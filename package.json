@@ -48,6 +48,7 @@
         "nitropack": "2.13.4",
         "nuxt": "4.6.0",
         "nuxt-files-sdk": "^0.2.0",
+        "pathe": "^2.0.3",
         "pkg-pr-new": "0.0.90",
         "publint": "^0.3.25",
         "sherif": "1.13.0",

@@ -37,6 +37,7 @@ export default defineConfig({
                     'exsolve',
                     'nuxt-files-sdk',
                     'nuxt-llms',
+                    'pathe',
                     'node:path',
                     'node:crypto',
                     'node:stream',

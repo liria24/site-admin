@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { join } from 'pathe'
 import { DatabaseSync } from 'node:sqlite'
 import { createJiti } from 'jiti'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -130,7 +131,7 @@ describe('application-owned database resolution', () => {
         await mkdir(resolve('.tmp'), { recursive: true })
         const path = await mkdtemp(resolve('.tmp/app-database-'))
         directories.push(path)
-        const schemaPath = resolve(path, 'schema.ts')
+        const schemaPath = join(path, 'schema.ts')
         const appDatabaseFactory = vi.fn(() => {
             throw new Error('Schema generation must not call the app database factory.')
         })
@@ -147,15 +148,15 @@ describe('application-owned database resolution', () => {
             code: 'SITE_ADMIN_MIGRATION_REQUIRED',
         })
         expect(await database.query("SELECT name FROM sqlite_master WHERE type = 'table'")).toEqual([])
-        const output = resolve(path, 'migrations')
+        const output = join(path, 'migrations')
         execFileSync(
             process.execPath,
             [
                 resolve('packages/site-admin/node_modules/drizzle-kit/bin.cjs'),
                 'generate',
                 '--dialect=sqlite',
-                `--schema=${schemaPath.replaceAll('\\', '/')}`,
-                `--out=${output.replaceAll('\\', '/')}`,
+                `--schema=${schemaPath}`,
+                `--out=${output}`,
             ],
             { stdio: 'pipe' },
         )

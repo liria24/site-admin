@@ -333,4 +333,14 @@ describe('Site Admin clients', () => {
         expect(types).toContain('publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>')
         expect(types).toContain('readonly ["production", "preview"]')
     })
+
+    it.each([
+        ['C:\\project name\\site-admin.config.ts', 'C:/project name/site-admin.config.ts'],
+        ['C:\\site-admin.config.ts', 'C:/site-admin.config.ts'],
+        ['\\\\server\\share\\site-admin.config.ts', '//server/share/site-admin.config.ts'],
+        ['/app/config #1%[preview].ts', '/app/config #1%[preview].ts'],
+    ])('preserves config import paths in generated model types: %s', (path, expected) => {
+        const types = siteAdminNuxtModelTypes(path)
+        expect(types).toContain(`typeof import(${JSON.stringify(expected)}).default`)
+    })
 })
