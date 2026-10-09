@@ -1,4 +1,5 @@
 import { SiteAdminError } from '../errors'
+import { projectStoredFields } from '../stored-data'
 import type { SiteAdminMetadataInput, SiteAdminProofreadInput } from '../ai'
 import type { SiteAdmin } from './site-admin'
 
@@ -103,11 +104,15 @@ const handleManagementRequestInner = async <Context>(
     let redactError = false
     try {
         const actor = await siteAdmin.authorizeRequest(request, context)
+        const storedResult = <Value extends { data: Record<string, unknown> }>(value: Value, model: string): Value => ({
+            ...value,
+            data: projectStoredFields(siteAdmin.config.models[model]!.fields, value.data),
+        })
         const entryResult = (value: unknown): unknown => {
             if (!value || typeof value !== 'object' || !('currentRevisionId' in value)) return value
             const entry = value as Awaited<ReturnType<SiteAdmin['getEntry']>>
             return siteAdmin.can(actor, 'model', 'readDraft', entry.model)
-                ? entry
+                ? storedResult(entry, entry.model)
                 : { id: entry.id, model: entry.model, sortOrder: entry.sortOrder, version: entry.version }
         }
         const json = (value: unknown, init?: ResponseInit): Response =>
@@ -175,7 +180,12 @@ const handleManagementRequestInner = async <Context>(
                         JSON.stringify(entry.data).toLocaleLowerCase().includes(query),
                 )
             }
-            return json({ items: entries.slice(offset, offset + limit), total: entries.length, limit, offset })
+            return json({
+                items: entries.slice(offset, offset + limit).map((entry) => storedResult(entry, entry.model)),
+                total: entries.length,
+                limit,
+                offset,
+            })
         }
         if (method === 'POST' && path.length === 2 && path[0] === 'entries') {
             redactError = !siteAdmin.can(actor, 'model', 'readDraft', path[1])
@@ -213,8 +223,8 @@ const handleManagementRequestInner = async <Context>(
             const id = path[1]
             if (method === 'GET' && path.length === 2) return json(await entryFor(id, 'readDraft'))
             if (method === 'GET' && path.length === 3 && path[2] === 'revisions') {
-                await entryFor(id, 'readDraft')
-                return json(await siteAdmin.listRevisions(id))
+                const entry = await entryFor(id, 'readDraft')
+                return json((await siteAdmin.listRevisions(id)).map((revision) => storedResult(revision, entry.model)))
             }
             if (method === 'GET' && path.length === 3 && path[2] === 'references') {
                 await entryFor(id, 'readDraft')

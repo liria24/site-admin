@@ -838,7 +838,7 @@ export class SiteAdmin<Context = unknown> {
         definition: ModelDefinition,
         revision: RevisionRow,
     ): Promise<{ assets: IndexedReference[]; data: Record<string, unknown>; relations: IndexedReference[] }> {
-        const stored = parseObject(revision.data)
+        const stored = projectStoredFields(definition.fields, parseObject(revision.data))
         const prepared = await this.#prepareData(definition, stored, false)
         if (stableJson(prepared.data) !== stableJson(stored)) {
             throw new SiteAdminError(

@@ -11,19 +11,7 @@ export interface IndexedReference {
     position: number
 }
 
-/** Read projection only: retired fields remain in stored revisions; new writes stay strict. */
-export const projectStoredFields = (fields: FieldRecord, data: Record<string, unknown>): Record<string, unknown> => {
-    const project = (field: AnyField, value: unknown): unknown => {
-        if (field.kind === 'object' && isRecord(value)) return projectStoredFields(field.fields, value)
-        if (field.kind === 'array' && Array.isArray(value)) return value.map((item) => project(field.item, item))
-        return value
-    }
-    return Object.fromEntries(
-        Object.entries(fields)
-            .filter(([key]) => Object.hasOwn(data, key))
-            .map(([key, field]) => [key, project(field, data[key])]),
-    )
-}
+export { projectStoredFields } from './stored-data'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
