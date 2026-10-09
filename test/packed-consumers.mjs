@@ -255,6 +255,18 @@ for (const module of ['assets', 'content', 'document', 'plugins']) {
 `,
     ])
     run(process.execPath, ['form.ts'])
+    run(process.execPath, [
+        '--input-type=module',
+        '-e',
+        `
+import { registerHooks } from 'node:module'
+registerHooks({ resolve(specifier, context, next) {
+  if (specifier === 'comark' || specifier.startsWith('comark/') || specifier.startsWith('markdown-exit') || specifier.startsWith('mdurl') || specifier.startsWith('linkify-it')) throw new Error('Form imported Markdown parser: ' + specifier)
+  return next(specifier, context)
+} })
+await import('@liria24/site-admin/form')
+`,
+    ])
     exec(['site-admin', 'generate', '--config', 'server/site-admin.config.ts', '--out', 'server/schema.ts'])
     await writeFile(
         join(temporary, 'server/auth.config.ts'),
