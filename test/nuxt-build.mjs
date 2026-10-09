@@ -163,6 +163,41 @@ try {
     if (String(parallel) !== '3,0,1,0')
         throw new Error('Native authorization contexts leaked between concurrent requests.')
     const formHeaders = { cookie, 'x-site-admin-test-role': 'editor' }
+    const aiRequest = (name, headers = {}, props = { content: 'Input' }) =>
+        fetch(`http://127.0.0.1:${port}/api/site-admin/ai/actions/${name}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...headers },
+            body: JSON.stringify({ props }),
+        })
+    if ((await aiRequest('proofread')).status !== 401)
+        throw new Error('Named AI action did not require a native session.')
+    if ((await aiRequest('proofread', { cookie })).status !== 403)
+        throw new Error('Named AI action did not enforce its action permission.')
+    if ((await aiRequest('plain', formHeaders)).status !== 403)
+        throw new Error('Action permission was broadened to other configured actions.')
+    if ((await aiRequest('proofread', formHeaders, {})).status !== 400)
+        throw new Error('Native AI route did not validate props.')
+    if ((await aiRequest('proofread', { ...formHeaders, origin: 'https://foreign.test' })).status !== 403)
+        throw new Error('Native AI route accepted a foreign origin.')
+    const countBefore = await fetch(`http://127.0.0.1:${port}/api/__ai-count`).then((value) => value.json())
+    if (countBefore.count !== 0) throw new Error('Rejected AI requests invoked inference.')
+    const aiResponse = await aiRequest('proofread', formHeaders)
+    if (
+        !aiResponse.ok ||
+        aiResponse.headers.get('cache-control') !== 'private, no-store' ||
+        (await aiResponse.json()).content !== 'Corrected'
+    )
+        throw new Error('Authenticated named AI execution failed.')
+    const aiHtml = await fetch(`http://127.0.0.1:${port}/ai-probe`, { headers: formHeaders }).then((value) =>
+        value.text(),
+    )
+    if (!aiHtml.includes('id="ai-content">Corrected') || !aiHtml.includes('id="ai-status">success'))
+        throw new Error('Native awaited AI SSR did not forward its session or output.')
+    const countAfter = await fetch(`http://127.0.0.1:${port}/api/__ai-count`).then((value) => value.json())
+    if (countAfter.count !== 2) throw new Error('SSR inference ran more than once.')
+    const serverAi = await fetch(`http://127.0.0.1:${port}/api/__ai-action`, { method: 'POST', headers: formHeaders })
+    if (!serverAi.ok || (await serverAi.json()).content !== 'Corrected')
+        throw new Error('Typed server runAiAction failed.')
     const formEntries = await fetch(`http://127.0.0.1:${port}/api/site-admin/entries?model=posts&locale=en`, {
         headers: formHeaders,
     }).then((entriesResponse) => entriesResponse.json())

@@ -26,6 +26,9 @@ export type { InferPublicModelData, InferSiteAdminModels, InferSiteAdminPublicMo
 
 /** Nuxt augments this with the public and management models inferred from its config. */
 export interface SiteAdminClientRegistry {}
+export type SiteAdminNamedAiActions = SiteAdminClientRegistry extends { namedAiActions: infer Actions }
+    ? Actions
+    : Record<string, { props: Record<string, unknown>; data: unknown }>
 
 export type SiteAdminPublicModels = SiteAdminClientRegistry extends { publicModels: infer Models }
     ? Models

@@ -20,9 +20,14 @@ import { useSiteAdminForm } from '../packages/site-admin/src/form'
 
 interface State {
     data: Vue.Ref<unknown>
+    status: Vue.Ref<string>
+    error: Vue.Ref<unknown>
+    execute(options?: { signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
+    clear(): void
     refresh(options?: { cachedData?: unknown }): Promise<void>
 }
 interface Helpers {
+    useAiAction(name: string, options: Record<string, unknown>): State & Promise<State>
     useSiteAdminForm(
         model: string,
         options: Record<string, unknown>,
@@ -43,7 +48,7 @@ interface Helpers {
     ): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
 }
 
-const nativeEnvironment = async (request: typeof fetch, i18n = false) => {
+const nativeEnvironment = async (request: typeof fetch, i18n = false, aiActions = false) => {
     const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
     const root = dirname(requireNuxt.resolve('nuxt/package.json'))
     const script = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
@@ -66,7 +71,11 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false) => {
         $i18n: { locale: Vue.ref('ja') },
         _asyncData: Vue.shallowReactive({}),
         _asyncDataPromises: {},
-        payload: { data: Vue.shallowReactive({} as Record<string, unknown>), _errors: {}, serverRendered: false },
+        payload: {
+            data: Vue.shallowReactive({} as Record<string, unknown>),
+            _errors: Vue.shallowReactive({}),
+            serverRendered: false,
+        },
         static: { data: {} as Record<string, unknown> },
         isHydrating: false,
         hook,
@@ -96,13 +105,32 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false) => {
         clientOnlySymbol: Symbol('client-only'),
         onNuxtReady: (callback: () => void) => callback(),
         toArray: (value: unknown) => (Array.isArray(value) ? value : [value]),
+        defineKeyedFunctionFactory: (options: { factory: unknown }) => options.factory,
+        hashKey: (await import(join(root, 'dist/app/utils/hash.js'))).hashKey as unknown,
+        isPlainObject: (value: unknown) => Object.prototype.toString.call(value) === '[object Object]',
+        alwaysRunFetchOnKeyChange: false,
+        fetchDefaults: {},
+        routeTypedFetch: false,
+        $fetch: async (url: string, options: RequestInit) => {
+            const response = await request(new URL(url, 'http://site.test'), {
+                ...options,
+                body: JSON.stringify(options.body),
+            })
+            if (!response.ok) throw createError({ statusCode: response.status, data: await response.json() })
+            return response.json()
+        },
     }
+    const fetchSource = script(await readFile(join(root, 'dist/app/composables/fetch.js'), 'utf8'))
+        .replaceAll('import.meta.client', 'true')
+        .replaceAll('import.meta.server', 'false')
+        .replaceAll('import.meta.dev', 'false')
+    const addonsSource = script(await readFile(join(root, 'dist/app/composables/addons.js'), 'utf8'))
     const runtime = new Function(
         ...Object.keys(nativeDependencies),
-        `${native}; return { useAsyncData, clearNuxtData, refreshNuxtData, useNuxtData }`,
+        `${native}\n${addonsSource}\n${fetchSource}; return { useAsyncData, clearNuxtData, refreshNuxtData, useNuxtData, createUseFetch, defineUseFetchAddon }`,
     )(...Object.values(nativeDependencies)) as Record<string, unknown>
     const generated = stripTypeScriptTypes(
-        siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage', i18n }),
+        siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage', i18n, aiActions }),
     )
         .replace(/^import .*$/gmu, '')
         .replace(/^export const siteAdminAsyncData = createUseAsyncData\(\)\s*$/gmu, '')
@@ -111,6 +139,7 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false) => {
     const dependencies = {
         ...Object.fromEntries(Object.entries(Vue).filter(([name]) => /^[a-zA-Z_$][a-zA-Z_$0-9]*$/u.test(name))),
         ...runtime,
+        hashKey: nativeDependencies.hashKey,
         siteAdminAsyncData: runtime.useAsyncData,
         createSiteAdminClient,
         createSiteAdminManagementClient,
@@ -122,7 +151,7 @@ const nativeEnvironment = async (request: typeof fetch, i18n = false) => {
     }
     const helpers = new Function(
         ...Object.keys(dependencies),
-        `${generated}; return { useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
+        `${generated}; return { ${aiActions ? 'useAiAction,' : ''} useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
     )(...Object.values(dependencies)) as Helpers
     const states = new Map<string, Vue.Ref<unknown>>()
     const formDependencies = {
@@ -148,6 +177,103 @@ const flush = async () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     await Vue.nextTick()
 }
+describe('native createUseFetch AI actions', () => {
+    it('executes only explicitly with fixed POST/watch/retry and snapshots reactive props', async () => {
+        const bodies: unknown[] = []
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                bodies.push(JSON.parse(String(init?.body)))
+                expect(init?.method?.toLowerCase()).toBe('post')
+                return Response.json({ content: 'Corrected' })
+            },
+            false,
+            true,
+        )
+        const props = Vue.ref({ content: 'First' })
+        const scope = Vue.effectScope()
+        const state = scope.run(() =>
+            helpers.useAiAction('proofread', { props, immediate: false, method: 'GET', retry: 3, watch: true }),
+        )!
+        await state
+        props.value.content = 'Second'
+        await flush()
+        expect(bodies).toHaveLength(0)
+        const pending = state.execute()
+        props.value.content = 'Third'
+        await pending
+        expect(bodies).toEqual([{ props: { content: 'Second' } }])
+        await flush()
+        expect(bodies).toHaveLength(1)
+        await state.execute()
+        expect(state.data.value).toEqual({ content: 'Corrected' })
+        scope.stop()
+    })
+    it('isolates different inputs and auth scopes, hydrates without inference twice', async () => {
+        let calls = 0
+        const { app, helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                return Response.json(JSON.parse(String(init?.body)).props.content)
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const auth = Vue.ref('alice')
+        const a = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, authScope: auth }))!
+        const b = scope.run(() => helpers.useAiAction('plain', { props: { content: 'B' }, authScope: auth }))!
+        await Promise.all([a, b])
+        expect(a.data.value).toBe('A')
+        expect(b.data.value).toBe('B')
+        expect(calls).toBe(2)
+        app.isHydrating = true
+        app.payload.serverRendered = true
+        const hydrated = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, authScope: 'alice' }))!
+        await hydrated
+        expect(hydrated.data.value).toBe('A')
+        expect(calls).toBe(2)
+        app.isHydrating = false
+        auth.value = 'bob'
+        await flush()
+        expect(a.data.value).toBeUndefined()
+        expect(calls).toBe(2)
+        await a.execute()
+        expect(calls).toBe(3)
+        scope.stop()
+    })
+    it('keeps failures in native error/status and supports cancellation and concurrent dedupe', async () => {
+        let calls = 0
+        let complete!: () => void
+        const { helpers } = await nativeEnvironment(
+            async (_, init) => {
+                calls++
+                await new Promise<void>((resolve, reject) => {
+                    complete = resolve
+                    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                })
+                return Response.json({ error: { code: 'SITE_ADMIN_AI_FAILED' } }, { status: 502 })
+            },
+            false,
+            true,
+        )
+        const scope = Vue.effectScope()
+        const state = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }))!
+        const first = state.execute()
+        const duplicate = state.execute()
+        expect(calls).toBe(1)
+        complete()
+        await Promise.all([first, duplicate])
+        expect(state.status.value).toBe('error')
+        expect(state.error.value).toMatchObject({ statusCode: 502 })
+        const controller = new AbortController()
+        const cancelled = state.execute({ signal: controller.signal })
+        controller.abort(new DOMException('Cancelled', 'AbortError'))
+        await cancelled
+        expect(state.status.value).toBe('idle')
+        expect(state.error.value).toBeUndefined()
+        scope.stop()
+    })
+})
 const modelDescriptor = createSiteAdminDescriptor(
     defineSiteAdminConfig({
         models: {

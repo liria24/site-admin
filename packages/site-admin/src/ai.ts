@@ -28,6 +28,14 @@ export interface SiteAdminAIActionConfig {
 
 export type { SiteAdminAIConfig } from './config'
 export { createSiteAdminAI } from './ai/operations'
+export { executeSiteAdminAiAction } from './ai/actions-execution'
+export type {
+    InferSiteAdminNamedAiActions,
+    SiteAdminAiActionData,
+    SiteAdminAiActionProps,
+    SiteAdminNamedAiAction,
+    SiteAdminDecisionModel,
+} from './ai/actions'
 
 export interface SiteAdminAIProposal extends SiteAdminAIActionResult {
     baseRevisionId: string

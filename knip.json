@@ -12,6 +12,7 @@
                 "test/client-types.ts",
                 "test/config-types.ts",
                 "test/ai-client-types.ts",
+                "test/ai-actions-types.ts",
                 "test/seo-types.ts"
             ],
             "project": ["*.ts", "test/**/*.{ts,mjs,vue}"],

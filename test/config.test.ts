@@ -3,8 +3,41 @@ import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
 import { resolveSiteAdminConfig } from '../packages/site-admin/src/config-resolution'
 import { resolveSiteAdminAssets } from '../packages/site-admin/src/assets-config'
 import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
+import { Output } from 'ai'
+import { z } from 'zod'
+import { MockLanguageModelV4, Experimental_DecisionMockModelV4 } from 'ai/test'
 
 describe('common Site Admin configuration', () => {
+    it('replaces opaque native AI models, output parsers and prop schemas in environment overrides', () => {
+        const model = new MockLanguageModelV4()
+        const decisionModel = new Experimental_DecisionMockModelV4()
+        const output = Output.object({ schema: z.object({ content: z.string() }) })
+        const schema = z.string().min(3)
+        const config = defineSiteAdminConfig({
+            models: {},
+            ai: {
+                model: new MockLanguageModelV4(),
+                decisionModel: new Experimental_DecisionMockModelV4(),
+                actions: {
+                    proofread: {
+                        type: 'text-generation',
+                        props: { content: z.string() },
+                        prompt: ({ content }) => content,
+                        output: Output.text(),
+                    },
+                },
+            },
+            $production: {
+                ai: { model, decisionModel, actions: { proofread: { output, props: { content: schema } } } },
+            },
+        })
+        const resolved = resolveSiteAdminConfig(config, ['production'])
+        expect(resolved.ai.model).toBe(model)
+        expect(resolved.ai.decisionModel).toBe(decisionModel)
+        expect(resolved.ai.actions.proofread.output).toBe(output)
+        expect(resolved.ai.actions.proofread.props.content).toBe(schema)
+        expect(resolved.ai.actions.proofread.prompt({ content: 'Typed' })).toBe('Typed')
+    })
     const action = () => ({ data: { title: 'server-only suggestion' } })
     const config = defineSiteAdminConfig({
         storage: { content: { adapter: 'fs', config: { root: './.data/files' } } },

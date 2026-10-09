@@ -7,6 +7,7 @@ import { defineSiteAdminConfig, number, text } from '../packages/site-admin/src'
 import { handleManagementRequest, type SiteAdminActor } from '../packages/site-admin/src/server'
 import { useSiteAdminForm } from '../packages/site-admin/src/form'
 import type { SiteAdminAIAction, SiteAdminAIModel } from '../packages/site-admin/src/ai'
+import { createSiteAdminAI } from '../packages/site-admin/src/ai'
 import { createMigratedTestAdmin } from './migrate'
 
 const databases: Database[] = []
@@ -54,6 +55,7 @@ const setup = async (
         database,
         authorize: () => actor,
         aiEnabled: true,
+        ...(model ? { aiExecution: (context) => createSiteAdminAI(model, context).generateText } : {}),
         id: () => `id-${++sequence}`,
     })
     return {
