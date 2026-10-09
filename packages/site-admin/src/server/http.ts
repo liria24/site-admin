@@ -180,7 +180,12 @@ const handleManagementRequestInner = async <Context>(
                 { models, ...(locale ? { locale } : {}), ...(query ? { q: query } : {}) },
                 { limit, offset },
             )
-            return json({ ...result, items: result.items.map((entry) => storedResult(entry, entry.model)), limit, offset })
+            return json({
+                ...result,
+                items: result.items.map((entry) => storedResult(entry, entry.model)),
+                limit,
+                offset,
+            })
         }
         if (method === 'POST' && path.length === 2 && path[0] === 'entries') {
             redactError = !siteAdmin.can(actor, 'model', 'readDraft', path[1])
