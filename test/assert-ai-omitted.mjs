@@ -6,7 +6,7 @@ export async function assertAiOmitted(fixture) {
     let bytes = 0
     for (const name of await readdir(join(fixture, '.output'), { recursive: true })) {
         const normalized = name.replaceAll('\\', '/')
-        if (/(?:^|\/)node_modules\/(?:ai\/|@ai-sdk\/)/u.test(normalized))
+        if (/(?:^|\/)node_modules\/(?:ai(?:\/|$)|@ai-sdk(?:\/|$))/u.test(normalized))
             throw new Error('Unused AI package traced into output: ' + name)
         if (!/\.(?:mjs|js|json)$/u.test(name)) continue
         if (!(await stat(join(fixture, '.output', name))).isFile()) continue
