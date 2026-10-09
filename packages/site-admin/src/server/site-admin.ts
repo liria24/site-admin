@@ -1,4 +1,4 @@
-import type { ComarkContent } from 'comark-content'
+import type { ComarkContent, ContentFile } from 'comark-content'
 import { createMarkdownContent } from '../markdown/content'
 import { resolveMarkdownSource } from '../markdown/assets'
 import { astText, cleanText, collectMarkdown, markdownDocument, type MarkdownDocumentValue } from '../markdown/document'
@@ -252,6 +252,7 @@ export class SiteAdmin<Context = unknown> {
     readonly #descriptor: SiteAdminDescriptor
     readonly #resolveRouteRule: SiteAdminRouteResolver
     readonly #content = new Map<string, { content: ComarkContent; generation: number }>()
+    readonly #parsedContent = new Map<string, { file: ContentFile; generation: number }>()
     readonly #routes = new Map<string, { generation: number; router: RouterContext<RouteRow> }>()
     #initializer: Promise<void> | undefined
 
@@ -2235,16 +2236,34 @@ export class SiteAdmin<Context = unknown> {
         const content = createMarkdownContent(modelName, definition, entries, this.config.markdown, (id) =>
             this.#assetUrl(id),
         )
+        this.#prepareContent(content, definition, generation)
+        for (const { file, generation: parsedGeneration } of this.#parsedContent.values()) {
+            const metadata = file.data['_siteAdmin']
+            if (
+                parsedGeneration === generation &&
+                isObject(metadata) &&
+                metadata.model === modelName &&
+                metadata.locale === normalizedLocale
+            )
+                await content.update(structuredClone(file))
+        }
+        this.#content.set(cacheKey, { content, generation })
+        if (this.#content.size > 64) this.#content.delete(this.#content.keys().next().value!)
+        return content
+    }
+
+    #prepareContent(content: ComarkContent, definition: ModelDefinition, generation: number): void {
         content.hooks.hook('file:parsed', ({ file }) => {
             if (!file) return
             const metadata = file.data['_siteAdmin']
             const description = this.#entryDescription(definition, file.data)
             if (isObject(metadata) && description !== undefined)
                 metadata.seo = { ...serializeSiteAdminSeo(metadata.seo), description }
+            if (isObject(metadata) && typeof metadata.id === 'string') {
+                this.#parsedContent.set(metadata.id, { file: structuredClone(file), generation })
+                if (this.#parsedContent.size > 256) this.#parsedContent.delete(this.#parsedContent.keys().next().value!)
+            }
         })
-        this.#content.set(cacheKey, { content, generation })
-        if (this.#content.size > 64) this.#content.delete(this.#content.keys().next().value!)
-        return content
     }
 
     async resolvePath(
@@ -2284,6 +2303,23 @@ export class SiteAdmin<Context = unknown> {
         if (route.kind === 'page') {
             const budget = { nodes: 0 }
             const projected = this.#projectPublished(entry, graph, new Set(), budget)
+            const definition = this.#model(entry.model)
+            let parsed = this.#parsedContent.get(entry.id)
+            if (parsed?.generation !== generation) {
+                // Parse the already-projected route entry; no second database fetch.
+                const content = createMarkdownContent(
+                    entry.model,
+                    definition,
+                    [this.#projectPublished(entry, graph, new Set(), { nodes: 0 }, true)],
+                    this.config.markdown,
+                    (id) => this.#assetUrl(id),
+                )
+                this.#prepareContent(content, definition, generation)
+                await content.get(`${entry.slug}.json`)
+                parsed = this.#parsedContent.get(entry.id)
+            }
+            const metadata = parsed?.file.data['_siteAdmin']
+            if (isObject(metadata)) projected.seo = serializeSiteAdminSeo(metadata.seo)
             // Keep the existing route DTO's self alternate for nonlocalized entries.
             projected.alternates ??= projected.path ? [{ locale: projected.locale, path: projected.path }] : []
             return { entry: projected, kind: 'page' }

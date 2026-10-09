@@ -24,6 +24,44 @@ const database = () => {
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 describe('public entry SEO payload', () => {
+    it.each(['route-first', 'content-first'])(
+        'shares Markdown summary SEO between route and content (%s)',
+        async (order) => {
+            const plugin = vi.fn()
+            const admin = await createMigratedTestAdmin({
+                config: defineSiteAdminConfig({
+                    markdown: { plugins: [{ name: 'route-seo-count', post: plugin }] },
+                    models: {
+                        posts: {
+                            displayFields: { description: 'body' },
+                            fields: { title: text(), body: markdown() },
+                            route: '/posts/:slug',
+                        },
+                    },
+                }),
+                database: database(),
+            })
+            const draft = await admin.createEntry('posts', {
+                slug: 'hello',
+                data: { title: 'Post', body: 'Intro **summary**.\n\n<!-- more -->\n\nFull body' },
+            })
+            await admin.publishEntry(draft.id, { expectedVersion: draft.version })
+            if (order === 'content-first') await (await admin.content('posts')).list()
+            const response = await handlePublicRequest(
+                admin,
+                new Request('https://example.test/api/content/_route?path=/posts/hello'),
+            )
+            expect(response.status).toBe(200)
+            expect(await response.json()).toMatchObject({
+                kind: 'page',
+                entry: { seo: { title: 'Post', canonical: '/posts/hello', description: 'Intro summary .' } },
+            })
+            expect((await (await admin.content('posts')).list())[0]?.data).toMatchObject({
+                _siteAdmin: { seo: { description: 'Intro summary .' } },
+            })
+            expect(plugin).toHaveBeenCalledTimes(1)
+        },
+    )
     it('resolves model defaults and projected fields without descriptors or fetch-side head work', async () => {
         const resolver = vi.fn((entry: PublicEntry) => {
             expect(entry.data.cover).toMatchObject({ alt: 'Public cover', url: expect.stringContaining('/_assets/') })
