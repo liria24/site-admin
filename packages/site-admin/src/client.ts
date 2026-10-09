@@ -32,6 +32,11 @@ export type SiteAdminPublicModels = SiteAdminClientRegistry extends { publicMode
 export type SiteAdminManagementModels = SiteAdminClientRegistry extends { managementModels: infer Models }
     ? Models
     : Record<string, Record<string, unknown>>
+export type SiteAdminFormModels = SiteAdminClientRegistry extends { formModels: infer Models }
+    ? Models
+    : SiteAdminManagementModels
+export { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset } from './management-assets'
+export type { SiteAdminAsset } from './management-assets'
 
 type ModelName<Models> = Extract<keyof Models, string>
 type ManagementData<Models> = Models[keyof Models]
@@ -72,6 +77,18 @@ export interface SiteAdminClientOptions {
 
 export interface SiteAdminManagementClientOptions extends SiteAdminClientOptions {
     credentials?: RequestCredentials
+    /** Successful entry mutations only. Observer failures cannot turn a saved mutation into a failed request. */
+    onMutation?: (mutation: SiteAdminMutation) => Promise<void> | void
+}
+
+export interface SiteAdminMutation {
+    id: string
+    model?: string
+    slug?: string
+}
+
+export interface SiteAdminRequestOptions {
+    signal?: AbortSignal
 }
 
 export interface PublicListOptions {
@@ -91,6 +108,7 @@ export interface ManagementListOptions {
     locale?: string
     offset?: number
     q?: string
+    signal?: AbortSignal
 }
 
 export interface SiteAdminVersionInput {
@@ -203,11 +221,17 @@ const transport = (options: SiteAdminClientOptions, defaultBase: string, credent
         if (!result || result.status === 204) return null
         return (await result.json()) as Value
     }
-    const mutate = <Value>(path: string, method: string, body: unknown): Promise<Value> =>
+    const mutate = <Value>(
+        path: string,
+        method: string,
+        body: unknown,
+        requestOptions: SiteAdminRequestOptions = {},
+    ): Promise<Value> =>
         json<Value>(path, {
             body: JSON.stringify(body),
             headers: { 'content-type': 'application/json' },
             method,
+            ...(requestOptions.signal ? { signal: requestOptions.signal } : {}),
         }) as Promise<Value>
     return { base, json, mutate, response }
 }
@@ -231,7 +255,7 @@ export interface SiteAdminClient<Models = SiteAdminPublicModels> {
     get<Value>(model: ModelName<Models>, slugOrId: string, options?: PublicListOptions): Promise<Value | null>
     list<Name extends ModelName<Models>>(model: Name, options?: PublicListOptions): Promise<Models[Name][]>
     list<Value>(model: ModelName<Models>, options?: PublicListOptions): Promise<Value[]>
-    models(): Promise<SiteAdminDescriptor>
+    models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
     resolveRoute(path: string, options?: PublicListOptions): Promise<PublicRouteResult | null>
 }
 
@@ -256,7 +280,11 @@ export const createSiteAdminClient = <
                 { method: 'GET', ...(requestOptions.signal ? { signal: requestOptions.signal } : {}) },
                 { locale: requestOptions.locale },
             ).then((items) => (items ?? []).map((item) => entry(item)!)),
-        models: () => json<SiteAdminDescriptor>('/models', { method: 'GET' }) as Promise<SiteAdminDescriptor>,
+        models: (requestOptions = {}) =>
+            json<SiteAdminDescriptor>('/models', {
+                method: 'GET',
+                ...(requestOptions.signal ? { signal: requestOptions.signal } : {}),
+            }) as Promise<SiteAdminDescriptor>,
         resolveRoute: (path, requestOptions = {}) =>
             json<PublicRouteResult>(
                 '/_route',
@@ -269,7 +297,7 @@ export const createSiteAdminClient = <
 
 export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
     assetUrl(id: string): string
-    models(): Promise<SiteAdminDescriptor>
+    models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
     listEntries<Name extends ModelName<Models>>(
         model: Name,
         options?: ManagementListOptions,
@@ -283,7 +311,10 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
         model?: undefined,
         options?: Omit<ManagementListOptions, 'offset'>,
     ): Promise<SiteAdminEntry<ManagementData<Models>>[]>
-    getEntry<Data extends ManagementData<Models> = ManagementData<Models>>(id: string): Promise<SiteAdminEntry<Data>>
+    getEntry<Data extends ManagementData<Models> = ManagementData<Models>>(
+        id: string,
+        options?: SiteAdminRequestOptions,
+    ): Promise<SiteAdminEntry<Data>>
     createEntry<Name extends ModelName<Models>>(
         model: Name,
         input: SiteAdminCreateEntryInput<Models[Name]>,
@@ -322,10 +353,12 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
     generateMetadata<Name extends ModelName<Models>>(
         model: Name,
         input: SiteAdminMetadataDraftInput<Models[Name]>,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminDraftProposal<Models[Name]>>
     proofreadDraft<Name extends ModelName<Models>>(
         model: Name,
         input: SiteAdminProofreadDraftInput<Models[Name]>,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminDraftProposal<Models[Name]>>
     runAIAction(id: string, action: string, input: Record<string, unknown>): Promise<SiteAdminAIProposal>
     uploadAsset(file: File): Promise<AssetRecord>
@@ -348,26 +381,53 @@ export const createSiteAdminManagementClient = <
     const { base, json, mutate, response } = transport(options, '/api/site-admin', options.credentials ?? 'same-origin')
     const entryPath = (id: string): string => `/entries/${encodeURIComponent(id)}`
     const assetPath = (id: string): string => `/assets/${encodeURIComponent(id)}`
-    const get = <Value>(path: string, query?: Record<string, string | number | undefined>): Promise<Value> =>
-        json<Value>(path, { method: 'GET' }, query) as Promise<Value>
+    const get = <Value>(
+        path: string,
+        query?: Record<string, string | number | undefined>,
+        signal?: AbortSignal,
+    ): Promise<Value> => json<Value>(path, { method: 'GET', ...(signal ? { signal } : {}) }, query) as Promise<Value>
+    const notify = async (mutation: SiteAdminMutation): Promise<void> => {
+        try {
+            await options.onMutation?.(mutation)
+        } catch {
+            /* A cache observer cannot undo a committed mutation. */
+        }
+    }
+    const mutateEntry = async <Value extends SiteAdminMutation | SiteAdminMutation[]>(
+        path: string,
+        method: string,
+        body: unknown,
+    ): Promise<Value> => {
+        const result = await mutate<Value>(path, method, body)
+        const mutations: SiteAdminMutation[] = Array.isArray(result) ? result : [result as SiteAdminMutation]
+        await Promise.all(mutations.map(notify))
+        return result
+    }
     return {
         assetUrl: (id) => managementAssetUrl(id, base),
-        models: () => get('/models'),
-        listEntries: (model: ModelName<Models> | undefined, requestOptions: ManagementListOptions = {}) =>
-            get('/entries', { model, ...requestOptions }),
+        models: (requestOptions = {}) => get('/models', undefined, requestOptions.signal),
+        listEntries: (model: ModelName<Models> | undefined, requestOptions: ManagementListOptions = {}) => {
+            const { signal, ...query } = requestOptions
+            return get('/entries', { model, ...query }, signal)
+        },
         listAllEntries: async (
             model: ModelName<Models> | undefined,
             requestOptions: Omit<ManagementListOptions, 'offset'> = {},
         ) => {
+            const { signal, ...query } = requestOptions
             const items: SiteAdminEntry<ManagementData<Models>>[] = []
             let total: number
             do {
-                const page = await get<SiteAdminEntryPage<ManagementData<Models>>>('/entries', {
-                    model,
-                    ...requestOptions,
-                    limit: requestOptions.limit ?? 100,
-                    offset: items.length,
-                })
+                const page = await get<SiteAdminEntryPage<ManagementData<Models>>>(
+                    '/entries',
+                    {
+                        model,
+                        ...query,
+                        limit: requestOptions.limit ?? 100,
+                        offset: items.length,
+                    },
+                    signal,
+                )
                 items.push(...page.items)
                 total = page.total
                 if (page.items.length === 0 && items.length < total) {
@@ -380,26 +440,33 @@ export const createSiteAdminManagementClient = <
             } while (items.length < total)
             return items
         },
-        getEntry: (id) => get(entryPath(id)),
-        createEntry: (model, input) => mutate(entryPath(model), 'POST', input),
-        updateEntry: (id, input) => mutate(entryPath(id), 'PATCH', input),
+        getEntry: (id, requestOptions = {}) => get(entryPath(id), undefined, requestOptions.signal),
+        createEntry: (model, input) => mutateEntry(entryPath(model), 'POST', input),
+        updateEntry: (id, input) => mutateEntry(entryPath(id), 'PATCH', input),
         deleteEntry: async (id, input) => {
-            await response(entryPath(id), { headers: { 'if-match': `"${input.expectedVersion}"` }, method: 'DELETE' })
+            const result = await response(entryPath(id), {
+                headers: { 'if-match': `"${input.expectedVersion}"` },
+                method: 'DELETE',
+            })
+            const model = result?.headers.get('x-site-admin-model')
+            await notify({ id, ...(model ? { model } : {}) })
         },
-        publishEntry: (id, input) => mutate(`${entryPath(id)}/publish`, 'POST', input),
-        unpublishEntry: (id, input) => mutate(`${entryPath(id)}/unpublish`, 'POST', input),
-        schedulePublish: (id, input) => mutate(`${entryPath(id)}/schedule`, 'POST', input),
-        cancelScheduledPublish: (id, input) => mutate(`${entryPath(id)}/cancel-schedule`, 'POST', input),
+        publishEntry: (id, input) => mutateEntry(`${entryPath(id)}/publish`, 'POST', input),
+        unpublishEntry: (id, input) => mutateEntry(`${entryPath(id)}/unpublish`, 'POST', input),
+        schedulePublish: (id, input) => mutateEntry(`${entryPath(id)}/schedule`, 'POST', input),
+        cancelScheduledPublish: (id, input) => mutateEntry(`${entryPath(id)}/cancel-schedule`, 'POST', input),
         setSortOrder: (id, sortOrder, expectedVersion) =>
-            mutate(`${entryPath(id)}/sort`, 'PATCH', { expectedVersion, sortOrder }),
-        setSortOrders: (model, items) => mutate(`${entryPath(model)}/reorder`, 'POST', { items }),
+            mutateEntry(`${entryPath(id)}/sort`, 'PATCH', { expectedVersion, sortOrder }),
+        setSortOrders: (model, items) => mutateEntry(`${entryPath(model)}/reorder`, 'POST', { items }),
         listRevisions: (id) => get(`${entryPath(id)}/revisions`),
         restoreRevision: (id, revisionId, input) =>
-            mutate(`${entryPath(id)}/revisions/${encodeURIComponent(revisionId)}/restore`, 'POST', input),
+            mutateEntry(`${entryPath(id)}/revisions/${encodeURIComponent(revisionId)}/restore`, 'POST', input),
         pruneRevisions: (id, retain) => mutate(`${entryPath(id)}/revisions/prune`, 'POST', { retain }),
         referencesTo: (id, requestOptions) => get(`${entryPath(id)}/references`, { ...requestOptions }),
-        generateMetadata: (model, input) => mutate(`/models/${encodeURIComponent(model)}/ai/metadata`, 'POST', input),
-        proofreadDraft: (model, input) => mutate(`/models/${encodeURIComponent(model)}/ai/proofread`, 'POST', input),
+        generateMetadata: (model, input, requestOptions) =>
+            mutate(`/models/${encodeURIComponent(model)}/ai/metadata`, 'POST', input, requestOptions),
+        proofreadDraft: (model, input, requestOptions) =>
+            mutate(`/models/${encodeURIComponent(model)}/ai/proofread`, 'POST', input, requestOptions),
         runAIAction: (id, action, input) => mutate(`${entryPath(id)}/ai/${encodeURIComponent(action)}`, 'POST', input),
         uploadAsset: async (body, uploadOptions) => {
             const filename = uploadOptions?.filename ?? ('name' in body ? String(body.name) : undefined)
@@ -417,7 +484,20 @@ export const createSiteAdminManagementClient = <
         deleteAsset: async (id) => {
             await response(assetPath(id), { method: 'DELETE' })
         },
-        publishDue: () => mutate('/tasks/publish-due', 'POST', {}),
+        publishDue: async () => {
+            const result = await mutate<PublishDueResult>('/tasks/publish-due', 'POST', {})
+            if (options.onMutation)
+                await Promise.all(
+                    result.published.map(async (id) => {
+                        try {
+                            await notify(await get<SiteAdminEntry>(entryPath(id)))
+                        } catch {
+                            await notify({ id })
+                        }
+                    }),
+                )
+            return result
+        },
         runAssetGC: () => mutate('/tasks/asset-gc', 'POST', {}),
         inspect: () => get('/diagnostics'),
         routeSnapshot: () => get('/routes'),

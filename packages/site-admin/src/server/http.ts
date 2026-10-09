@@ -245,7 +245,7 @@ const handleManagementRequestInner = async <Context>(
                 )
             }
             if (method === 'DELETE' && path.length === 2) {
-                await entryFor(id, 'delete')
+                const entry = await entryFor(id, 'delete')
                 // Some HTTP adapters discard DELETE bodies. If-Match carries the same optimistic version.
                 const match = request.headers.get('if-match')
                 const body =
@@ -258,7 +258,7 @@ const handleManagementRequestInner = async <Context>(
                     actorId: actor.id,
                     expectedVersion: expectedVersion(body.expectedVersion),
                 })
-                return new Response(null, { status: 204 })
+                return new Response(null, { status: 204, headers: { 'x-site-admin-model': entry.model } })
             }
             if (method === 'POST' && path[2] === 'publish') {
                 await entryFor(id, 'publish')

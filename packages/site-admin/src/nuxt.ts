@@ -647,6 +647,7 @@ export default defineNuxtModule<ModuleConfig>({
                     basePath: options.client.basePath,
                     managementBase: options.server.managementBase,
                     i18n: options.i18n,
+                    auth: options.auth,
                     ...(options.client.origin ? { origin: options.client.origin } : {}),
                 }),
             write: true,
@@ -659,6 +660,8 @@ export default defineNuxtModule<ModuleConfig>({
         addImports([
             { from: clientTemplate.dst, name: 'useSiteAdminClient' },
             { from: clientTemplate.dst, name: 'useSiteAdminManagementClient' },
+            { from: clientTemplate.dst, name: 'useSiteAdminManagementEntry' },
+            { from: clientTemplate.dst, name: 'useSiteAdminManagementList' },
             { from: clientTemplate.dst, name: 'useSiteAdminRoute' },
             { from: clientTemplate.dst, name: 'useSiteAdminEntry' },
             { from: clientTemplate.dst, name: 'useSiteAdminList' },

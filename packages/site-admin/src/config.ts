@@ -17,6 +17,7 @@ import type {
 } from './fields'
 import type { PublicEntry, PublicEntrySeo } from './server/types'
 import type { SiteAdminRouteRules } from './seo'
+import type { SiteAdminAsset } from './management-assets'
 
 export type SiteAdminSeoOptions = PublicEntrySeo
 
@@ -265,6 +266,31 @@ export type InferModelData<Model extends ModelDefinition> = InferFields<Model['f
 
 export type InferSiteAdminModels<Config extends SiteAdminConfig> = {
     [Name in keyof Config['models']]: InferModelData<Config['models'][Name]>
+}
+
+type FormField<F extends AnyField> = F extends { kind: 'image' | 'file' }
+    ? SiteAdminAsset
+    : F extends { kind: 'images' }
+      ? SiteAdminAsset[]
+      : F extends { kind: 'object'; fields: FieldRecord }
+        ? FormFields<F['fields']>
+        : F extends { kind: 'array'; item: AnyField }
+          ? Array<FormField<F['item']> | (F['item'] extends { required: true } ? never : null)>
+          : InferField<F>
+
+type DeclaredFormFields<Fields extends FieldRecord> = {
+    [Key in keyof Fields as string extends Key ? never : Key]: Fields[Key]
+}
+
+type FormFields<Fields extends FieldRecord, Declared extends FieldRecord = DeclaredFormFields<Fields>> = {
+    [Key in keyof InferFields<Declared>]: Key extends keyof Declared
+        ? FormField<Declared[Key]> | (null extends InferFields<Declared>[Key] ? null : never)
+        : never
+}
+
+/** Management UI values keep Markdown source and relation IDs, and expose authenticated asset URLs. */
+export type InferSiteAdminFormModels<Config extends SiteAdminConfig> = {
+    [Name in keyof Config['models']]: FormFields<Config['models'][Name]['fields']>
 }
 
 type PublicField<

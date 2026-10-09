@@ -188,7 +188,8 @@ describe('generated public batch transport', () => {
 
     it('generates one native aggregation invocation without nested list/entry composables', () => {
         const template = siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage' })
-        const batch = template.slice(template.indexOf('export function useSiteAdminBatch(requests:'))
+        const start = template.indexOf('export function useSiteAdminBatch(requests:')
+        const batch = template.slice(start, template.indexOf('\nimport type { SiteAdminEntry,', start))
         expect(batch.match(/return siteAdminAsyncData\(/gu)).toHaveLength(1)
         expect(batch).toContain('siteAdminResolveBatch(client, snapshot.value, locale.value, signal)')
         expect(batch).not.toContain('useSiteAdminList(')

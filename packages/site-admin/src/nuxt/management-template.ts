@@ -1,0 +1,136 @@
+import type { SiteAdminClientTemplateOptions } from './client-templates'
+
+const overloads = (kind: 'Entry' | 'List'): string => {
+    const response = kind === 'Entry' ? 'SiteAdminEntry<FormData<Name>>' : 'SiteAdminEntryPage<FormData<Name>>'
+    const id = kind === 'Entry' ? ', id: MaybeRefOrGetter<string>' : ''
+    return ['WithTransform', '']
+        .flatMap((transform) =>
+            ['undefined', 'DataT'].map(
+                (fallback) =>
+                    `export function useSiteAdminManagement${kind}<Name extends ManagementModelName, ErrorData = unknown, DataT = ${response}, PickKeys extends KeysOf<DataT> = KeysOf<DataT>, DefaultT = ${fallback}>(model: Name${id}, options${transform ? '' : '?'}: AsyncDataOptions${transform}<${response}, DataT, PickKeys, DefaultT> & SiteAdminManagementDataOptions): AsyncData<PickFrom<DataT, PickKeys> | DefaultT, SiteAdminAsyncDataError<ErrorData> | undefined>`,
+            ),
+        )
+        .join('\n')
+}
+
+/** All cache enumeration/invalidation goes through Nuxt's public data APIs. */
+export const siteAdminNuxtManagementDataTemplate = (options: SiteAdminClientTemplateOptions): string => `
+import type { SiteAdminEntry, SiteAdminEntryPage, SiteAdminFormModels, SiteAdminManagementModels, SiteAdminMutation } from '@liria24/site-admin/client'
+import { presentSiteAdminData } from '@liria24/site-admin/client'
+import type { ModelDescriptor, SiteAdminDescriptor } from '@liria24/site-admin'
+import { clearNuxtData, refreshNuxtData, useNuxtData, useNuxtApp${options.auth ? ', useUserSession' : ''} } from '#imports'
+import { watch } from 'vue'
+
+type ManagementModelName = Extract<keyof SiteAdminFormModels, string>
+type FormData<Name extends ManagementModelName> = Extract<SiteAdminFormModels[Name], Record<string, unknown>>
+export interface SiteAdminManagementDataOptions extends SiteAdminLocaleOptions {
+  limit?: MaybeRefOrGetter<number | undefined>
+  offset?: MaybeRefOrGetter<number | undefined>
+  q?: MaybeRefOrGetter<string | undefined>
+  authScope?: MaybeRefOrGetter<string>
+}
+
+export const useSiteAdminAuthScope = (provided?: MaybeRefOrGetter<string>, connection: SiteAdminManagementClientOptions = siteAdminManagementClientOptions()) => {
+  const nuxtApp = useNuxtApp()
+  ${options.auth ? 'const { user, session } = useUserSession()' : ''}
+  const scope = computed(() => toValue(provided) ?? ${options.auth ? 'JSON.stringify([user.value?.id ?? null, (user.value as { role?: string } | null)?.role ?? null, session.value?.id ?? null])' : "'anonymous'"})
+  watch(scope, (_next, previous) => nuxtApp.runWithContext(() => clearNuxtData((key) => {
+    if (!key.startsWith('site-admin-management:')) return false
+    try { const [origin, base, auth] = JSON.parse(key.slice('site-admin-management:'.length)); return origin === connection.origin && base === connection.basePath && auth === previous } catch { return false }
+  })), { flush: 'sync' })
+  return scope
+}
+
+export const siteAdminManagementKey = (connection: SiteAdminManagementClientOptions, scope: string, operation: string, model: string | null, identity: unknown, locale?: string): string =>
+  'site-admin-management:' + JSON.stringify([connection.origin ?? 'same-origin', connection.basePath ?? ${JSON.stringify(options.managementBase)}, scope, operation, model, identity, locale ?? null])
+
+const siteAdminInvalidateMutation = async (connection: SiteAdminManagementClientOptions, scope: string, mutation: SiteAdminMutation): Promise<void> => {
+  const keys: string[] = []
+  clearNuxtData((key) => {
+    let matches = false
+    try {
+      if (key.startsWith('site-admin-management:')) {
+        const [origin, base, auth, operation, model, id] = JSON.parse(key.slice('site-admin-management:'.length))
+        matches = origin === connection.origin && base === connection.basePath && auth === scope &&
+          ((operation === 'list' && model === mutation.model) || ((operation === 'entry' || operation === 'form-entry') && (!mutation.model || model === mutation.model) && id === mutation.id))
+      } else if (key.startsWith('site-admin:')) {
+        const [origin, base, operation, model, slug] = JSON.parse(key.slice('site-admin:'.length))
+        if (origin === connection.origin && base === ${JSON.stringify(options.basePath)}) {
+          if (operation === 'list') matches = model === mutation.model
+          else if (operation === 'entry') matches = model === mutation.model && (slug === mutation.id || (mutation.slug !== undefined && slug === mutation.slug) || useNuxtData<{ id: string }>(key).data.value?.id === mutation.id)
+          else if (operation === 'batch') {
+            const cached = useNuxtData<Record<string, { data: { id?: string } | unknown[] | null }>>(key).data.value
+            matches = (slug as Array<[string, string, string, string | null]>).some(([name, operation, model, id]) =>
+              model === mutation.model && (operation === 'list' || id === mutation.id || (mutation.slug !== undefined && id === mutation.slug) || (!Array.isArray(cached?.[name]?.data) && cached?.[name]?.data?.id === mutation.id)))
+          }
+        }
+      }
+    } catch { return false }
+    if (matches) keys.push(key)
+    return matches
+  })
+  if (keys.length) await refreshNuxtData(keys)
+}
+
+export const createNuxtSiteAdminManagementClient = <Models extends { [Name in keyof Models]: Record<string, unknown> } = SiteAdminManagementModels>(connection: SiteAdminManagementClientOptions, auth: MaybeRefOrGetter<string>) => {
+  const nuxtApp = useNuxtApp()
+  const client = createSiteAdminManagementClient<Models>(connection)
+  // Capture auth per invocation, including concurrent mutations and a user change while saving.
+  return new Proxy(client, { get(target, property, receiver) {
+    const value: unknown = Reflect.get(target, property, receiver)
+    if (typeof value !== 'function') return value
+    return (...args: unknown[]) => {
+      const scope = toValue(auth)
+      const scoped = createSiteAdminManagementClient<Models>({ ...connection, onMutation: (mutation) =>
+        nuxtApp.runWithContext(() => siteAdminInvalidateMutation(connection, scope, mutation)) })
+      return (Reflect.get(scoped, property) as (...args: unknown[]) => unknown)(...args)
+    }
+  } })
+}
+
+export const useSiteAdminModels = (connection: SiteAdminManagementClientOptions, auth: MaybeRefOrGetter<string>) => {
+  const client = createSiteAdminManagementClient(connection)
+  const key = computed(() => siteAdminManagementKey(connection, toValue(auth), 'models', null, null))
+  return siteAdminAsyncData(() => key.value, (_app, { signal }) => client.models({ signal }))
+}
+
+const siteAdminModelDescriptor = (source: SiteAdminDescriptor, model: string): ModelDescriptor => {
+  const descriptor = Object.hasOwn(source.models, model) ? source.models[model] : undefined
+  if (!descriptor) throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', '[site-admin] Form model "' + model + '" is unavailable to this actor.', 403)
+  return descriptor
+}
+
+${overloads('Entry')}
+export function useSiteAdminManagementEntry(model: ManagementModelName, id: MaybeRefOrGetter<string>, options: AsyncDataOptions<SiteAdminEntry<FormData<ManagementModelName>>> & SiteAdminManagementDataOptions = {}) {
+  const connection = siteAdminManagementClientOptions()
+  const auth = useSiteAdminAuthScope(options.authScope, connection)
+  const locale = useSiteAdminLocale(options.locale)
+  const client = createSiteAdminManagementClient(connection)
+  const key = computed(() => siteAdminManagementKey(connection, auth.value, 'entry', model, toValue(id), locale.value))
+  const { authScope: _auth, locale: _locale, limit: _limit, offset: _offset, q: _q, ...asyncOptions } = options
+  return siteAdminAsyncData(() => key.value, async (_app, { signal }) => {
+    const requestedId = toValue(id)
+    const requestedLocale = locale.value
+    const [models, entry] = await Promise.all([client.models({ signal }), client.getEntry(requestedId, { signal })])
+    signal.throwIfAborted()
+    if (entry.model !== model || (requestedLocale !== undefined && entry.locale !== requestedLocale)) throw new SiteAdminClientError('SITE_ADMIN_INVALID_RESPONSE', 'Entry does not belong to the requested model and locale.', 502)
+    return { ...entry, data: presentSiteAdminData<FormData<ManagementModelName>>(siteAdminModelDescriptor(models, model), entry.data, client.assetUrl) }
+  }, asyncOptions)
+}
+
+${overloads('List')}
+export function useSiteAdminManagementList(model: ManagementModelName, options: AsyncDataOptions<SiteAdminEntryPage<FormData<ManagementModelName>>> & SiteAdminManagementDataOptions = {}) {
+  const connection = siteAdminManagementClientOptions()
+  const auth = useSiteAdminAuthScope(options.authScope, connection)
+  const locale = useSiteAdminLocale(options.locale)
+  const client = createSiteAdminManagementClient(connection)
+  const query = computed(() => ({ ...(locale.value === undefined ? {} : { locale: locale.value }), ...(toValue(options.limit) === undefined ? {} : { limit: toValue(options.limit)! }), ...(toValue(options.offset) === undefined ? {} : { offset: toValue(options.offset)! }), ...(toValue(options.q) === undefined ? {} : { q: toValue(options.q)! }) }))
+  const key = computed(() => siteAdminManagementKey(connection, auth.value, 'list', model, query.value, locale.value))
+  const { authScope: _auth, locale: _locale, limit: _limit, offset: _offset, q: _q, ...asyncOptions } = options
+  return siteAdminAsyncData(() => key.value, async (_app, { signal }) => {
+    const [models, page] = await Promise.all([client.models({ signal }), client.listEntries(model, { ...query.value, signal })])
+    const descriptor = siteAdminModelDescriptor(models, model)
+    return { ...page, items: page.items.map((entry) => ({ ...entry, data: presentSiteAdminData<FormData<ManagementModelName>>(descriptor, entry.data, client.assetUrl) })) }
+  }, asyncOptions)
+}
+`
