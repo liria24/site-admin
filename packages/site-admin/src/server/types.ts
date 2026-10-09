@@ -51,6 +51,12 @@ export interface EntryInput {
     translationGroup?: string
 }
 
+/** Publishes an existing revision or atomically stores and publishes a caller-owned candidate. */
+export type PublishEntryInput<Data = Record<string, unknown>> = {
+    actorId?: string
+    expectedVersion: number
+} & ({ revisionId?: string; draft?: never } | { draft: { data: Data; slug?: string }; revisionId?: never })
+
 export interface UpdateEntryInput {
     actorId?: string
     data: Record<string, unknown>

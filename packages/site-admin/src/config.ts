@@ -82,6 +82,7 @@ export interface SiteAdminAIConfig {
     model?: SiteAdminAIModel
     /** Server-only custom suggestion actions. */
     models?: Record<string, Record<string, SiteAdminAIAction>>
+    /** @deprecated Draft saves never invoke AI. Move generation into an explicit models action. */
     slug?: (input: { data: Record<string, unknown>; model: string }) => Promise<string | null> | string | null
 }
 
@@ -266,6 +267,15 @@ export type InferModelData<Model extends ModelDefinition> = InferFields<Model['f
 
 export type InferSiteAdminModels<Config extends SiteAdminConfig> = {
     [Name in keyof Config['models']]: InferModelData<Config['models'][Name]>
+}
+
+/** Configured action names remain part of the Nuxt model registry without exposing implementations. */
+export type InferSiteAdminAIActions<Config extends SiteAdminConfig> = {
+    [Name in keyof Config['models']]: Config extends { ai: { models: infer Actions } }
+        ? Name extends keyof Actions
+            ? Actions[Name]
+            : {}
+        : {}
 }
 
 type FormField<F extends AnyField> = F extends { kind: 'image' | 'file' }

@@ -742,13 +742,6 @@ export default defineNuxtModule<ModuleConfig>({
     },`
             : ''
         const aiEnabled = options.ai ?? Boolean(domainConfig.ai)
-        const aiOption =
-            aiEnabled && domainConfig.ai?.model !== undefined
-                ? `aiRuntime: async (context) => {
-      const { createSiteAdminAI } = await import('@liria24/site-admin/ai')
-      return createSiteAdminAI(domainConfig.ai.model, context ? { request: context.req, platformContext: context.context } : {})
-    },`
-                : ''
         nitro.experimental ??= {}
         nitro.experimental.tasks = true
         nitro.tasks ??= {}
@@ -834,7 +827,6 @@ export default defineNitroPlugin((nitroApp) => {
     if (siteAdmin) return siteAdmin
     siteAdmin = createSiteAdmin({
     aiEnabled: ${JSON.stringify(aiEnabled)},
-    ${aiOption}
     authorize: ${authorize},
     config: { ...domainConfig, assets: ${JSON.stringify(domainConfig.assets)} },
     database,

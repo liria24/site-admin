@@ -43,7 +43,7 @@ interface Helpers {
     ): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
 }
 
-const nativeEnvironment = async (request: typeof fetch) => {
+const nativeEnvironment = async (request: typeof fetch, i18n = false) => {
     const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
     const root = dirname(requireNuxt.resolve('nuxt/package.json'))
     const script = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
@@ -63,6 +63,7 @@ const nativeEnvironment = async (request: typeof fetch) => {
         }
     }
     const app = {
+        $i18n: { locale: Vue.ref('ja') },
         _asyncData: Vue.shallowReactive({}),
         _asyncDataPromises: {},
         payload: { data: Vue.shallowReactive({} as Record<string, unknown>), _errors: {}, serverRendered: false },
@@ -101,7 +102,7 @@ const nativeEnvironment = async (request: typeof fetch) => {
         `${native}; return { useAsyncData, clearNuxtData, refreshNuxtData, useNuxtData }`,
     )(...Object.values(nativeDependencies)) as Record<string, unknown>
     const generated = stripTypeScriptTypes(
-        siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage' }),
+        siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage', i18n }),
     )
         .replace(/^import .*$/gmu, '')
         .replace(/^export const siteAdminAsyncData = createUseAsyncData\(\)\s*$/gmu, '')
@@ -157,6 +158,63 @@ const modelDescriptor = createSiteAdminDescriptor(
 )
 
 describe('native management AsyncData and mutation invalidation', () => {
+    it('uses only explicit management locales while public helpers keep reactive i18n defaults', async () => {
+        const urls: URL[] = []
+        const { app, helpers } = await nativeEnvironment(async (input) => {
+            const url = new URL(String(input))
+            urls.push(url)
+            if (url.pathname === '/manage/models') return Response.json(modelDescriptor)
+            const entry = {
+                id: 'one',
+                model: 'posts',
+                locale: url.searchParams.get('locale') ?? '',
+                slug: 'one',
+                version: 1,
+                data: { title: 'Title' },
+            }
+            if (url.pathname === '/manage/entries')
+                return Response.json({ items: [entry], total: 1, limit: 50, offset: 0 })
+            if (url.pathname === '/manage/entries/one') return Response.json(entry)
+            return Response.json([
+                { data: { _siteAdmin: { id: 'one', model: 'posts', slug: 'one' }, title: 'Public' } },
+            ])
+        }, true)
+        const scope = Vue.effectScope()
+        const explicit = Vue.ref('ja')
+        const states = scope.run(() => ({
+            list: helpers.useSiteAdminManagementList('posts'),
+            entry: helpers.useSiteAdminManagementEntry('posts', 'one'),
+            localized: helpers.useSiteAdminManagementList('posts', { locale: explicit }),
+            public: helpers.useSiteAdminList('posts'),
+        }))!
+        await flush()
+        expect((states.entry.data.value as { locale: string }).locale).toBe('')
+        expect((states.list.data.value as { items: unknown[] }).items).toHaveLength(1)
+        expect(
+            urls.filter((url) => url.pathname === '/manage/entries').map((url) => url.searchParams.get('locale')),
+        ).toEqual([null, 'ja'])
+        expect(urls.find((url) => url.pathname === '/manage/entries/one')?.searchParams.get('locale')).toBeNull()
+        expect(urls.find((url) => url.pathname === '/content/posts')?.searchParams.get('locale')).toBe('ja')
+        const managementCount = urls.filter((url) => url.pathname.startsWith('/manage/')).length
+        app.$i18n.locale.value = 'en'
+        await flush()
+        expect(urls.filter((url) => url.pathname.startsWith('/manage/'))).toHaveLength(managementCount)
+        expect(
+            urls
+                .filter((url) => url.pathname === '/content/posts')
+                .at(-1)
+                ?.searchParams.get('locale'),
+        ).toBe('en')
+        explicit.value = 'en'
+        await flush()
+        expect(
+            urls
+                .filter((url) => url.pathname === '/manage/entries')
+                .at(-1)
+                ?.searchParams.get('locale'),
+        ).toBe('en')
+        scope.stop()
+    })
     it('hydrates an ID-only form from its raw native payload without another descriptor or entry request', async () => {
         let requests = 0
         const { app, helpers } = await nativeEnvironment(async () => {

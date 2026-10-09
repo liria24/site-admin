@@ -18,6 +18,7 @@ import type {
 import type {
     SiteAdminAIDraftProposal,
     SiteAdminAIProposal,
+    SiteAdminAIModelContext,
     SiteAdminAIRuntime,
     SiteAdminMetadataInput,
     SiteAdminProofreadInput,
@@ -45,6 +46,7 @@ import type {
     PublicEntry,
     PublicEntrySeo,
     PublishDueResult,
+    PublishEntryInput,
     RevisionRecord,
     SiteAdminDiagnostic,
     SiteAdminInspection,
@@ -177,6 +179,10 @@ const stableJson = (value: unknown): string =>
             : item,
     )
 
+// The DB requires a slug. This reserved, invalid URL value never reaches management DTOs or publication.
+const draftSlug = (id: string): string => `?site-admin-draft:${id}`
+const visibleSlug = (slug: string): string => (slug.startsWith('?site-admin-draft:') ? '' : slug)
+
 const toEntry = (row: EntryRow): EntryRecord => ({
     createdAt: row.created_at,
     currentRevisionId: row.current_revision_id,
@@ -189,7 +195,7 @@ const toEntry = (row: EntryRow): EntryRecord => ({
     revisionId: row.revision_id,
     scheduledAt: row.scheduled_at,
     scheduledRevisionId: row.scheduled_revision_id,
-    slug: row.slug,
+    slug: visibleSlug(row.slug),
     sortOrder: row.sort_order,
     translationGroup: row.translation_group,
     updatedAt: row.updated_at,
@@ -202,7 +208,7 @@ const toRevision = (row: RevisionRow): RevisionRecord => ({
     data: parseObject(row.data),
     entryId: row.entry_id,
     id: row.id,
-    slug: row.slug,
+    slug: visibleSlug(row.slug),
 })
 
 const toAsset = (row: AssetRow): AssetRecord => ({
@@ -280,8 +286,10 @@ export class SiteAdmin<Context = unknown> {
         this.#options = options
         this.#resolveRouteRule = createSiteAdminRouteResolver(options.config.routeRules)
         this.#descriptor = createSiteAdminDescriptor(options.config)
-        for (const model of Object.values(this.#descriptor.models))
-            model.ai = options.aiEnabled !== false && Boolean(options.aiRuntime)
+        for (const [name, model] of Object.entries(this.#descriptor.models))
+            model.ai =
+                options.aiEnabled !== false &&
+                Boolean(options.aiRuntime || (options.aiActions?.models ?? options.config.ai?.models)?.[name])
     }
 
     get config(): SiteAdminOptions<Context>['config'] {
@@ -520,18 +528,57 @@ export class SiteAdmin<Context = unknown> {
         entryId: string,
         actionName: string,
         input: Record<string, unknown>,
+        context?: SiteAdminAIModelContext,
     ): Promise<SiteAdminAIProposal> {
         await this.initialize()
         const entry = await this.getEntry(entryId)
+        if (this.#options.aiEnabled === false)
+            throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'AI operations are not available.')
+        if (input.draft !== undefined) {
+            if (
+                !isObject(input.draft) ||
+                !isObject(input.draft.data) ||
+                (input.draft.slug !== undefined && typeof input.draft.slug !== 'string')
+            )
+                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'AI draft must contain data and an optional slug.')
+            if (input.expectedVersion !== entry.version)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_CONFLICT',
+                    'Entry changed. Reload latest before generating a proposal.',
+                )
+        }
         const action = (this.#options.aiActions?.models ?? this.config.ai?.models)?.[entry.model]?.[actionName]
         if (!action) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `AI action "${actionName}" does not exist.`)
-        const output = await action({ entry, input })
+        const snapshot = isObject(input.draft)
+            ? {
+                  ...entry,
+                  data: input.draft.data as Record<string, unknown>,
+                  ...(typeof input.draft.slug === 'string' ? { slug: input.draft.slug } : {}),
+              }
+            : entry
+        let output
+        try {
+            const ai = this.config.ai?.model
+                ? (await import('../ai')).createSiteAdminAI(this.config.ai.model, context).generateText
+                : undefined
+            output = await action({
+                entry: structuredClone(snapshot),
+                input: structuredClone(input.draft !== undefined ? (isObject(input.input) ? input.input : {}) : input),
+                ...(context ? { context } : {}),
+                ...(ai ? { ai } : {}),
+            })
+        } catch {
+            throw new SiteAdminError('SITE_ADMIN_AI_FAILED', 'AI operation failed. Your draft is kept.')
+        }
+        const latest = await this.getEntry(entryId)
+        if (latest.version !== entry.version || latest.currentRevisionId !== entry.currentRevisionId)
+            throw new SiteAdminError('SITE_ADMIN_CONFLICT', 'Entry changed while generating a proposal.')
         const definition = this.#model(entry.model)
         const validated = await validateModelData(definition, output.data)
         const issues = [...(output.issues ?? []), ...validated.issues]
-        let slug = output.slug ?? entry.slug
+        let slug = output.slug ?? snapshot.slug
         try {
-            slug = validateSlug(slug, this.config.modelDefaults?.slug?.maxLength ?? 80)
+            if (slug !== '') slug = validateSlug(slug, this.config.modelDefaults?.slug?.maxLength ?? 80)
         } catch (error) {
             issues.push({ message: error instanceof Error ? error.message : 'Invalid slug.', path: 'slug' })
         }
@@ -760,28 +807,14 @@ export class SiteAdmin<Context = unknown> {
     }
 
     async #resolveSlug(
-        modelName: string,
         definition: ModelDefinition,
         data: Record<string, unknown>,
         explicit: string | undefined,
         fallbackId: string,
     ): Promise<string> {
         const maxLength = this.config.modelDefaults?.slug?.maxLength ?? 80
+        if (explicit === '' && definition.publishing !== false) return draftSlug(fallbackId)
         if (explicit !== undefined) return validateSlug(explicit, maxLength)
-        if (this.#options.aiEnabled && this.config.ai?.slug) {
-            try {
-                const suggestion = await this.config.ai.slug({ data, model: modelName })
-                if (suggestion) {
-                    const generated = slugify(suggestion, maxLength)
-                    if (generated) return generated
-                }
-            } catch (error) {
-                this.diagnostics.push({
-                    code: 'SITE_ADMIN_AI_SLUG_FAILED',
-                    message: error instanceof Error ? error.message : 'AI slug generation failed.',
-                })
-            }
-        }
         const generated = slugify(preferredSlugSource(definition, data) ?? '', maxLength)
         return validateSlug(generated || fallbackId, maxLength)
     }
@@ -1214,7 +1247,7 @@ export class SiteAdmin<Context = unknown> {
         const locale = this.#locale(definition, input.locale)
         const id = safeId(input.id ?? this.#id(), 'Entry ID')
         const prepared = await this.#prepareData(definition, input.data, true)
-        const slug = await this.#resolveSlug(modelName, definition, prepared.data, input.slug, id)
+        const slug = await this.#resolveSlug(definition, prepared.data, input.slug, id)
         const revisionId = this.#id()
         const time = this.#now()
         const published = definition.publishing === false
@@ -1309,7 +1342,7 @@ export class SiteAdmin<Context = unknown> {
         const slug =
             input.slug === undefined
                 ? entry.slug
-                : await this.#resolveSlug(entry.model, definition, prepared.data, input.slug, entry.id)
+                : await this.#resolveSlug(definition, prepared.data, input.slug, entry.id)
         const revisionId = this.#id()
         const time = this.#now()
         const published = definition.publishing === false
@@ -1407,15 +1440,33 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    async publishEntry(
-        entryId: string,
-        input: { actorId?: string; expectedVersion: number; revisionId?: string },
-    ): Promise<EntryRecord> {
+    async publishEntry(entryId: string, input: PublishEntryInput): Promise<EntryRecord> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
         const definition = this.#model(entry.model)
-        const revision = await this.#revision(input.revisionId ?? entry.current_revision_id, entryId)
-        const prepared = await this.#prepareRevision(definition, revision)
+        if (input.draft !== undefined && input.revisionId !== undefined)
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'draft and revisionId are mutually exclusive.')
+        if (
+            input.draft !== undefined &&
+            (!isObject(input.draft) ||
+                !isObject(input.draft.data) ||
+                (input.draft.slug !== undefined && typeof input.draft.slug !== 'string'))
+        )
+            throw new SiteAdminError(
+                'SITE_ADMIN_INVALID_INPUT',
+                'Publish draft must contain data and an optional slug.',
+            )
+        const revision = input.draft
+            ? undefined
+            : await this.#revision(input.revisionId ?? entry.current_revision_id, entryId)
+        const slug = validateSlug(
+            input.draft?.slug ?? revision?.slug ?? entry.slug,
+            this.config.modelDefaults?.slug?.maxLength ?? 80,
+        )
+        const prepared = input.draft
+            ? await this.#prepareData(definition, input.draft.data, false)
+            : await this.#prepareRevision(definition, revision!)
+        const revisionId = revision?.id ?? this.#id()
         await this.#assertPublishableRelations(definition, prepared.relations, entryId)
         const time = this.#now()
         const guard = this.#combineGuards(
@@ -1423,6 +1474,20 @@ export class SiteAdmin<Context = unknown> {
             this.#referenceGuard(definition, prepared, true),
         )
         const statements: AtomicStatement[] = [
+            ...(input.draft
+                ? this.#revisionStatements({
+                      ...(input.actorId ? { actorId: input.actorId } : {}),
+                      assets: prepared.assets,
+                      data: prepared.data,
+                      entryId,
+                      ...(guard ? { guard } : {}),
+                      model: definition,
+                      revisionId,
+                      slug,
+                      time,
+                      relations: prepared.relations,
+                  })
+                : []),
             ...(await this.#routeStatements({
                 data: prepared.data,
                 definition,
@@ -1430,17 +1495,25 @@ export class SiteAdmin<Context = unknown> {
                 ...(guard ? { guard } : {}),
                 modelName: entry.model,
                 locale: entry.locale,
-                revisionId: revision.id,
-                slug: revision.slug,
+                revisionId,
+                slug,
                 time,
             })),
             this.#generationStatement(guard),
             {
                 expectRow: true,
-                params: [revision.id, time, time, entryId, input.expectedVersion, ...(guard?.params ?? [])],
+                params: [
+                    ...(input.draft ? [revisionId] : []),
+                    revisionId,
+                    time,
+                    time,
+                    entryId,
+                    input.expectedVersion,
+                    ...(guard?.params ?? []),
+                ],
                 query: true,
                 sql: `UPDATE site_admin_entries
-                      SET published_revision_id = ?, published_at = ?, scheduled_revision_id = NULL, scheduled_at = NULL,
+                      SET ${input.draft ? 'current_revision_id = ?,' : ''} published_revision_id = ?, published_at = ?, scheduled_revision_id = NULL, scheduled_at = NULL,
                           version = version + 1, updated_at = ?
                       WHERE id = ? AND version = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING version`,
             },
@@ -1450,7 +1523,7 @@ export class SiteAdmin<Context = unknown> {
             ...(input.actorId ? { actorId: input.actorId } : {}),
             entryId,
             model: entry.model,
-            revisionId: revision.id,
+            revisionId,
             type: 'publish',
         })
         return this.getEntry(entryId)
@@ -1526,33 +1599,77 @@ export class SiteAdmin<Context = unknown> {
         return this.getEntry(entryId)
     }
 
-    async schedulePublish(
-        entryId: string,
-        input: { actorId?: string; at: Date | string; expectedVersion: number; revisionId?: string },
-    ): Promise<EntryRecord> {
+    async schedulePublish(entryId: string, input: PublishEntryInput & { at: Date | string }): Promise<EntryRecord> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
-        const revision = await this.#revision(input.revisionId ?? entry.current_revision_id, entryId)
+        const definition = this.#model(entry.model)
+        if (input.draft !== undefined && input.revisionId !== undefined)
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'draft and revisionId are mutually exclusive.')
+        if (
+            input.draft !== undefined &&
+            (!isObject(input.draft) ||
+                !isObject(input.draft.data) ||
+                (input.draft.slug !== undefined && typeof input.draft.slug !== 'string'))
+        )
+            throw new SiteAdminError(
+                'SITE_ADMIN_INVALID_INPUT',
+                'Publish draft must contain data and an optional slug.',
+            )
+        const revision = input.draft
+            ? undefined
+            : await this.#revision(input.revisionId ?? entry.current_revision_id, entryId)
+        const slug = validateSlug(
+            input.draft?.slug ?? revision?.slug ?? entry.slug,
+            this.config.modelDefaults?.slug?.maxLength ?? 80,
+        )
+        const prepared = input.draft ? await this.#prepareData(definition, input.draft.data, false) : undefined
+        const revisionId = revision?.id ?? this.#id()
         const at = input.at instanceof Date ? input.at : new Date(input.at)
         if (!Number.isFinite(at.getTime()) || at.getTime() <= this.#date().getTime()) {
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Scheduled publish time must be in the future.')
         }
         const time = this.#now()
+        const guard = this.#combineGuards(
+            this.#guard(entryId, input.expectedVersion),
+            prepared ? this.#referenceGuard(definition, prepared, false) : undefined,
+        )
         await this.#commit([
+            ...(prepared
+                ? this.#revisionStatements({
+                      ...(input.actorId ? { actorId: input.actorId } : {}),
+                      assets: prepared.assets,
+                      data: prepared.data,
+                      entryId,
+                      ...(guard ? { guard } : {}),
+                      model: definition,
+                      revisionId,
+                      slug,
+                      time,
+                      relations: prepared.relations,
+                  })
+                : []),
             {
                 expectRow: true,
-                params: [revision.id, at.toISOString(), time, entryId, input.expectedVersion],
+                params: [
+                    ...(input.draft ? [revisionId] : []),
+                    revisionId,
+                    at.toISOString(),
+                    time,
+                    entryId,
+                    input.expectedVersion,
+                    ...(guard?.params ?? []),
+                ],
                 query: true,
                 sql: `UPDATE site_admin_entries
-                      SET scheduled_revision_id = ?, scheduled_at = ?, version = version + 1, updated_at = ?
-                      WHERE id = ? AND version = ? RETURNING version`,
+                      SET ${input.draft ? 'current_revision_id = ?,' : ''} scheduled_revision_id = ?, scheduled_at = ?, version = version + 1, updated_at = ?
+                      WHERE id = ? AND version = ?${guard ? ` AND ${guard.clause}` : ''} RETURNING version`,
             },
         ])
         await this.#afterCommit({
             ...(input.actorId ? { actorId: input.actorId } : {}),
             entryId,
             model: entry.model,
-            revisionId: revision.id,
+            revisionId,
             type: 'schedule',
         })
         return this.getEntry(entryId)

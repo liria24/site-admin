@@ -1,11 +1,15 @@
 import type { SiteAdminIssue } from './errors'
 import type { EntryRecord } from './server/types'
 import type { ModelDefinition } from './config'
-import type { LanguageModel } from 'ai'
+import type { LanguageModel, Output, ToolSet, generateText } from 'ai'
 
 export interface SiteAdminAIActionInput {
     entry: EntryRecord
     input: Record<string, unknown>
+    /** Native request/task context, for application-owned SDK model and prompt selection. */
+    context?: SiteAdminAIModelContext
+    /** Model-bound native AI SDK call. Prompts, outputs and provider options belong to this action. */
+    ai?: SiteAdminAIExecution
 }
 
 export interface SiteAdminAIActionResult {
@@ -45,6 +49,16 @@ export type SiteAdminAIModel =
     | LanguageModel
     | ((context: SiteAdminAIModelContext) => LanguageModel | Promise<LanguageModel>)
 
+type NativeContext = NonNullable<Parameters<typeof generateText>[0]['runtimeContext']>
+type WithoutModel<Options> = Options extends unknown ? Omit<Options, 'model'> : never
+export type SiteAdminAIExecution = <
+    Tools extends ToolSet,
+    Context extends NativeContext = NativeContext,
+    Result extends Output.Output = Output.Output<string, string>,
+>(
+    options: WithoutModel<Parameters<typeof generateText<Tools, Context, Result>>[0]>,
+) => ReturnType<typeof generateText<Tools, Context, Result>>
+
 export interface SiteAdminMetadataInput {
     data: Record<string, unknown>
     generate: { slug?: boolean; excerpt?: boolean }
@@ -53,7 +67,7 @@ export interface SiteAdminMetadataInput {
 
 export interface SiteAdminProofreadInput {
     data: Record<string, unknown>
-    /** Top-level text, textarea, or markdown fields. Defaults to populated textual fields. */
+    /** Legacy application callback input. The SDK does not select fields or supply an editing policy. */
     fields?: readonly string[]
 }
 
@@ -64,6 +78,7 @@ export interface SiteAdminAIDraftProposal {
     slug?: string
 }
 
+/** @deprecated Optional application-owned legacy callbacks. No SDK generation policies are supplied. */
 export interface SiteAdminAIRuntime {
     generateMetadata(
         model: string,

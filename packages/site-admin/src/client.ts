@@ -14,6 +14,7 @@ import type {
     EntryRecord,
     IncomingReference,
     PublicEntry,
+    PublishEntryInput,
     PublishDueResult,
     RevisionRecord,
     SiteAdminInspection,
@@ -35,6 +36,9 @@ export type SiteAdminManagementModels = SiteAdminClientRegistry extends { manage
 export type SiteAdminFormModels = SiteAdminClientRegistry extends { formModels: infer Models }
     ? Models
     : SiteAdminManagementModels
+export type SiteAdminAIActionModels = SiteAdminClientRegistry extends { aiActions: infer Actions }
+    ? Actions
+    : Record<string, Record<string, unknown>>
 export { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset } from './management-assets'
 export type { SiteAdminAsset } from './management-assets'
 
@@ -65,6 +69,9 @@ export type SiteAdminProofreadDraftInput<Data = Record<string, unknown>> = Omit<
 export type SiteAdminDraftProposal<Data = Record<string, unknown>> = Omit<SiteAdminAIDraftProposal, 'data'> & {
     data: Partial<Data>
 }
+export type SiteAdminAIActionRequest<Data = Record<string, unknown>> = Record<string, unknown> &
+    ({ draft?: never } | { expectedVersion: number; draft: { data: Data; slug?: string } })
+export type SiteAdminActionProposal<Data = Record<string, unknown>> = Omit<SiteAdminAIProposal, 'data'> & { data: Data }
 
 export const managementAssetUrl = (id: string, base = '/api/site-admin'): string =>
     `${base.replace(/\/$/u, '')}/assets/${encodeURIComponent(id)}/content`
@@ -115,13 +122,10 @@ export interface SiteAdminVersionInput {
     expectedVersion: number
 }
 
-export interface SiteAdminPublishInput extends SiteAdminVersionInput {
-    revisionId?: string
-}
+export type SiteAdminPublishInput<Data = Record<string, unknown>> = SiteAdminVersionInput &
+    (PublishEntryInput<Data> extends infer Input ? (Input extends object ? Omit<Input, 'actorId'> : never) : never)
 
-export interface SiteAdminScheduleInput extends SiteAdminPublishInput {
-    at: string
-}
+export type SiteAdminScheduleInput<Data = Record<string, unknown>> = SiteAdminPublishInput<Data> & { at: string }
 
 export interface SiteAdminSortInput extends SiteAdminVersionInput {
     id: string
@@ -324,9 +328,15 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
         input: SiteAdminUpdateEntryInput<Data>,
     ): Promise<SiteAdminEntryMutation<Data>>
     deleteEntry(id: string, input: SiteAdminVersionInput): Promise<void>
-    publishEntry(id: string, input: SiteAdminPublishInput): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
+    publishEntry<Data extends ManagementData<Models> = ManagementData<Models>>(
+        id: string,
+        input: SiteAdminPublishInput<Data>,
+    ): Promise<SiteAdminEntryMutation<Data>>
     unpublishEntry(id: string, input: SiteAdminVersionInput): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
-    schedulePublish(id: string, input: SiteAdminScheduleInput): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
+    schedulePublish<Data extends ManagementData<Models> = ManagementData<Models>>(
+        id: string,
+        input: SiteAdminScheduleInput<Data>,
+    ): Promise<SiteAdminEntryMutation<Data>>
     cancelScheduledPublish(
         id: string,
         input: SiteAdminVersionInput,
@@ -360,7 +370,12 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
         input: SiteAdminProofreadDraftInput<Models[Name]>,
         options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminDraftProposal<Models[Name]>>
-    runAIAction(id: string, action: string, input: Record<string, unknown>): Promise<SiteAdminAIProposal>
+    runAIAction<Data extends ManagementData<Models> = ManagementData<Models>>(
+        id: string,
+        action: string,
+        input: SiteAdminAIActionRequest<Data>,
+        options?: SiteAdminRequestOptions,
+    ): Promise<SiteAdminActionProposal<Data>>
     uploadAsset(file: File): Promise<AssetRecord>
     uploadAsset(body: Blob, options: SiteAdminAssetUploadOptions): Promise<AssetRecord>
     getAsset(id: string): Promise<AssetRecord>
@@ -467,7 +482,8 @@ export const createSiteAdminManagementClient = <
             mutate(`/models/${encodeURIComponent(model)}/ai/metadata`, 'POST', input, requestOptions),
         proofreadDraft: (model, input, requestOptions) =>
             mutate(`/models/${encodeURIComponent(model)}/ai/proofread`, 'POST', input, requestOptions),
-        runAIAction: (id, action, input) => mutate(`${entryPath(id)}/ai/${encodeURIComponent(action)}`, 'POST', input),
+        runAIAction: (id, action, input, requestOptions) =>
+            mutate(`${entryPath(id)}/ai/${encodeURIComponent(action)}`, 'POST', input, requestOptions),
         uploadAsset: async (body, uploadOptions) => {
             const filename = uploadOptions?.filename ?? ('name' in body ? String(body.name) : undefined)
             if (!filename) throw new TypeError('A filename is required to upload an asset.')

@@ -48,7 +48,7 @@ export interface UseSiteAdminFormOptions<Data extends Record<string, unknown>> {
     initialEntry?: EntryRecord
     client?: SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     presentation?: boolean
-    /** Nuxt model-driven forms generate selected automatic metadata as part of an explicit save. */
+    /** @deprecated Saves never invoke AI. Select an explicit ai.run action instead. */
     generateMetadataOnSubmit?: boolean
     loadDescriptor?: (signal: AbortSignal) => Promise<ModelDescriptor>
     loadEntry?: (id: string, signal: AbortSignal) => Promise<EntryRecord>
@@ -147,14 +147,11 @@ const descriptorIssues = (
 
 const descriptorSchema = <Data extends Record<string, unknown>>(
     model: ModelDescriptor,
-    generatedField?: string,
 ): StandardSchemaV1<Data, Data> => ({
     '~standard': {
         validate: (value) => {
             const data = value as Data
-            const issues = descriptorIssues(model.fields, data).filter(
-                (issue) => !generatedField || issue.path?.[0] !== generatedField,
-            )
+            const issues = descriptorIssues(model.fields, data)
             return issues.length > 0 ? { issues } : { value: data }
         },
         vendor: 'site-admin',
@@ -192,7 +189,13 @@ const uploadWithProgress = (url: string, file: File, progress: Ref<number | null
         xhr.send(file)
     })
 
-export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: UseSiteAdminFormOptions<Data>) => {
+export const useSiteAdminForm = <
+    Data extends Record<string, unknown>,
+    Action extends string = string,
+    RawData extends Record<string, unknown> = Data,
+>(
+    options: UseSiteAdminFormOptions<Data>,
+) => {
     const basePath = `/${(options.managementBase ?? '/api/site-admin').split('/').filter(Boolean).join('/')}`
     const base = `${options.origin?.replace(/\/$/u, '') ?? ''}${basePath}`
     const client =
@@ -210,14 +213,7 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
     const version = ref(initial?.version ?? null)
     const hasSlugInput = 'slug' in options
     const slug = ref(toValue(options.slug) ?? initial?.slug ?? '')
-    const defaultMetadata = (): SiteAdminSessionDraft['metadata'] => {
-        const excerpt = descriptor.value.fields[descriptor.value.displayFields?.description ?? 'excerpt']
-        const auto = !options.generateMetadataOnSubmit || descriptor.value.ai === true
-        return {
-            slug: auto ? 'auto' : 'manual',
-            excerpt: auto && (excerpt?.kind === 'text' || excerpt?.kind === 'textarea') ? 'auto' : 'manual',
-        }
-    }
+    const defaultMetadata = (): SiteAdminSessionDraft['metadata'] => ({ slug: 'manual', excerpt: 'manual' })
     const metadata = ref<SiteAdminSessionDraft['metadata']>(
         initial ? { slug: 'manual', excerpt: 'manual' } : defaultMetadata(),
     )
@@ -262,6 +258,11 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
     let authorized = true
     const uploadProgress = ref<number | null>(null)
     const uploadError = ref<string | null>(null)
+    let submitIntent: 'save' | 'publish' | 'schedule' = 'save'
+    let scheduleAt: string | undefined
+    let publishedResult: SiteAdminEntryMutation<Data> | undefined
+    let publishing: Promise<SiteAdminEntryMutation<Data> | undefined> | undefined
+    const publishBusy = ref(false)
     const form = useForm({
         defaultValues: present(siteAdminFormDefaults(descriptor.value, initial?.data ?? options.defaultValues)),
         validators: [
@@ -271,13 +272,7 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                         vendor: 'site-admin',
                         version: 1 as const,
                         validate: (value: unknown) => {
-                            const excerptName = descriptor.value.displayFields?.description ?? 'excerpt'
-                            return descriptorSchema<Data>(
-                                descriptor.value,
-                                options.generateMetadataOnSubmit && metadata.value.excerpt === 'auto'
-                                    ? excerptName
-                                    : undefined,
-                            )['~standard'].validate(value)
+                            return descriptorSchema<Data>(descriptor.value)['~standard'].validate(value)
                         },
                     },
                 },
@@ -290,11 +285,12 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             conflict.value = false
             if (!authorized || loading.value || loadError.value)
                 return createValidationError({ fields: {}, form: 'Load the current entry before saving.' })
+            const intent = submitIntent
             const submittedIdentity = identity.value
             const submittedVersion = version.value
             const submittedId = entryId.value
             // Core callers have always been able to supply a getter evaluated at submission.
-            let submittedSlug = hasSlugInput ? toValue(options.slug) : slug.value
+            const submittedSlug = hasSlugInput ? toValue(options.slug) : slug.value
             if (hasSlugInput) slug.value = submittedSlug ?? ''
             const submittedInputSlug = slug.value
             const submittedLocale = toValue(options.locale)
@@ -303,100 +299,43 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             const updating = entryId.value !== null
             let entry: SiteAdminEntryMutation<Record<string, unknown>>
             try {
-                const excerptName = descriptor.value.displayFields?.description ?? 'excerpt'
-                const excerptField = descriptor.value.fields[excerptName]
-                const generate = {
-                    slug: metadata.value.slug === 'auto',
-                    excerpt:
-                        metadata.value.excerpt === 'auto' &&
-                        (excerptField?.kind === 'text' || excerptField?.kind === 'textarea'),
-                }
-                if (options.generateMetadataOnSubmit && (generate.slug || generate.excerpt)) {
-                    if (descriptor.value.ai !== true)
-                        throw new SiteAdminClientError(
-                            'SITE_ADMIN_AI_UNAVAILABLE',
-                            'Automatic metadata is unavailable. Enter metadata manually before saving.',
-                            503,
-                        )
-                    aiRequest?.abort()
-                    const request = new AbortController()
-                    aiRequest = request
-                    const generationId = ++generation
-                    const snapshot = inputSnapshot()
-                    aiBusy.value = 'metadata'
-                    aiError.value = null
-                    aiStale.value = false
-                    try {
-                        const generated = await client.generateMetadata(
-                            options.modelName,
-                            {
-                                data: submittedData,
-                                generate,
-                                ...(submittedSlug === undefined ? {} : { slug: submittedSlug }),
-                            },
-                            { signal: request.signal },
-                        )
-                        if (generationId !== generation || identity.value !== submittedIdentity) return
-                        if (request.signal.aborted || snapshot !== inputSnapshot()) {
-                            aiStale.value = true
-                            return createValidationError({
-                                fields: {},
-                                form: 'The draft changed during metadata generation. Save again.',
-                            })
-                        }
-                        if (
-                            generated.issues.length ||
-                            (generate.slug && !generated.slug?.trim()) ||
-                            (generate.excerpt &&
-                                (typeof generated.data[excerptName] !== 'string' ||
-                                    !(generated.data[excerptName] as string).trim()))
-                        ) {
-                            throw new SiteAdminClientError(
-                                'SITE_ADMIN_AI_OUTPUT_INVALID',
-                                'AI returned incomplete metadata. Your input is kept.',
-                                502,
-                                generated.issues,
-                            )
-                        }
-                        if (generate.slug) submittedSlug = generated.slug!
-                        if (generate.excerpt) submittedData[excerptName] = generated.data[excerptName]
-                        const issues = descriptorIssues(descriptor.value.fields, submittedData)
-                        if (issues.length)
-                            throw new SiteAdminClientError(
-                                'SITE_ADMIN_AI_OUTPUT_INVALID',
-                                'AI metadata does not satisfy the model. Your input is kept.',
-                                502,
-                                issues.map((issue) => ({
-                                    message: issue.message,
-                                    path: (issue.path ?? [])
-                                        .map((part) => (typeof part === 'object' ? String(part.key) : String(part)))
-                                        .join('.'),
-                                })),
-                            )
-                    } catch (error) {
-                        if (generationId !== generation || identity.value !== submittedIdentity) return
-                        aiError.value = error
-                        throw error
-                    } finally {
-                        if (generationId === generation) aiBusy.value = null
-                    }
-                }
                 const input = {
                     data: submittedData,
                     ...(hasSlugInput
                         ? submittedSlug === undefined
                             ? {}
                             : { slug: submittedSlug }
-                        : submittedSlug || metadata.value.slug === 'manual'
-                          ? { slug: submittedSlug ?? '' }
-                          : {}),
+                        : { slug: submittedSlug ?? '' }),
                 }
-                entry = updating
-                    ? await client.updateEntry(submittedId!, { ...input, expectedVersion: submittedVersion! })
-                    : await client.createEntry(options.modelName, {
-                          ...input,
-                          ...(submittedLocale ? { locale: submittedLocale } : {}),
-                      })
+                if (
+                    intent !== 'save' &&
+                    (!submittedId ||
+                        submittedVersion === null ||
+                        aiBusy.value ||
+                        aiStale.value ||
+                        aiError.value ||
+                        conflict.value)
+                )
+                    throw new SiteAdminClientError(
+                        'SITE_ADMIN_CONFLICT',
+                        'Save a current draft and apply or discard pending AI proposals before publishing.',
+                        409,
+                    )
+                entry =
+                    intent === 'publish'
+                        ? await client.publishEntry(submittedId!, { expectedVersion: submittedVersion!, draft: input })
+                        : intent === 'schedule'
+                          ? await client.schedulePublish(submittedId!, {
+                                expectedVersion: submittedVersion!,
+                                at: scheduleAt!,
+                                draft: input,
+                            })
+                          : updating
+                            ? await client.updateEntry(submittedId!, { ...input, expectedVersion: submittedVersion! })
+                            : await client.createEntry(options.modelName, {
+                                  ...input,
+                                  ...(submittedLocale ? { locale: submittedLocale } : {}),
+                              })
             } catch (cause) {
                 const error: SiteAdminFormError = {
                     code: cause instanceof SiteAdminClientError ? cause.code : 'SITE_ADMIN_REQUEST_FAILED',
@@ -459,6 +398,7 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                     callbackError.value = error
                 }
             }
+            if (intent !== 'save' && currentIdentity) publishedResult = result
             return result
         },
     })
@@ -585,48 +525,39 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
         await refresh()
     }
     const proposal = shallowRef<SiteAdminDraftProposal<Data> | null>(null)
-    const aiBusy = ref<'metadata' | 'proofread' | null>(null)
+    const aiBusy = ref<string | null>(null)
     const aiError = shallowRef<unknown>(null)
     const aiStale = ref(false)
     let proposalSnapshot: string | null = null
     const inputSnapshot = () =>
         canonical([identity.value, serialize(values.value), slug.value, metadata.value, version.value])
-    const propose = async (
-        kind: 'metadata' | 'proofread',
-        fields?: readonly Extract<keyof Data, string>[],
-    ): Promise<void> => {
+    const propose = async (kind: string, actionInput?: Record<string, unknown>): Promise<void> => {
         aiRequest?.abort()
         const transportRequest = new AbortController()
         aiRequest = transportRequest
         const request = ++generation
         const snapshot = inputSnapshot()
+        const snapshotVersion = version.value
         aiBusy.value = kind
         aiError.value = null
         aiStale.value = false
         proposal.value = null
         try {
             const data = serialize(form.state.values)
-            const result =
-                kind === 'metadata'
-                    ? await client.generateMetadata(
-                          options.modelName,
-                          {
-                              data,
-                              slug: slug.value,
-                              generate: {
-                                  slug: metadata.value.slug === 'auto',
-                                  excerpt: metadata.value.excerpt === 'auto',
-                              },
-                          },
-                          { signal: transportRequest.signal },
-                      )
-                    : await client.proofreadDraft(
-                          options.modelName,
-                          { data, ...(fields ? { fields } : {}) },
-                          { signal: transportRequest.signal },
-                      )
+            if (actionInput !== undefined && (entryId.value === null || version.value === null))
+                throw new SiteAdminClientError(
+                    'SITE_ADMIN_INVALID_INPUT',
+                    'Save the draft before running an entry action.',
+                    400,
+                )
+            const result = await client.runAIAction(
+                entryId.value!,
+                kind,
+                { expectedVersion: version.value!, draft: { data, slug: slug.value }, input: actionInput ?? {} },
+                { signal: transportRequest.signal },
+            )
             if (request !== generation) return
-            if (snapshot !== inputSnapshot()) {
+            if (transportRequest.signal.aborted || snapshot !== inputSnapshot() || result.version !== snapshotVersion) {
                 aiStale.value = true
                 return
             }
@@ -647,15 +578,20 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
         aiStale.value = false
         aiError.value = null
     }
-    const applyProposal = (): boolean => {
+    const applyProposal = (
+        selection: { fields?: readonly Extract<keyof Data, string>[]; slug?: boolean } = {},
+    ): boolean => {
         if (!proposal.value || aiStale.value || proposalSnapshot !== inputSnapshot()) {
             aiStale.value = true
             return false
         }
         const selected = proposal.value
+        if (selected.issues.length) return false
         discardProposal()
-        for (const [name, value] of Object.entries(selected.data)) form.setFieldValue(name as never, value as never)
-        if (selected.slug !== undefined) slug.value = selected.slug
+        for (const [name, value] of Object.entries(selected.data))
+            if (!selection.fields || selection.fields.includes(name as Extract<keyof Data, string>))
+                form.setFieldValue(name as never, value as never)
+        if (selection.slug !== false && selected.slug !== undefined) slug.value = selected.slug
         remember()
         return true
     }
@@ -721,6 +657,28 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                   : asset,
         )
     }
+    const publish = (at?: string): Promise<SiteAdminEntryMutation<Data> | undefined> => {
+        if (publishing) return publishing
+        if (form.state.isSubmitting) {
+            serverError.value = { code: 'SITE_ADMIN_CONFLICT', message: 'Wait for the current save before publishing.' }
+            return Promise.resolve(undefined)
+        }
+        submitIntent = at === undefined ? 'publish' : 'schedule'
+        scheduleAt = at
+        publishedResult = undefined
+        publishBusy.value = true
+        publishing = (async () => {
+            try {
+                await form.handleSubmit()
+                return publishedResult
+            } finally {
+                submitIntent = 'save'
+                publishBusy.value = false
+                publishing = undefined
+            }
+        })()
+        return publishing
+    }
     return {
         asset: {
             clear: (field: string) => setAsset(field, null),
@@ -730,6 +688,9 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             upload,
         },
         conflict,
+        publish: () => publish(),
+        schedule: (at: string) => publish(at),
+        publishBusy,
         callbackError,
         descriptor,
         dirty,
@@ -748,7 +709,7 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
                 await refresh()
             },
             serialize: () =>
-                clone({ data: serialize(form.state.values), slug: slug.value, baseVersion: version.value }),
+                clone({ data: serialize(form.state.values) as RawData, slug: slug.value, baseVersion: version.value }),
         },
         metadata: {
             modes: metadata,
@@ -764,8 +725,14 @@ export const useSiteAdminForm = <Data extends Record<string, unknown>>(options: 
             stale: aiStale,
             apply: applyProposal,
             discard: discardProposal,
-            generateMetadata: () => propose('metadata'),
-            proofread: (fields?: readonly Extract<keyof Data, string>[]) => propose('proofread', fields),
+            run: (action: Action, input: Record<string, unknown> = {}) => propose(action, input),
+            /** @deprecated Use application-owned config.ai.models actions with ai.run. */
+            generateMetadata: () =>
+                propose('metadata', {
+                    generate: { slug: metadata.value.slug === 'auto', excerpt: metadata.value.excerpt === 'auto' },
+                }),
+            proofread: (fields?: readonly Extract<keyof Data, string>[]) =>
+                propose('proofread', { ...(fields ? { fields } : {}) }),
         },
         entryId,
         form,

@@ -24,7 +24,7 @@ it('infers high-level form, management list, field and successful save types fro
 export default defineSiteAdminConfig({ models: {
   posts: { fields: { title: text({ required: true }), copy: markdown({ required: true }), image: image(), gallery: images(), sections: array(object({ attachment: file() })) } },
   authors: { fields: { name: text({ required: true }) } },
-} })
+}, ai: { models: { posts: { publication: ({ entry }) => ({ data: entry.data }), correct: ({ entry }) => ({ data: entry.data }) } } } })
 `,
     )
     await writeFile(
@@ -62,6 +62,20 @@ const nestedUrl: string | undefined = editor.form.state.values.sections?.[0]?.at
 editor.form.setFieldValue('title', 'Typed')
 editor.form.setFieldValue('image', { id: 'asset', url: '/manage/assets/asset/content' })
 editor.ai.proofread(['copy'])
+editor.ai.run('publication', { mode: 'automatic' })
+editor.ai.apply({ fields: ['title'], slug: false })
+const snapshot = editor.draft.serialize()
+const snapshotTitle: string = snapshot.data.title
+const published = await editor.publish()
+const scheduled = await editor.schedule('2099-01-01T00:00:00Z')
+if (published && 'data' in published) { const title: string = published.data.title; void title }
+// @ts-expect-error Configured action names are inferred for this model.
+editor.ai.run('unconfigured')
+// @ts-expect-error The app selects descriptor-backed fields to apply.
+editor.ai.apply({ fields: ['missing'] })
+// @ts-expect-error Draft serialization returns raw asset references, without presentation URLs.
+snapshot.data.image?.url
+void [snapshotTitle, scheduled]
 const uploadUrl: string = (await editor.upload(new File(['image'], 'image.png'))).url
 const list = useSiteAdminManagementList('posts', { q: ref('search'), locale: ref('ja'), limit: 25 })
 const listUrl: string | undefined = list.data.value?.items[0]?.data.image?.url
