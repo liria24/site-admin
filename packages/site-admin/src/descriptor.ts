@@ -23,6 +23,8 @@ export interface FieldDescriptor {
 }
 
 export interface ModelDescriptor {
+    /** Unsaved metadata/proofreading runtime is available; actor permissions may further restrict it. */
+    ai?: boolean
     fields: Record<string, FieldDescriptor>
     displayFields?: ModelDefinition['displayFields']
     public: boolean

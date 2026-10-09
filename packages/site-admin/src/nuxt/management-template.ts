@@ -18,7 +18,7 @@ export const siteAdminNuxtManagementDataTemplate = (options: SiteAdminClientTemp
 import type { SiteAdminEntry, SiteAdminEntryPage, SiteAdminFormModels, SiteAdminManagementModels, SiteAdminMutation } from '@liria24/site-admin/client'
 import { presentSiteAdminData } from '@liria24/site-admin/client'
 import type { ModelDescriptor, SiteAdminDescriptor } from '@liria24/site-admin'
-import { clearNuxtData, refreshNuxtData, useNuxtData, useNuxtApp${options.auth ? ', useUserSession' : ''} } from '#imports'
+import { clearNuxtData, refreshNuxtData, useNuxtApp${options.auth ? ', useUserSession' : ''} } from '#imports'
 import { watch } from 'vue'
 
 type ManagementModelName = Extract<keyof SiteAdminFormModels, string>
@@ -44,8 +44,16 @@ export const useSiteAdminAuthScope = (provided?: MaybeRefOrGetter<string>, conne
 export const siteAdminManagementKey = (connection: SiteAdminManagementClientOptions, scope: string, operation: string, model: string | null, identity: unknown, locale?: string): string =>
   'site-admin-management:' + JSON.stringify([connection.origin ?? 'same-origin', connection.basePath ?? ${JSON.stringify(options.managementBase)}, scope, operation, model, identity, locale ?? null])
 
+const siteAdminCachedEntryId = (data: unknown): string | undefined => {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined
+  const id = (data as { id?: unknown }).id
+  return typeof id === 'string' ? id : undefined
+}
+
 const siteAdminInvalidateMutation = async (connection: SiteAdminManagementClientOptions, scope: string, mutation: SiteAdminMutation): Promise<void> => {
   const keys: string[] = []
+  // useNuxtData subscribes to AsyncData; mutation observers must only inspect serialized DTOs.
+  const payload = useNuxtApp().payload.data
   clearNuxtData((key) => {
     let matches = false
     try {
@@ -57,11 +65,15 @@ const siteAdminInvalidateMutation = async (connection: SiteAdminManagementClient
         const [origin, base, operation, model, slug] = JSON.parse(key.slice('site-admin:'.length))
         if (origin === connection.origin && base === ${JSON.stringify(options.basePath)}) {
           if (operation === 'list') matches = model === mutation.model
-          else if (operation === 'entry') matches = model === mutation.model && (slug === mutation.id || (mutation.slug !== undefined && slug === mutation.slug) || useNuxtData<{ id: string }>(key).data.value?.id === mutation.id)
+          // Native transform/pick may remove identity; conservatively clear that model's unidentifiable entries.
+          else if (operation === 'entry') {
+            const cachedId = siteAdminCachedEntryId(payload[key])
+            matches = model === mutation.model && (slug === mutation.id || (mutation.slug !== undefined && slug === mutation.slug) || cachedId === mutation.id || cachedId === undefined)
+          }
           else if (operation === 'batch') {
-            const cached = useNuxtData<Record<string, { data: { id?: string } | unknown[] | null }>>(key).data.value
+            const cached = payload[key] as Record<string, { data: { id?: string } | unknown[] | null }> | undefined
             matches = (slug as Array<[string, string, string, string | null]>).some(([name, operation, model, id]) =>
-              model === mutation.model && (operation === 'list' || id === mutation.id || (mutation.slug !== undefined && id === mutation.slug) || (!Array.isArray(cached?.[name]?.data) && cached?.[name]?.data?.id === mutation.id)))
+              model === mutation.model && (operation === 'list' || id === mutation.id || (mutation.slug !== undefined && id === mutation.slug) || siteAdminCachedEntryId(cached?.[name]?.data) === mutation.id || siteAdminCachedEntryId(cached?.[name]?.data) === undefined))
           }
         }
       }

@@ -225,7 +225,7 @@ import * as Vue from 'vue'
 
 type ModelName = Extract<keyof SiteAdminFormModels, string>
 type ModelData<Name extends ModelName> = Extract<SiteAdminFormModels[Name], Record<string, unknown>>
-type NuxtFormOptions<Data extends Record<string, unknown>, EntryData = Record<string, unknown>> = Omit<UseSiteAdminFormOptions<Data>, 'descriptor' | 'modelName' | 'entry' | 'id' | 'drafts' | 'client' | 'presentation' | 'initialEntry' | 'loadDescriptor' | 'loadEntry'> &
+type NuxtFormOptions<Data extends Record<string, unknown>, EntryData = Record<string, unknown>> = Omit<UseSiteAdminFormOptions<Data>, 'descriptor' | 'modelName' | 'entry' | 'id' | 'drafts' | 'client' | 'presentation' | 'generateMetadataOnSubmit' | 'initialEntry' | 'loadDescriptor' | 'loadEntry'> &
   ({ entry?: SiteAdminEntry<EntryData>; id?: never } | { id?: Vue.MaybeRefOrGetter<string | null | undefined>; entry?: never })
 
 export function useSiteAdminForm<Name extends ModelName & keyof SiteAdminManagementModels>(modelName: Name, options?: NuxtFormOptions<ModelData<Name>, SiteAdminManagementModels[Name]>): Promise<ReturnType<typeof createForm<ModelData<Name>>>>
@@ -240,7 +240,7 @@ export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOption
   }
   if (typeof modelOrOptions !== 'string') {
     const connection = { ...requestOptions, ...(modelOrOptions.managementBase ? { basePath: modelOrOptions.managementBase } : {}), ...(modelOrOptions.origin ? { origin: modelOrOptions.origin } : {}), ...(modelOrOptions.fetch ? { fetch: modelOrOptions.fetch } : {}) }
-    return createForm({ ...defaults, ...modelOrOptions, client: modelOrOptions.client ?? createNuxtSiteAdminManagementClient<Record<string, Record<string, unknown>>>(connection, useSiteAdminAuthScope(modelOrOptions.authScope, connection)) })
+    return createForm({ ...defaults, ...modelOrOptions, ...('slug' in modelOrOptions ? { get slug() { return modelOrOptions.slug } } : {}), client: modelOrOptions.client ?? createNuxtSiteAdminManagementClient<Record<string, Record<string, unknown>>>(connection, useSiteAdminAuthScope(modelOrOptions.authScope, connection)) })
   }
   const nuxtApp = useNuxtApp()
   const auth = useSiteAdminAuthScope(options.authScope, requestOptions)
@@ -270,7 +270,7 @@ export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOption
     restore()
     const descriptor = Object.hasOwn(models, modelOrOptions) ? models[modelOrOptions] : undefined
     if (!descriptor) throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', '[site-admin] Form model "' + modelOrOptions + '" is unavailable to this actor.', 403)
-    const controller = createForm({ ...defaults, ...options, descriptor, modelName: modelOrOptions, authScope: auth, drafts, client: management, presentation: true,
+    const controller = createForm({ ...defaults, ...options, ...('slug' in options ? { get slug() { return options.slug } } : {}), descriptor, modelName: modelOrOptions, authScope: auth, drafts, client: management, presentation: true, generateMetadataOnSubmit: true,
       ...(entrySource?.data.value?.entry ? { initialEntry: entrySource.data.value.entry } : {}),
       loadDescriptor: async (signal) => {
         await Vue.nextTick()

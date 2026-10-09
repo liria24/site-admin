@@ -20,7 +20,7 @@ import { useSiteAdminForm } from '../packages/site-admin/src/form'
 
 interface State {
     data: Vue.Ref<unknown>
-    refresh(): Promise<void>
+    refresh(options?: { cachedData?: unknown }): Promise<void>
 }
 interface Helpers {
     useSiteAdminForm(
@@ -34,6 +34,7 @@ interface Helpers {
         options?: Record<string, unknown>,
     ): State
     useSiteAdminList(model: string, options?: Record<string, unknown>): State
+    useSiteAdminEntry(model: string, id: string, options?: Record<string, unknown>): State
     useSiteAdminBatch(requests: Record<string, unknown>, options?: Record<string, unknown>): State
     useSiteAdminManagementClient(): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     createNuxtSiteAdminManagementClient(
@@ -120,7 +121,7 @@ const nativeEnvironment = async (request: typeof fetch) => {
     }
     const helpers = new Function(
         ...Object.keys(dependencies),
-        `${generated}; return { useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
+        `${generated}; return { useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
     )(...Object.values(dependencies)) as Helpers
     const states = new Map<string, Vue.Ref<unknown>>()
     const formDependencies = {
@@ -140,7 +141,7 @@ const nativeEnvironment = async (request: typeof fetch) => {
     helpers.useSiteAdminForm = new Function(...Object.keys(formDependencies), `${formSource}; return useSiteAdminForm`)(
         ...Object.values(formDependencies),
     ) as Helpers['useSiteAdminForm']
-    return { app, helpers }
+    return { app, helpers, refreshSubscribers: () => hooks.get('app:data:refresh')?.size ?? 0 }
 }
 const flush = async () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -367,6 +368,91 @@ describe('native management AsyncData and mutation invalidation', () => {
         scope.stop()
     })
 
+    it('does not subscribe during invalidation and stops refreshing public entry/batch after unmount', async () => {
+        let reads = 0
+        const request: typeof fetch = async (input, init) => {
+            if (init?.method === 'PATCH') return Response.json({ id: 'one', model: 'posts', slug: 'new', version: 2 })
+            reads += 1
+            return Response.json({ data: { _siteAdmin: { id: 'one', model: 'posts', slug: 'old' }, title: 'Public' } })
+        }
+        const { app, helpers, refreshSubscribers } = await nativeEnvironment(request)
+        const scope = Vue.effectScope()
+        scope.run(() => ({
+            entry: helpers.useSiteAdminEntry('posts', 'old'),
+            batch: helpers.useSiteAdminBatch({ entry: { entry: 'posts', slugOrId: 'old' } }),
+        }))
+        await flush()
+        const dependencies = () =>
+            Object.values(app['_asyncData'] as Record<string, { _deps: number }>).map((value) => value['_deps'])
+        expect(dependencies()).toEqual([1, 1])
+        expect(refreshSubscribers()).toBe(2)
+        const client = helpers.createNuxtSiteAdminManagementClient(
+            { origin: 'http://site.test', basePath: '/manage', fetch: request },
+            'alice',
+        )
+        await client.updateEntry('one', { data: {}, expectedVersion: 1 })
+        await client.updateEntry('one', { data: {}, expectedVersion: 2 })
+        expect(dependencies()).toEqual([1, 1])
+        expect(refreshSubscribers()).toBe(2)
+        scope.stop()
+        await flush()
+        expect(dependencies()).toEqual([0, 0])
+        expect(refreshSubscribers()).toBe(0)
+        const before = reads
+        await client.updateEntry('one', { data: {}, expectedVersion: 3 })
+        expect(reads).toBe(before)
+    })
+
+    it('invalidates renamed entries when native transform/pick removes identity, within the affected model', async () => {
+        let version = 1
+        const reads: Record<string, number> = {}
+        const request: typeof fetch = async (input, init) => {
+            if (init?.method === 'PATCH') {
+                version += 1
+                return Response.json({ id: 'one', model: 'posts', slug: 'new', version })
+            }
+            const path = new URL(String(input)).pathname
+            reads[path] = (reads[path] ?? 0) + 1
+            return Response.json({
+                data: {
+                    _siteAdmin: { id: 'one', model: path.includes('authors') ? 'authors' : 'posts', slug: 'old' },
+                    title: 'v' + version,
+                },
+            })
+        }
+        const { helpers } = await nativeEnvironment(request)
+        const scope = Vue.effectScope()
+        const active = scope.run(() => ({
+            transformed: helpers.useSiteAdminEntry('posts', 'old', {
+                transform: (entry: { data: unknown }) => entry.data,
+            }),
+            picked: helpers.useSiteAdminEntry('posts', 'picked', { pick: ['data'] }),
+            authors: helpers.useSiteAdminEntry('authors', 'old', {
+                transform: (entry: { data: unknown }) => entry.data,
+            }),
+            batch: helpers.useSiteAdminBatch(
+                { entry: { entry: 'posts', slugOrId: 'batch-old' } },
+                {
+                    transform: (batch: { entry: { data: { data: unknown } } }) => ({
+                        entry: { data: batch.entry.data.data },
+                    }),
+                },
+            ),
+        }))!
+        await flush()
+        const client = helpers.createNuxtSiteAdminManagementClient(
+            { origin: 'http://site.test', basePath: '/manage', fetch: request },
+            'alice',
+        )
+        await client.updateEntry('one', { data: {}, expectedVersion: 1 })
+        expect(reads['/content/posts/old']).toBe(2)
+        expect(reads['/content/posts/picked']).toBe(2)
+        expect(reads['/content/posts/batch-old']).toBe(2)
+        expect(reads['/content/authors/old']).toBe(1)
+        expect((active.transformed.data.value as { title: string }).title).toBe('v2')
+        scope.stop()
+    })
+
     it('documents native public enumeration limits for serialize:false and app-owned getCachedData', async () => {
         let reads = 0
         const request: typeof fetch = async (input, init) => {
@@ -377,7 +463,9 @@ describe('native management AsyncData and mutation invalidation', () => {
         }
         const { app, helpers } = await nativeEnvironment(request)
         const scope = Vue.effectScope()
-        scope.run(() => helpers.useSiteAdminManagementList('posts', { authScope: 'alice', serialize: false }))
+        const local = scope.run(() =>
+            helpers.useSiteAdminManagementList('posts', { authScope: 'alice', serialize: false }),
+        )!
         await flush()
         expect(Object.keys(app.payload.data)).toEqual([])
         const client = helpers.createNuxtSiteAdminManagementClient(
@@ -386,6 +474,9 @@ describe('native management AsyncData and mutation invalidation', () => {
         )
         await client.updateEntry('one', { data: {}, expectedVersion: 1 })
         expect(reads).toBe(1)
+        await local.refresh()
+        expect(reads).toBe(2)
+        expect(Object.keys(app.payload.data)).toEqual([])
         const cached = { items: [{ data: { title: 'App cache' } }], total: 1 }
         const ownCache = scope.run(() =>
             helpers.useSiteAdminManagementList('posts', {
@@ -397,6 +488,9 @@ describe('native management AsyncData and mutation invalidation', () => {
         await flush()
         await client.updateEntry('one', { data: {}, expectedVersion: 2 })
         expect(ownCache.data.value).toBe(cached)
+        await ownCache.refresh({ cachedData: undefined })
+        expect(ownCache.data.value).not.toBe(cached)
+        expect(reads).toBe(3)
         scope.stop()
     })
 })

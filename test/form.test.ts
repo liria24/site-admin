@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { reactive } from 'vue'
+import { nextTick, reactive, ref } from 'vue'
 
 import {
     array,
@@ -41,6 +41,57 @@ const entry = (id: string, version: number, data: Record<string, unknown>): Entr
 })
 
 describe('form consumer', () => {
+    it.each(['getter', 'ref'] as const)(
+        'reads a controlled %s slug at submission and honors initial overrides',
+        async (kind) => {
+            const external = ref<string | undefined>('override')
+            const requests: Record<string, unknown>[] = []
+            const options = {
+                descriptor,
+                entry: entry('existing', 1, { title: 'Initial' }),
+                modelName: 'posts',
+                fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+                    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+                    requests.push(body)
+                    return Response.json({
+                        ...entry('existing', requests.length + 1, body.data as Record<string, unknown>),
+                        slug: body.slug ?? 'post',
+                    })
+                },
+                ...(kind === 'ref' ? { slug: external } : {}),
+            }
+            if (kind === 'getter') Object.defineProperty(options, 'slug', { get: () => external.value })
+            const controller = useSiteAdminForm<{ title: string }>(options)
+            expect(controller.metadata.slug.value).toBe('override')
+            external.value = 'changed-before-submit'
+            await nextTick()
+            await controller.form.handleSubmit()
+            expect(requests[0]).toMatchObject({ expectedVersion: 1, slug: 'changed-before-submit' })
+            external.value = undefined
+            await nextTick()
+            controller.form.setFieldValue('title', 'Updated')
+            await controller.form.handleSubmit()
+            expect(requests[1]).not.toHaveProperty('slug')
+        },
+    )
+
+    it('lets the controller own slug when no controlled option is supplied', async () => {
+        let submitted: unknown
+        const controller = useSiteAdminForm<{ title: string }>({
+            descriptor,
+            entry: entry('existing', 1, { title: 'Initial' }),
+            modelName: 'posts',
+            fetch: async (_input, init) => {
+                submitted = JSON.parse(String(init?.body))
+                return Response.json({ ...entry('existing', 2, { title: 'Initial' }), slug: 'controller' })
+            },
+        })
+        controller.metadata.slug.value = 'controller'
+        await controller.form.handleSubmit()
+        expect(submitted).toMatchObject({ slug: 'controller', expectedVersion: 1 })
+        expect(controller.metadata.slug.value).toBe('controller')
+    })
+
     it('keeps submitted values and updates identity when a mutation-only actor receives a receipt', async () => {
         const saved: unknown[] = []
         const controller = useSiteAdminForm<{ title: string }>({

@@ -21,7 +21,7 @@ declare module '#imports' {
   export const useRequestFetch: () => (url: string, options: { [name: string]: unknown; onResponse?: (context: { response: Response }) => void }) => Promise<unknown>
   export const useState: <Value>(key: string, value: () => Value) => import('vue').Ref<Value>
   export { clearNuxtData, refreshNuxtData, useNuxtData } from '#app/composables/asyncData'
-  export const useNuxtApp: () => { $i18n?: { locale: import('vue').Ref<string> }; runWithContext: <Value>(callback: () => Value) => Value }
+  export const useNuxtApp: () => { payload: { data: Record<string, unknown> }; $i18n?: { locale: import('vue').Ref<string> }; runWithContext: <Value>(callback: () => Value) => Value }
 }
 `,
     )

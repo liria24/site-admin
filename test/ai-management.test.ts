@@ -91,6 +91,15 @@ const runtime = () => ({
 })
 
 describe('unsaved AI management proposals', () => {
+    it('exposes only a runtime/permission capability in model descriptors without resolving bindings', () => {
+        const resolver = vi.fn(async () => runtime())
+        const { admin } = setup({ aiRuntime: resolver })
+        expect(admin.descriptorFor({ id: 'admin', roles: ['admin'] }).models.posts?.ai).toBe(true)
+        expect(admin.descriptorFor({ id: 'reader', roles: ['reader'] }).models.posts?.ai).toBe(false)
+        expect(setup().admin.descriptor.models.posts?.ai).toBe(false)
+        expect(setup({ aiEnabled: false, aiRuntime: resolver }).admin.descriptor.models.posts?.ai).toBe(false)
+        expect(resolver).not.toHaveBeenCalled()
+    })
     it('uses model permission, forwards definition and slug limits, and never reads or writes entries', async () => {
         const ai = runtime()
         const { admin, database, storage } = setup({ aiRuntime: ai })
