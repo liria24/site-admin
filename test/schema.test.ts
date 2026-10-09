@@ -220,7 +220,9 @@ describe('application-owned Drizzle migrations', () => {
         await migrateTestDatabase(db, config)
         await db.exec("ALTER TABLE site_admin_content_posts ADD COLUMN legacy TEXT DEFAULT 'NULL'")
         await db.exec('ALTER TABLE site_admin_content_posts ADD COLUMN optional TEXT DEFAULT (NULL)')
-        await db.exec('CREATE UNIQUE INDEX retained_nullable ON site_admin_content_posts(optional)')
+        await db.exec(
+            'CREATE UNIQUE INDEX retained_nullable ON site_admin_content_posts(optional) WHERE optional IS NOT NULL',
+        )
         await db.exec('CREATE UNIQUE INDEX retained_revision ON site_admin_content_posts(legacy,revision_id)')
         const admin = createSiteAdmin({ config, database: await testAdapter(db, config) })
         await admin.createEntry('posts', { data: { title: 'one' } })
@@ -229,5 +231,19 @@ describe('application-owned Drizzle migrations', () => {
             { legacy: 'NULL', optional: null },
             { legacy: 'NULL', optional: null },
         ])
+    })
+
+    it.each([false, true])('rejects retained partial UNIQUE columns with old mapping: %s', async (oldMapping) => {
+        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+        const previous = defineSiteAdminConfig({ models: { posts: { fields: { title: text(), excerpt: text() } } } })
+        const db = database()
+        await migrateTestDatabase(db, config)
+        await db.exec("ALTER TABLE site_admin_content_posts ADD COLUMN field_excerpt TEXT DEFAULT 'same'")
+        await db.exec(
+            'CREATE UNIQUE INDEX retained_partial ON site_admin_content_posts(field_excerpt) WHERE field_excerpt IS NOT NULL',
+        )
+        const admin = createSiteAdmin({ config, database: await testAdapter(db, oldMapping ? previous : config) })
+        await expect(admin.initialize()).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+        expect(await db.prepare('SELECT COUNT(*) AS count FROM site_admin_entries').get()).toEqual({ count: 0 })
     })
 })

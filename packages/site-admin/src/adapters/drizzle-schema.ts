@@ -19,11 +19,6 @@ import {
 
 const nullDefault = (value: string | null): boolean =>
     value === null || value.replace(/[\s()]/gu, '').toLowerCase() === 'null'
-const constantDefault = (value: string | null): boolean =>
-    value !== null &&
-    /^\(*\s*(?:'(?:[^']|'')*'|"(?:[^"]|"")*"|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|0x[\da-f]+|true|false|x'[\da-f]*')\s*\)*$/iu.test(
-        value,
-    )
 
 export function contentTables(database: Database, config: SiteAdminConfig) {
     validateContentNames(config)
@@ -140,25 +135,27 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
                 'SITE_ADMIN_MIGRATION_REQUIRED',
                 `Database table "${expected.name}" does not match the generated schema. Generate and apply its Drizzle migrations explicitly.`,
             )
-        // An omitted constant in a retained UNIQUE key makes the second revision fail.
-        // NULL defaults remain compatible with SQLite's distinct-NULL UNIQUE behavior.
+        // A retained UNIQUE key must be safe for every active-column insert.
+        // Do not infer safety from partial predicates or nonconstant default expressions.
         const indexes = await queryRows<{ name: string; unique: number; partial: number }>(
             database,
             `PRAGMA index_list(${JSON.stringify(expected.name)})`,
         )
         for (const index of indexes) {
-            if (!index.unique || index.partial) continue
+            if (!index.unique) continue
             const indexed = await queryRows<{ name: string | null }>(
                 database,
                 `PRAGMA index_info(${JSON.stringify(index.name)})`,
             )
-            if (
-                indexed.length &&
-                indexed.every(({ name }) => {
-                    const column = columns.find((item) => item.name === name)
-                    return column && !required.some((item) => item.name === name) && constantDefault(column.dflt_value)
-                })
+            const retained = indexed.flatMap(({ name }) => {
+                const column = columns.find((item) => item.name === name)
+                return column && !required.some((item) => item.name === name) ? [column] : []
+            })
+            const uniqueRevision = indexed.some(({ name }) =>
+                required.some((column) => column.name === name && column.primary),
             )
+            const omittedNull = retained.some((column) => !column.notnull && nullDefault(column.dflt_value))
+            if (retained.length && !uniqueRevision && !omittedNull)
                 throw new SiteAdminError(
                     'SITE_ADMIN_MIGRATION_REQUIRED',
                     `Retained UNIQUE columns in "${expected.name}" prevent active-column inserts. Generate and apply its Drizzle migrations explicitly.`,
