@@ -3,7 +3,7 @@ import type { ContentListFile } from 'comark-content'
 import type { ModelDefinition, SiteAdminConfig, SiteAdminMarkdownSummary } from '../config'
 import type { AnyField, FieldRecord } from '../fields'
 import { serializeSiteAdminSeo } from '../seo'
-import { astText, cleanText, markdownDocument } from './document'
+import { cleanText, entryDescription, markdownDocument } from './document'
 import { markdownPlugins } from './plugins'
 import type { AssetUrlResolver } from './assets'
 
@@ -66,15 +66,10 @@ export const projectMarkdownListSummary = async (
         )
     const summarySeo = (definition: ModelDefinition, data: Record<string, unknown>, value: unknown) => {
         const seo = serializeSiteAdminSeo(value)
-        const key = [definition.displayFields?.description, 'description', 'summary'].find(
-            (name) => name && data[name] !== undefined,
-        )
-        if (key && definition.fields[key]?.kind === 'markdown') {
-            const document = markdownDocument(data[key])
-            const description = boundedText(astText(document?.meta?.summary))
-            if (description) seo.description = description
-            else delete seo.description
-        } else if (seo.description !== undefined) seo.description = boundedText(seo.description)
+        const description = entryDescription(definition, data, 'summary')
+        if (description.text) seo.description = boundedText(description.text)
+        else if (description.hasMarkdownCandidate) delete seo.description
+        else if (seo.description !== undefined) seo.description = boundedText(seo.description)
         return seo
     }
     const definition = config.models[modelName]!

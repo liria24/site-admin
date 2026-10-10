@@ -25,6 +25,47 @@ const database = () => {
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 describe('public entry SEO payload', () => {
+    it.each([
+        { name: 'later text', body: '---', description: ' Later text ', summary: '---', expected: 'Later text' },
+        {
+            name: 'later Markdown',
+            body: '---',
+            description: ' ',
+            summary: 'Later **summary**',
+            expected: 'Later summary',
+        },
+        { name: 'disabled summary', body: 'FULL_BODY', description: ' ', summary: '---', expected: undefined },
+    ])('selects usable description candidates for full and summary: $name', async (candidate) => {
+        const parsed = vi.fn()
+        const admin = await createMigratedTestAdmin({
+            config: defineSiteAdminConfig({
+                markdown: {
+                    summary: { enabled: candidate.name !== 'disabled summary' },
+                    plugins: [{ name: 'description-parse-count', post: parsed }],
+                },
+                models: {
+                    posts: {
+                        fields: { body: markdown(), description: textarea(), summary: markdown() },
+                        displayFields: { description: 'body' },
+                    },
+                },
+            }),
+            database: database(),
+        })
+        const entry = await admin.createEntry('posts', {
+            data: { body: candidate.body, description: candidate.description, summary: candidate.summary },
+        })
+        await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+        const client = createSiteAdminClient<Record<string, PublicEntry>>({
+            origin: 'https://example.test',
+            fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
+        })
+        expect((await client.list('posts'))[0]?.seo?.description).toBe(candidate.expected ?? 'FULL_BODY')
+        const count = parsed.mock.calls.length
+        expect((await client.list('posts', { markdown: 'summary' }))[0]?.seo?.description).toBe(candidate.expected)
+        expect(parsed).toHaveBeenCalledTimes(count)
+        expect((await client.get('posts', entry.id))?.seo?.description).toBe(candidate.expected ?? 'FULL_BODY')
+    })
     it('retains the complete model list after sequential detail parsing and publication', async () => {
         const plugin = vi.fn()
         const admin = await createMigratedTestAdmin({
@@ -209,6 +250,13 @@ describe('public entry SEO payload', () => {
             description: 'Configured description',
             title: 'Configured',
         })
+        const response = await handlePublicRequest(
+            admin,
+            new Request('https://example.com/api/content/settings?markdown=summary'),
+        )
+        expect(await response.json()).toMatchObject([
+            { data: { _siteAdmin: { seo: { description: 'Configured description' } } } },
+        ])
         expect((await admin.getPublicEntry('disabled', disabled.id))?.seo).toEqual({ image: false })
         expect((await admin.getPublicEntry('generated', generated.id))?.seo).toEqual({ image: component })
         expect((await admin.getPublicEntry('gallery', gallery.id))?.seo).toEqual({

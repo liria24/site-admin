@@ -1,7 +1,14 @@
 import type { ComarkContent, ContentFile } from 'comark-content'
 import { createMarkdownContent } from '../markdown/content'
 import { resolveMarkdownSource } from '../markdown/assets'
-import { astText, cleanText, collectMarkdown, markdownDocument, type MarkdownDocumentValue } from '../markdown/document'
+import {
+    astText,
+    cleanText,
+    collectMarkdown,
+    entryDescription,
+    markdownDocument,
+    type MarkdownDocumentValue,
+} from '../markdown/document'
 import { addRoute, createRouter, findRoute, type RouterContext } from 'rou3'
 import type { SiteAdminStorage } from '../adapter'
 import { prepareUpload, safeFilename, detectedMime } from './upload'
@@ -1298,21 +1305,6 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    #entryDescription(definition: ModelDefinition, data: Record<string, unknown>): string | undefined {
-        for (const key of [definition.displayFields?.description, 'description', 'summary']) {
-            if (!key) continue
-            const value = data[key]
-            const document = markdownDocument(value)
-            const description = document
-                ? cleanText(astText(document.meta?.summary ?? document.nodes))
-                : typeof value === 'string' && definition.fields[key]?.kind !== 'markdown'
-                  ? cleanText(value)
-                  : ''
-            if (description) return description
-        }
-        return undefined
-    }
-
     #entrySeo(definition: ModelDefinition, entry: PublicEntry): PublicEntrySeo {
         const model = typeof definition.seo === 'function' ? definition.seo(structuredClone(entry)) : definition.seo
         const result = serializeSiteAdminSeo(model)
@@ -1321,7 +1313,7 @@ export class SiteAdmin<Context = unknown> {
                 .map((key) => (key && typeof entry.data[key] === 'string' ? cleanText(entry.data[key]) : ''))
                 .find(Boolean)
         const title = text([definition.displayFields?.title, 'title', 'name'])
-        const description = this.#entryDescription(definition, entry.data)
+        const description = entryDescription(definition, entry.data).text
         if (title !== undefined) result.title = title
         if (description !== undefined) result.description = description
         if (entry.path) result.canonical = entry.path
@@ -1562,7 +1554,7 @@ export class SiteAdmin<Context = unknown> {
         content.hooks.hook('file:parsed', ({ file }) => {
             if (!file) return
             const metadata = file.data['_siteAdmin']
-            const description = this.#entryDescription(definition, file.data)
+            const description = entryDescription(definition, file.data).text
             if (isObject(metadata) && description !== undefined)
                 metadata.seo = { ...serializeSiteAdminSeo(metadata.seo), description }
             if (isObject(metadata) && typeof metadata.id === 'string') {

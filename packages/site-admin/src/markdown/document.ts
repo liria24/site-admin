@@ -1,4 +1,5 @@
 import type { AnyField } from '../fields'
+import type { ModelDefinition } from '../config'
 
 export interface MarkdownDocumentValue {
     meta?: { summary?: unknown }
@@ -28,6 +29,36 @@ export const astText = (value: unknown): string => {
 }
 
 export const cleanText = (value: string): string => value.replace(/\s+/gu, ' ').trim()
+
+export const entryDescription = (
+    definition: ModelDefinition,
+    data: Record<string, unknown>,
+    format: 'full' | 'summary' = 'full',
+): { text?: string; hasMarkdownCandidate: boolean } => {
+    const keys = [definition.displayFields?.description, 'description', 'summary'].filter((key): key is string =>
+        Boolean(key),
+    )
+    const hasMarkdownCandidate = keys.some((key) => definition.fields[key]?.kind === 'markdown')
+    for (const key of keys) {
+        const value = data[key]
+        const document = markdownDocument(value)
+        const description =
+            definition.fields[key]?.kind === 'markdown'
+                ? astText(
+                      format === 'summary'
+                          ? Array.isArray(document?.meta?.summary)
+                              ? document.meta.summary
+                              : undefined
+                          : (document?.meta?.summary ?? document?.nodes),
+                  )
+                : typeof value === 'string'
+                  ? value
+                  : ''
+        const text = cleanText(description)
+        if (text) return { text, hasMarkdownCandidate }
+    }
+    return { hasMarkdownCandidate }
+}
 
 export const collectMarkdown = (field: AnyField, value: unknown, output: MarkdownDocumentValue[]): void => {
     if (field.kind === 'markdown') {
