@@ -65,7 +65,6 @@ export interface SiteAdminSessionDraft {
     slug: string
     entryId: string | null
     baseVersion: number | null
-    metadata: { slug: 'auto' | 'manual'; excerpt: 'auto' | 'manual' }
 }
 
 export { presentSiteAdminData, serializeSiteAdminData }
@@ -198,10 +197,6 @@ export const useSiteAdminForm = <
     const version = ref(initial?.version ?? null)
     const hasSlugInput = 'slug' in options
     const slug = ref(toValue(options.slug) ?? initial?.slug ?? '')
-    const defaultMetadata = (): SiteAdminSessionDraft['metadata'] => ({ slug: 'manual', excerpt: 'manual' })
-    const metadata = ref<SiteAdminSessionDraft['metadata']>(
-        initial ? { slug: 'manual', excerpt: 'manual' } : defaultMetadata(),
-    )
     const drafts = options.drafts ?? (Object.create(null) as Record<string, SiteAdminSessionDraft>)
     const assetUrl = (id: string) => client.assetUrl(id)
     const present = (data: Record<string, unknown>): Data =>
@@ -404,7 +399,6 @@ export const useSiteAdminForm = <
             slug: slug.value,
             entryId: entryId.value,
             baseVersion: version.value,
-            metadata: metadata.value,
         })
     }
     const restore = (draft: SiteAdminSessionDraft): void => {
@@ -414,7 +408,6 @@ export const useSiteAdminForm = <
         entryId.value = draft.entryId
         version.value = draft.baseVersion
         slug.value = draft.slug
-        metadata.value = { ...draft.metadata }
         form.reset(present(baseline.value))
         const data = present(draft.data)
         for (const name of new Set([...Object.keys(baseline.value), ...Object.keys(data)]))
@@ -505,7 +498,6 @@ export const useSiteAdminForm = <
                 slug: toValue(options.slug) ?? '',
                 entryId: sourceId(),
                 baseVersion: null,
-                metadata: sourceId() ? { slug: 'manual', excerpt: 'manual' } : defaultMetadata(),
             })
         }
         await refresh()
@@ -517,8 +509,7 @@ export const useSiteAdminForm = <
     let proposalSnapshot: string | null = null
     let proposalProps: unknown
     let proposalPropsSnapshot: string | null = null
-    const inputSnapshot = () =>
-        canonical([identity.value, serialize(values.value), slug.value, metadata.value, version.value])
+    const inputSnapshot = () => canonical([identity.value, serialize(values.value), slug.value, version.value])
     const propose = async <Name extends Action>(
         kind: Name,
         props: SiteAdminNamedAiActions[Name]['props'],
@@ -625,7 +616,7 @@ export const useSiteAdminForm = <
             { flush: 'sync' },
         )
     watch(
-        [values, slug, metadata, () => (proposal.value ? canonical(proposalProps) : null)],
+        [values, slug, version, () => (proposal.value ? canonical(proposalProps) : null)],
         () => {
             if (
                 proposal.value &&
@@ -734,13 +725,7 @@ export const useSiteAdminForm = <
             serialize: () =>
                 clone({ data: serialize(form.state.values) as RawData, slug: slug.value, baseVersion: version.value }),
         },
-        metadata: {
-            modes: metadata,
-            slug,
-            setMode: (field: 'slug' | 'excerpt', mode: 'auto' | 'manual') => {
-                metadata.value[field] = mode
-            },
-        },
+        metadata: { slug },
         ai: {
             proposal,
             busy: aiBusy,
