@@ -101,15 +101,14 @@ try {
     if (!rollback.rolledBack) throw new Error('Cloudflare D1 batch did not roll back atomically.')
     const origin = `http://127.0.0.1:${port}`
     const large = await (await fetch(origin + '/search-large', { signal: AbortSignal.timeout(30000) })).json()
-    if (String(large.counts) !== '1,1,0,1' || !large.unchanged || !large.sizes?.every(({ bytes }) => bytes < 2_000_000))
-        throw new Error(`Native D1 chunk-boundary/canonical-history probe failed: ${JSON.stringify(large)}`)
-    const longQuery = await (await fetch(origin + '/search-long-query', { signal: AbortSignal.timeout(30000) })).json()
     if (
-        String(longQuery.counts) !== '1' ||
-        longQuery.status !== 400 ||
-        String(longQuery.rejected) !== Array(3).fill('SITE_ADMIN_INVALID_INPUT').join(',')
+        String(large.counts) !== '1,1,0,1,1' ||
+        !large.unchanged ||
+        !large.sizes?.every(({ bytes }) => bytes < 2_000_000) ||
+        large.status !== 400 ||
+        String(large.rejected) !== Array(3).fill('SITE_ADMIN_INVALID_INPUT').join(',')
     )
-        throw new Error(`Native D1 long-query bounds failed: ${JSON.stringify(longQuery)}`)
+        throw new Error(`Native D1 chunk-boundary/query-bounds/history probe failed: ${JSON.stringify(large)}`)
     const seeded = await (await fetch(origin + '/search-cold/seed')).json()
     if (seeded.seeded !== 257) throw new Error(`Native D1 cold-search seeding failed: ${JSON.stringify(seeded)}`)
     const before = await (await fetch(origin + '/search-cold/state')).text()
