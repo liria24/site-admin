@@ -469,66 +469,6 @@ describe('controller AI proposals', () => {
         },
     )
 
-    it.each(['input', 'slug', 'version', 'identity'] as const)(
-        'rejects explicit AI after %s changes while generation is pending',
-        async (change) => {
-            const generated = Promise.withResolvers<Response>()
-            const started = Promise.withResolvers<void>()
-            const id = ref<string | null>('one')
-            const calls: string[] = []
-            const scope = effectScope()
-            const controller = scope.run(() =>
-                useSiteAdminForm<Data>({
-                    descriptor,
-                    modelName: 'posts',
-                    id,
-                    initialEntry: entry('one', 1, 'Title'),
-                    fetch: async (input) => {
-                        calls.push(String(input))
-                        if (String(input).includes('/ai/')) {
-                            started.resolve()
-                            return generated.promise
-                        }
-                        return Response.json(entry('two'))
-                    },
-                }),
-            )!
-            await controller.ready
-            const proposing = controller.ai.run('metadata', {
-                generate: {
-                    slug: false,
-                    excerpt: true,
-                },
-            })
-            await started.promise
-            if (change === 'input') controller.form.setFieldValue('title', 'Edited')
-            else if (change === 'slug') controller.metadata.slug.value = 'edited-slug'
-            else if (change === 'version') controller.baseVersion.value = 2
-            else {
-                id.value = 'two'
-                await flush()
-            }
-            generated.resolve(
-                Response.json({
-                    data: { title: 'Title', summary: 'Late' },
-                    slug: 'late',
-                    issues: [],
-                    version: 1,
-                    baseRevisionId: 'revision',
-                }),
-            )
-            await proposing
-            expect(calls.some((path) => path.endsWith('/entries/posts'))).toBe(false)
-            expect(controller.form.state.values.title).toBe(
-                change === 'input' ? 'Edited' : change === 'identity' ? 'two' : 'Title',
-            )
-            expect(controller.form.state.values.summary).toBeUndefined()
-            expect(controller.ai.proposal.value).toBeNull()
-            expect(controller.ai.busy.value).toBeNull()
-            scope.stop()
-        },
-    )
-
     it('keeps unapplied proofreading separate from a draft save and never generates metadata', async () => {
         let saved: Record<string, unknown> | undefined
         const paths: string[] = []
@@ -596,54 +536,73 @@ describe('controller AI proposals', () => {
         expect(calls.every((call) => call.url.includes('/ai/'))).toBe(true)
     })
 
-    it('rejects late replies after edits, identity changes, discard, or a newer request', async () => {
+    it('rejects late replies after input/slug/version/identity changes, discard or a newer request', async () => {
         const replies: Array<ReturnType<typeof Promise.withResolvers<Response>>> = []
-        const id = ref('a')
-        const scope = effectScope()
+        const signals: Array<AbortSignal | null | undefined> = [],
+            paths: string[] = []
+        const id = ref('a'),
+            scope = effectScope()
         const controller = scope.run(() =>
             useSiteAdminForm<Data>({
                 descriptor,
                 modelName: 'posts',
                 id,
                 initialEntry: entry('a'),
-                fetch: async (input) => {
+                fetch: async (input, init) => {
+                    paths.push(String(input))
                     if (!String(input).includes('/ai/')) return Response.json(entry('b'))
-                    const reply = Promise.withResolvers<Response>()
-                    replies.push(reply)
-                    return reply.promise
+                    const response = Promise.withResolvers<Response>()
+                    replies.push(response)
+                    signals.push(init?.signal)
+                    return response.promise
                 },
             }),
         )!
-        const request = controller.ai.run('proofread', { fields: ['title'] })
-        controller.form.setFieldValue('title', 'Edited while generating')
-        await nextTick()
-        replies[0]!.resolve(
-            Response.json({ data: { title: 'Old proposal' }, issues: [], version: 1, baseRevisionId: 'revision' }),
-        )
-        await request
-        expect(controller.ai.stale.value).toBe(true)
-        expect(controller.ai.apply()).toBe(false)
-        const older = controller.ai.run('proofread', { fields: ['title'] })
-        const newer = controller.ai.run('proofread', { fields: ['title'] })
-        replies[2]!.resolve(
-            Response.json({ data: { title: 'Newest' }, issues: [], version: 1, baseRevisionId: 'revision' }),
-        )
+        await controller.ready
+        const resolve = (index: number, title: string, version = controller.baseVersion.value) =>
+            replies[index]!.resolve(
+                Response.json({
+                    data: { title, summary: 'Late' },
+                    slug: 'late',
+                    issues: [],
+                    version,
+                    baseRevisionId: 'revision',
+                }),
+            )
+        for (const change of ['input', 'slug', 'version', 'identity', 'discard']) {
+            const version = controller.baseVersion.value,
+                title = controller.form.state.values.title
+            const request = controller.ai.run('metadata', { generate: { slug: false, excerpt: true } })
+            if (change === 'input') controller.form.setFieldValue('title', 'Edited')
+            else if (change === 'slug') controller.metadata.slug.value = 'edited-slug'
+            else if (change === 'version') controller.baseVersion.value = 2
+            else if (change === 'identity') {
+                id.value = 'b'
+                await flush()
+            } else controller.ai.discard()
+            resolve(replies.length - 1, 'Old proposal', version)
+            await request
+            expect(controller.form.state.values.title).toBe(
+                change === 'input' ? 'Edited' : change === 'identity' ? 'b' : title,
+            )
+            expect(controller.form.state.values.summary).toBeUndefined()
+            expect(controller.ai.proposal.value).toBeNull()
+            expect(controller.ai.busy.value).toBeNull()
+            expect(signals.at(-1)?.aborted).toBe(change === 'identity' || change === 'discard')
+            expect(controller.ai.stale.value).toBe(change !== 'identity' && change !== 'discard')
+            expect(controller.ai.apply()).toBe(false)
+        }
+        const older = controller.ai.run('proofread', { fields: ['title'] }),
+            olderIndex = replies.length - 1
+        const newer = controller.ai.run('proofread', { fields: ['title'] }),
+            newerIndex = replies.length - 1
+        expect(signals[olderIndex]?.aborted).toBe(true)
+        resolve(newerIndex, 'Newest')
         await newer
-        replies[1]!.resolve(
-            Response.json({ data: { title: 'Older' }, issues: [], version: 1, baseRevisionId: 'revision' }),
-        )
+        resolve(olderIndex, 'Older')
         await older
         expect(controller.ai.proposal.value?.data.title).toBe('Newest')
-        const switched = controller.ai.run('proofread', { fields: ['title'] })
-        id.value = 'b'
-        await flush()
-        replies[3]!.resolve(
-            Response.json({ data: { title: 'Wrong entry' }, issues: [], version: 1, baseRevisionId: 'revision' }),
-        )
-        await switched
-        expect(controller.ai.proposal.value).toBeNull()
-        expect(controller.form.state.values.title).toBe('b')
-        expect(controller.ai.stale.value).toBe(false)
+        expect(paths.some((path) => path.endsWith('/entries/posts'))).toBe(false)
         scope.stop()
     })
 })
