@@ -123,6 +123,9 @@ describe('native named actions in form sessions', () => {
     it('proposes for a new entry through native Output and request context without initializing or saving CMS', async () => {
         const run = vi.fn(async () => generated({ data: { summary: 'Proposed' }, slug: 'chosen' }))
         const { admin, fetch, assertSchema, commit, modelResolver, platformContext } = setup(run)
+        const unknown = await fetch('https://site.test/api/site-admin/not-configured', { method: 'POST' })
+        expect(unknown.status).toBe(404)
+        expect(admin.descriptor).not.toHaveProperty('ai')
         const controller = useSiteAdminForm<{ title: string; summary?: string }>({
             descriptor: admin.descriptor.models.notes!,
             modelName: 'notes',

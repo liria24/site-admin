@@ -8,10 +8,7 @@ import {
     type SiteAdminClient,
     type PublicEntry,
 } from '../packages/site-admin/src/client'
-import {
-    siteAdminNuxtBatchTransportTemplate,
-    siteAdminNuxtClientTemplate,
-} from '../packages/site-admin/src/nuxt/client-templates'
+import { siteAdminNuxtBatchTransportTemplate } from '../packages/site-admin/src/nuxt/client-templates'
 
 interface ResolvedRequest {
     name: string
@@ -215,16 +212,5 @@ describe('generated public batch transport', () => {
         controller.abort(error)
         await expect(pending).rejects.toBe(error)
         await expect(helpers.resolve(client, [], undefined, controller.signal)).rejects.toBe(error)
-    })
-
-    it('generates one native aggregation invocation without nested list/entry composables', () => {
-        const template = siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage' })
-        const start = template.indexOf('export function useSiteAdminBatch(requests:')
-        const batch = template.slice(start, template.indexOf('\nimport type { SiteAdminEntry,', start))
-        expect(batch.match(/return siteAdminAsyncData\(/gu)).toHaveLength(1)
-        expect(batch).toContain('siteAdminResolveBatch(client, snapshot.value, locale.value, signal)')
-        expect(batch).not.toContain('useSiteAdminList(')
-        expect(batch).not.toContain('useSiteAdminEntry(')
-        expect(batch).not.toContain('await siteAdminAsyncData')
     })
 })

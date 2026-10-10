@@ -1,8 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vite-plus/test'
+import { readNuxtSource } from './nuxt-native-runtime'
 
 import {
     applyNuxt46VerificationPatch,
@@ -14,10 +14,7 @@ import {
 let variants: { original: string; patched: string }
 
 beforeAll(async () => {
-    const require = createRequire(new URL('../package.json', import.meta.url))
-    const manifest = require.resolve('nuxt/package.json')
-    const source = await readFile(join(dirname(manifest), 'dist/app/composables/asyncData.js'), 'utf8')
-    variants = await nuxt46SourceVariants(source)
+    variants = await nuxt46SourceVariants(await readNuxtSource('composables/asyncData.js'))
 })
 
 const withPackage = async (

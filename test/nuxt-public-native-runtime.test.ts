@@ -1,8 +1,10 @@
-import { readFile } from 'node:fs/promises'
+import {
+    generatedRuntimeSource,
+    nativeNuxtDependencies,
+    nativeRuntimeSource,
+    readNuxtSource,
+} from './nuxt-native-runtime'
 import { createServer } from 'node:http'
-import { createRequire, stripTypeScriptTypes } from 'node:module'
-import { dirname, join } from 'node:path'
-import { createError } from 'h3'
 import { expect, it } from 'vitest'
 import * as Vue from 'vue'
 import type { MaybeRefOrGetter, Ref } from 'vue'
@@ -90,21 +92,10 @@ it.each(['completed', 'during', 'transition'] as const)(
         const origin = `http://127.0.0.1:${address.port}`
         let componentApp: ReturnType<typeof renderer.createApp> | undefined
         try {
-            const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
-            const nuxtRoot = dirname(requireNuxt.resolve('nuxt/package.json'))
-            const script = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
-            // Execute the shipped public useAsyncData implementation with a supplied Nuxt app/config environment.
-            // This covers runtime key/watch semantics; actual factory macro transformation stays in the packed consumer gate.
-            const nativeSource = script(await readFile(join(nuxtRoot, 'dist/app/composables/asyncData.js'), 'utf8'))
-                .replace(/^const createUseAsyncData =.*?^\}\);/gmsu, '')
-                .replaceAll('import.meta.client', 'true')
-                .replaceAll('import.meta.server', 'false')
-                .replaceAll('import.meta.dev', 'false')
-                .replaceAll('import.meta.prerender', 'false')
-            const debounceSource = script(await readFile(join(nuxtRoot, 'dist/app/utils/debounce-tick.js'), 'utf8'))
-            const debounceTick = new Function('queuePostFlushCb', `${debounceSource}; return debounceTick`)(
-                Vue.queuePostFlushCb,
-            ) as unknown
+            // Execute the shipped public runtime; packed consumers cover the factory macro transform.
+            const nativeSource = nativeRuntimeSource(await readNuxtSource('composables/asyncData.js'), {
+                asyncData: true,
+            })
             const client = createSiteAdminClient({ origin, basePath: '/content' })
             const initial = await client.get('posts', 'ssr', { locale: 'ja' })
             const key = 'site-admin:' + JSON.stringify([origin, '/content', 'entry', 'posts', 'ssr', 'ja'])
@@ -120,30 +111,14 @@ it.each(['completed', 'during', 'transition'] as const)(
                 hook: () => () => {},
                 isHydrating: true,
             }
-            const environment = {
-                ...Object.fromEntries(Object.entries(Vue).filter(([name]) => /^[a-zA-Z_$][a-zA-Z_$0-9]*$/u.test(name))),
-                useNuxtApp: () => app,
-                createError,
-                debounceTick,
-                asyncDataDefaults: { deep: false },
-                granularCachedData: true,
-                pendingWhenIdle: false,
-                purgeCachedData: true,
-                stripNeverHydratedData: false,
-                tracingChannelNuxt: false,
-                vapor: false,
-                clientOnlySymbol: Symbol('client-only'),
-            }
+            const environment = await nativeNuxtDependencies(app, { purgeCachedData: true })
             const nativeAsyncData = new Function(...Object.keys(environment), `${nativeSource}; return useAsyncData`)(
                 ...Object.values(environment),
             ) as unknown
-            const generated = stripTypeScriptTypes(
+            const generated = generatedRuntimeSource(
                 siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/api/_admin', origin }),
+                { asyncData: true },
             )
-                .replace(/^import .*$/gmu, '')
-                .replace(/^export const siteAdminAsyncData = createUseAsyncData\(\)\s*$/gmu, '')
-                .replace(/^export /gmu, '')
-                .replaceAll('import.meta.server', 'false')
             const initialize = new Function(
                 'siteAdminAsyncData',
                 'createSiteAdminClient',

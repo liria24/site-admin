@@ -1,7 +1,4 @@
-import { readFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
-import { createError } from 'h3'
+import { nativeNuxtDependencies, nativeRuntimeSource, readNuxtSource } from './nuxt-native-runtime'
 import { expect, it } from 'vitest'
 import * as Vue from 'vue'
 import { nuxt46Checksum, nuxt46Compatibility, nuxt46SourceVariants } from './nuxt-compatibility'
@@ -36,17 +33,10 @@ interface Options {
 }
 type Handler = (_app: unknown, options: { signal: AbortSignal }) => Promise<Value>
 type UseNative = (key: string | (() => string), handler: Handler, options?: Options) => State
-const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
-const nuxtRoot = dirname(requireNuxt.resolve('nuxt/package.json'))
-const installed = await readFile(join(nuxtRoot, 'dist/app/composables/asyncData.js'), 'utf8')
+const installed = await readNuxtSource('composables/asyncData.js')
 const variants = await nuxt46SourceVariants(installed)
-const plain = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
-const debounceSource = plain(await readFile(join(nuxtRoot, 'dist/app/utils/debounce-tick.js'), 'utf8'))
-const debounceTick = new Function('queuePostFlushCb', `${debounceSource}; return debounceTick`)(
-    Vue.queuePostFlushCb,
-) as unknown
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-const create = (source: string) => {
+const create = async (source: string) => {
     const hooks = new Set<object>()
     const app = {
         _asyncData: Vue.shallowReactive<Record<string, Entry>>({}),
@@ -64,26 +54,8 @@ const create = (source: string) => {
             return () => hooks.delete(item)
         },
     }
-    const environment = {
-        ...Object.fromEntries(Object.entries(Vue).filter(([name]) => /^[a-zA-Z_$][a-zA-Z_$0-9]*$/u.test(name))),
-        useNuxtApp: () => app,
-        createError,
-        debounceTick,
-        asyncDataDefaults: { deep: false },
-        granularCachedData: true,
-        pendingWhenIdle: false,
-        purgeCachedData: true,
-        stripNeverHydratedData: false,
-        tracingChannelNuxt: false,
-        vapor: false,
-        clientOnlySymbol: Symbol('client-only'),
-    }
-    const native = plain(source)
-        .replace(/^const createUseAsyncData =.*?^\}\);/gmsu, '')
-        .replaceAll('import.meta.client', 'true')
-        .replaceAll('import.meta.server', 'false')
-        .replaceAll('import.meta.dev', 'false')
-        .replaceAll('import.meta.prerender', 'false')
+    const environment = await nativeNuxtDependencies(app, { purgeCachedData: true })
+    const native = nativeRuntimeSource(source, { asyncData: true })
     const initialize = new Function(...Object.keys(environment), `${native}; return useAsyncData`) as (
         ...dependencies: unknown[]
     ) => UseNative
@@ -98,7 +70,7 @@ it('runs the installed reviewed patch and retains an exact unchanged original ne
 it.each(['original', 'patched'] as const)(
     'preserves native shared-key ownership after an ordinary error read (%s)',
     async (kind) => {
-        const runtime = create(variants[kind]),
+        const runtime = await create(variants[kind]),
             { app, use, scope, hooks } = runtime
         const slug = Vue.ref('ssr'),
             locale = Vue.ref('ja'),
@@ -166,7 +138,7 @@ it.each(['original', 'patched'] as const)(
 )
 
 it.each(['original', 'patched'] as const)('disposes losing initial-construction hooks (%s)', async (kind) => {
-    const { app, use, scope, hooks } = create(variants[kind])
+    const { app, use, scope, hooks } = await create(variants[kind])
     app.isHydrating = false
     const handler: Handler = async () => ({ value: 1 })
     let sibling: State | undefined,
@@ -211,7 +183,7 @@ const renderer = Vue.createRenderer<object, object>({
 it.each(['key', 'lazy initial'] as const)(
     'adopts the winning custom cache without redundant fetches (%s)',
     async (kind) => {
-        const { app, use, scope, hooks } = create(installed)
+        const { app, use, scope, hooks } = await create(installed)
         app.isHydrating = false
         const slug = Vue.ref(kind === 'key' ? 'initial' : 'cached'),
             key = () => slug.value
@@ -277,7 +249,7 @@ it.each(['key', 'lazy initial'] as const)(
 )
 
 it('publishes cached metadata coherently before the reactive table notifies observers', async () => {
-    const { app, use, scope, hooks } = create(installed)
+    const { app, use, scope, hooks } = await create(installed)
     app.isHydrating = false
     const cached = { value: 1 },
         seen: Array<Value | undefined> = []

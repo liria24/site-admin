@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as Vue from 'vue'
-import { stripTypeScriptTypes } from 'node:module'
+import { generatedRuntimeSource } from './nuxt-native-runtime'
 
 import { createSiteAdminDescriptor, defineSiteAdminConfig, text } from '../packages/site-admin/src'
 import type { SiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
@@ -18,10 +18,7 @@ const generatedForm = (
     models: () => Promise<SiteAdminDescriptor>,
     createForm: (options: UseSiteAdminFormOptions<Record<string, unknown>>) => Controller = useSiteAdminForm,
 ): GeneratedForm => {
-    const source = siteAdminNuxtFormTemplate()
-        .replace(/^import .*\n/gmu, '')
-        .replace(/import\.meta\.server/gu, 'false')
-    const compiled = stripTypeScriptTypes(source).replace(/^export /gmu, '')
+    const compiled = generatedRuntimeSource(siteAdminNuxtFormTemplate())
     const asyncData = <Value>(handler: () => Promise<Value>) => {
         const data = Vue.shallowRef<Value>()
         const error = Vue.shallowRef<unknown>()
