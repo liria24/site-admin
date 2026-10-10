@@ -197,7 +197,7 @@ export default defineNuxtConfig({
     await writeFile(
         join(temporary, 'server/site-admin.config.ts'),
         `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
-export default defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+export default defineSiteAdminConfig({ authorization: { roles: { user: {} } }, models: { posts: { fields: { title: text() } } } })
 `,
     )
     await mkdir(join(temporary, 'server/app/components/OgImage'), { recursive: true })
@@ -259,7 +259,11 @@ for (const module of ['assets', 'content', 'document', 'plugins']) {
     await writeFile(
         join(temporary, 'server/auth.config.ts'),
         `import { defineServerAuth } from '@nuxtjs/better-auth/config'
-export default defineServerAuth({ emailAndPassword: { enabled: true } })
+import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
+export default defineServerAuth({
+  database: drizzleAdapter({}, { provider: 'sqlite', usePlural: true, transaction: false }),
+  emailAndPassword: { enabled: true },
+})
 `,
     )
     exec([
@@ -271,7 +275,6 @@ export default defineServerAuth({ emailAndPassword: { enabled: true } })
         'server/schema.ts',
         '--auth',
         'server/auth.config.ts',
-        '--auth-use-plural',
     ])
     await writeFile(
         join(temporary, 'server/drizzle.config.ts'),
@@ -331,11 +334,22 @@ void admin
     )
     await writeFile(
         join(temporary, 'server/app/types.ts'),
-        `const client: import('@liria24/site-admin/client').SiteAdminClient = useSiteAdminClient()
+        `const nativeSession = useUserSession()
+const role: NonNullable<typeof nativeSession.user.value>['role'] = 'admin'
+const impersonatedBy: NonNullable<typeof nativeSession.session.value>['impersonatedBy'] = 'test-admin'
+// @ts-expect-error Native role inference must not degrade to any.
+const invalidRole: NonNullable<typeof nativeSession.user.value>['role'] = 1
+// @ts-expect-error Native session inference must retain its field type.
+const invalidImpersonatedBy: NonNullable<typeof nativeSession.session.value>['impersonatedBy'] = 1
+const client: import('@liria24/site-admin/client').SiteAdminClient = useSiteAdminClient()
 const route = useSiteAdminRoute()
 // @ts-expect-error No such public client method.
 client.missing()
 void route
+void role
+void impersonatedBy
+void invalidRole
+void invalidImpersonatedBy
 `,
     )
     const setupNuxt = (dev) =>
@@ -344,7 +358,7 @@ void route
             [
                 '--input-type=module',
                 '-e',
-                `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: './server', dev: ${dev}, ready: true }); await nuxt.close()`,
+                `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: './server', dev: ${dev}, ready: true }); try { if (!nuxt.options.alias['#auth/server']?.endsWith('site-admin/better-auth-server-config.ts')) throw new Error('Native module ordering lost the Site Admin auth wrapper'); } finally { await nuxt.close() }`,
             ],
             temporary,
             {
@@ -374,6 +388,16 @@ void route
     await install()
     setupNuxt(true)
     setupNuxt(false)
+    const nativeConfigPath = join(temporary, 'server/nuxt.config.ts')
+    const nativeConfig = await readFile(nativeConfigPath, 'utf8')
+    for (const modules of [
+        "['@liria24/site-admin/nuxt', '@nuxtjs/better-auth']",
+        "['@nuxtjs/better-auth', '@liria24/site-admin/nuxt']",
+    ]) {
+        await writeFile(nativeConfigPath, nativeConfig.replace("['@liria24/site-admin/nuxt']", modules))
+        setupNuxt(false)
+    }
+    await writeFile(nativeConfigPath, nativeConfig)
     if (consumer.dependencies['nuxt-og-image'])
         throw new Error('Consumer should not need a direct OG module dependency.')
     const takumiPath = join(temporary, 'server/app/components/OgImage/Default.takumi.vue')

@@ -86,7 +86,7 @@ bun x drizzle-kit generate --config drizzle.config.ts
 bun x drizzle-kit migrate --config drizzle.config.ts
 ```
 
-Point your application-owned `drizzle.config.ts` at that schema and your chosen migration directory/database. Review generated migrations and apply them explicitly; Site Admin never opens a built-in connection or applies migrations. For D1, apply SQL with your deployment tooling. Use `--auth-use-plural` only when the native auth adapter uses plural table names.
+Point your application-owned `drizzle.config.ts` at that schema and your chosen migration directory/database. Review generated migrations and apply them explicitly; Site Admin never opens a built-in connection or applies migrations. For D1, apply SQL with your deployment tooling. Auth generation uses the native adapter and its provider/table options from your auth configuration; combined content schemas currently support SQLite/D1.
 
 Saves create drafts until publication; set a model's `publishing: false` for immediate publication. Models are public by default; `public: false` removes anonymous access. Fields include relations, files, images, arrays and objects, with optional Standard Schema validation. See [model/config types](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/config.ts).
 

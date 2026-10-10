@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 import { normalize } from 'pathe'
+import { resolveModulePath } from 'exsolve'
 
 import {
     addImports,
@@ -234,20 +235,29 @@ const accessControl = (config: SiteAdminConfig): string => {
             return [name, statements]
         }),
     )
+    const definitions = {
+        admin: 'ac.newRole(resources)',
+        user: 'ac.newRole(Object.fromEntries(Object.keys(resources).map((name) => [name, []])))',
+        ...Object.fromEntries(
+            Object.entries(custom).map(([name, permissions]) => [name, `ac.newRole(${JSON.stringify(permissions)})`]),
+        ),
+    }
     return `const resources = ${JSON.stringify(resources)}
 const ac = createAccessControl(resources)
 const roles = {
-  admin: ac.newRole(resources),
-  user: ac.newRole(Object.fromEntries(Object.keys(resources).map((name) => [name, []]))),
-  ...Object.fromEntries(Object.entries(${JSON.stringify(custom)}).map(([name, permissions]) => [name, ac.newRole(permissions)])),
+  ${Object.entries(definitions)
+      .map(([name, code]) => `${JSON.stringify(name)}: ${code},`)
+      .join('\n  ')}
 }`
 }
 
 const serverAccessPlugin = (
     config: SiteAdminConfig,
-): string => `import { admin, createAccessControl } from '#better-auth/plugins'
+): string => `import { createAccessControl } from '#better-auth/plugins'
+import type { BetterAuthOptions } from '#better-auth'
+import { extendSiteAdminAuth } from '@liria24/site-admin/nuxt/server'
 ${accessControl(config)}
-export default admin({ ac, adminRoles: ['admin'], defaultRole: 'user', roles })
+export default <const T extends BetterAuthOptions>(options: T) => extendSiteAdminAuth(options, resources, Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, role.statements])))
 `
 
 const clientAccessPlugin = (
@@ -486,7 +496,7 @@ export default defineNuxtModule<ModuleConfig>({
             }
             if (options.server.enabled && options.auth === true) {
                 const serverAuthPlugin = addTemplate({
-                    filename: 'site-admin/better-auth-server-plugin.mjs',
+                    filename: 'site-admin/better-auth-server-plugin.ts',
                     getContents: () => serverAccessPlugin(domainConfig!),
                     write: true,
                 })
@@ -496,7 +506,6 @@ export default defineNuxtModule<ModuleConfig>({
                     write: true,
                 })
                 nuxt.hook('better-auth:plugins:extend', (sources) => {
-                    sources.server = [...(sources.server ?? []), serverAuthPlugin.dst]
                     sources.client = [...(sources.client ?? []), clientAuthPlugin.dst]
                 })
                 // Preserve the existing custom-hook bridge only for legacy hook-only apps.
@@ -511,6 +520,75 @@ export default defineNuxtModule<ModuleConfig>({
                     })
                 }
                 await installOnce('@nuxtjs/better-auth', nuxt)
+                nuxt.hook('nitro:config', (nativeConfig) => {
+                    const config = nativeConfig as NitroConfig
+                    config.esbuild ??= {}
+                    config.esbuild.options ??= {}
+                    config.esbuild.options.exclude = allowGeneratedFilesConfig(
+                        config.esbuild.options.exclude,
+                        resolve(nuxt.options.buildDir, 'site-admin'),
+                    )
+                })
+                // Native setup resolves the app factory and any other additive plugins first.
+                // Wrapping its final factory preserves request context and the app-selected adapter.
+                const stopAuthSetupObserver = nuxt.hooks.afterEach(({ name }) => {
+                    if (name !== 'modules:done') return
+                    stopAuthSetupObserver()
+                    const source = nuxt.options.alias['#auth/server']
+                    if (!source) throw new Error('[site-admin] Native Better Auth server configuration is unavailable.')
+                    const serverConfig = addTemplate({
+                        filename: 'site-admin/better-auth-server-config.ts',
+                        getContents: () => `import createAuth from ${JSON.stringify(source)}
+import extendAuth from ${JSON.stringify(serverAuthPlugin.dst)}
+export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createAuth(context))
+`,
+                        write: true,
+                    })
+                    nuxt.options.alias['#auth/server'] = serverConfig.dst
+                    // Native declarations are generated inside the app, outside the SDK's dependency scope.
+                    // Resolve their public type exports explicitly; pnpm need not hoist our dependencies.
+                    const nativeAuthTypes = Object.fromEntries(
+                        ['better-auth', 'better-auth/db', 'better-auth/api'].map((specifier) => [
+                            specifier,
+                            normalize(
+                                resolveModulePath(specifier, {
+                                    from: import.meta.url,
+                                    conditions: ['types', 'import'],
+                                }),
+                            ),
+                        ]),
+                    )
+                    const rewritten = new WeakSet<object>()
+                    const rewriteTemplates = (templates: typeof nuxt.options.build.templates) => {
+                        for (const template of templates) {
+                            if (
+                                !(
+                                    template.filename?.startsWith('types/nuxt-better-auth-') ||
+                                    template.filename === 'types/auth-database.d.ts'
+                                ) ||
+                                !template.getContents ||
+                                rewritten.has(template)
+                            )
+                                continue
+                            rewritten.add(template)
+                            const getContents = template.getContents
+                            template.getContents = async (context) =>
+                                (await getContents(context))
+                                    .replace(
+                                        `import type createServerAuth from '${source}'`,
+                                        `import type createServerAuth from ${JSON.stringify(serverConfig.dst)}`,
+                                    )
+                                    .replace(
+                                        /from (['"])(better-auth(?:\/(?:api|db))?)\1/gu,
+                                        (_match, _quote, specifier: string) =>
+                                            `from ${JSON.stringify(nativeAuthTypes[specifier])}`,
+                                    )
+                        }
+                    }
+                    // `nuxt prepare` writes types before the app template hook runs.
+                    rewriteTemplates(nuxt.options.build.templates)
+                    nuxt.hook('app:templates', (app) => rewriteTemplates(app.templates))
+                })
             }
             if (options.server.enabled && (domainConfig.assets || domainConfig.storage)) {
                 // Optional dependency defaults cover configured module entries. Dynamic installs

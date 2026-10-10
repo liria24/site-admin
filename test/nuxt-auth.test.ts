@@ -83,6 +83,8 @@ const setup = async (
         {
             options: {
                 rootDir: process.cwd(),
+                buildDir: resolve('/app/node_modules/.cache/nuxt/.nuxt'),
+                build: { templates: kit.templates },
                 modules: [],
                 files: { config: './test/fixtures/nuxt/files.config.ts' },
                 modulesDir: [],
@@ -95,6 +97,12 @@ const setup = async (
             },
             callHook: vi.fn((_name, config) => onConfig?.(config)),
             hook,
+            hooks: {
+                afterEach: (callback: unknown) => {
+                    hook('afterEach', callback)
+                    return vi.fn()
+                },
+            },
         },
     )
     return hook
@@ -132,7 +140,7 @@ describe('native Better Auth integration', () => {
             delete config.database
         })
         const filenames = kit.templates.map(({ filename }) => filename)
-        expect(filenames).toContain('site-admin/better-auth-server-plugin.mjs')
+        expect(filenames).toContain('site-admin/better-auth-server-plugin.ts')
         expect(filenames).toContain('site-admin/better-auth-client-plugin.mjs')
         expect(
             kit.templates
@@ -170,6 +178,63 @@ describe('native Better Auth integration', () => {
         expect(runtime).toContain('resolveSiteAdminDatabase(context.database ?? domainConfig.database')
         expect(runtime).not.toContain('database-sqlite')
         expect(runtime).not.toContain('database-d1')
+    })
+
+    it('extends the effective native factory after module setup without adding a second server admin', async () => {
+        const hook = await setup(
+            true,
+            undefined,
+            undefined,
+            { tsConfig: {} },
+            { '#auth/server': '/app/extended-auth.ts' },
+        )
+        const sources = { server: ['/app/other-plugin.ts'], client: ['/app/client-plugin.ts'] }
+        hook.mock.calls.find(([name]) => name === 'better-auth:plugins:extend')![1](sources)
+        expect(sources.server).toEqual(['/app/other-plugin.ts'])
+        expect(sources.client).toEqual(['/app/client-plugin.ts', 'site-admin/better-auth-client-plugin.mjs'])
+        const early = {
+            filename: 'types/nuxt-better-auth-endpoints.d.ts',
+            getContents: () =>
+                "import type createServerAuth from '/app/extended-auth.ts'\nimport type { getEndpoints } from 'better-auth/api'",
+        }
+        kit.templates.push(early)
+        await hook.mock.calls.find(([name]) => name === 'afterEach')![1]({ name: 'modules:done' })
+        expect(await Promise.resolve(early.getContents())).toContain(
+            'import type createServerAuth from "site-admin/better-auth-server-config.ts"',
+        )
+        expect(await Promise.resolve(early.getContents())).not.toContain("from 'better-auth/api'")
+        expect(await Promise.resolve(early.getContents())).toMatch(/better-auth\/dist\/api\/index\.d\.mts/u)
+        const wrapper = kit.templates.find(({ filename }) => filename === 'site-admin/better-auth-server-config.ts')!
+        expect(wrapper.getContents()).toContain('import createAuth from "/app/extended-auth.ts"')
+        expect(wrapper.getContents()).toContain('Parameters<typeof createAuth>[0]')
+        expect(wrapper.getContents()).toContain('extendAuth(createAuth(context))')
+        const template: { filename: string; getContents: () => string | Promise<string> } = {
+            filename: 'types/nuxt-better-auth-infer.d.ts',
+            getContents: () =>
+                "import type createServerAuth from '/app/extended-auth.ts'\nimport type { BetterAuthOptions } from 'better-auth'\nimport type { InferFieldsOutput } from 'better-auth/db'\nexport type Config = ReturnType<typeof createServerAuth>",
+        }
+        const templatesHook = hook.mock.calls.find(([name]) => name === 'app:templates')![1]
+        templatesHook({ templates: [template] })
+        const rewritten = template.getContents
+        expect(await template.getContents()).toContain(
+            'import type createServerAuth from "site-admin/better-auth-server-config.ts"',
+        )
+        expect(await template.getContents()).not.toMatch(/from ['"]better-auth(?:\/db)?['"]/u)
+        expect(await template.getContents()).toMatch(/better-auth\/dist\/db\/index\.d\.mts/u)
+        templatesHook({ templates: [template] })
+        expect(template.getContents).toBe(rewritten)
+        const config: import('nitropack/types').NitroConfig = { esbuild: { options: { exclude: /node_modules/u } } }
+        for (const [name, callback] of hook.mock.calls) if (name === 'nitro:config') callback(config)
+        const filters = config.esbuild!.options!.exclude as RegExp[]
+        expect(
+            filters.every(
+                (filter) =>
+                    !filter.test(
+                        resolve('/app/node_modules/.cache/nuxt/.nuxt/site-admin/better-auth-server-config.ts'),
+                    ),
+            ),
+        ).toBe(true)
+        expect(filters.some((filter) => filter.test('/app/node_modules/better-auth/dist/index.mjs'))).toBe(true)
     })
 
     it('serializes only approved SEO defaults and rules into public config', async () => {

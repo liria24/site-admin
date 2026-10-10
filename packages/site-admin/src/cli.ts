@@ -21,14 +21,13 @@ const { values, positionals } = parseArgs({
         config: { type: 'string', default: 'site-admin.config.ts' },
         out: { type: 'string' },
         auth: { type: 'string' },
-        'auth-use-plural': { type: 'boolean' },
         env: { type: 'string', multiple: true },
         prerender: { type: 'boolean', default: false },
     },
 })
 if (positionals.length !== 1 || positionals[0] !== 'generate')
     throw new Error(
-        'Usage: site-admin generate [--config site-admin.config.ts] [--env production] [--prerender] [--auth server/auth.config.ts] [--auth-use-plural] [--out schema.ts]',
+        'Usage: site-admin generate [--config site-admin.config.ts] [--env production] [--prerender] [--auth server/auth.config.ts] [--out schema.ts]',
     )
 const jiti = createJiti(import.meta.url, {
     alias: {
@@ -50,11 +49,7 @@ const auth = values.auth
           default: true,
       })
     : undefined
-const source = auth
-        ? await generateCombinedSchema(config, auth, {
-              usePlural: values['auth-use-plural'] ?? false,
-          })
-        : generateSiteAdminSchema(config),
+const source = auth ? await generateCombinedSchema(config, auth) : generateSiteAdminSchema(config),
     output = resolve(values.out ?? 'schema.ts')
 await mkdir(dirname(output), { recursive: true })
 await writeFile(output, source)

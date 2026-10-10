@@ -55,10 +55,16 @@ export default {
             expect(await readFile(resolve(path, 'explicit/schema.ts'), 'utf8')).toContain(
                 'text("field_title").notNull()',
             )
-            await writeFile(resolve(path, 'auth.config.ts'), 'export default {}\n')
+            const authAdapter = resolve(
+                'packages/site-admin/node_modules/@better-auth/drizzle-adapter/dist/relations-v2/index.mjs',
+            ).replaceAll('\\', '/')
+            const authSource = (usePlural: boolean) =>
+                `import { drizzleAdapter } from ${JSON.stringify(authAdapter)}\nexport default { database: drizzleAdapter({}, { provider: 'sqlite', usePlural: ${usePlural} }) }\n`
+            await writeFile(resolve(path, 'auth.config.ts'), authSource(false))
             run('production', ['--auth', 'auth.config.ts', '--out', 'schema-auth.ts'])
             expect(await readFile(resolve(path, 'schema-auth.ts'), 'utf8')).toContain('export const user = sqliteTable')
-            run('production', ['--auth', 'auth.config.ts', '--auth-use-plural', '--out', 'schema-auth-plural.ts'])
+            await writeFile(resolve(path, 'auth.config.ts'), authSource(true))
+            run('production', ['--auth', 'auth.config.ts', '--out', 'schema-auth-plural.ts'])
             expect(await readFile(resolve(path, 'schema-auth-plural.ts'), 'utf8')).toContain(
                 'export const users = sqliteTable',
             )

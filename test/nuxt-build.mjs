@@ -9,6 +9,7 @@ import domain from './fixtures/nuxt/site-admin.config.ts'
 import { createDatabase } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
 import { generateFixtureSQL } from './generate-fixture.mjs'
+import { admin } from 'better-auth/plugins'
 
 const fixture = fileURLToPath(new URL('./fixtures/nuxt/', import.meta.url))
 process.env.SITE_ADMIN_TEST_DATABASE = fixture + '/.data/content.sqlite3'
@@ -22,7 +23,9 @@ await Promise.all([
 ])
 
 // Generate source before native auth config inspection; applying SQL remains a separate application step.
-const migrationSQL = await generateFixtureSQL(domain, fixture + '/.data/schema')
+const migrationSQL = await generateFixtureSQL(domain, fixture + '/.data/schema', [
+    admin({ schema: { user: { fields: { role: 'accessRole' } } } }),
+])
 const devNuxt = await loadNuxt({ cwd: fixture, dev: true, ready: true })
 try {
     if (

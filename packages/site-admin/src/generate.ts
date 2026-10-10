@@ -9,22 +9,21 @@ type NativeAuthConfig =
     | ((context: { db: unknown; requestOrigin?: string; runtimeConfig: Record<string, unknown> }) => BetterAuthOptions)
 
 /** Uses Better Auth's schema generator without initializing auth or connecting to a database. */
-export async function generateCombinedSchema(
-    config: SiteAdminConfig,
-    auth: NativeAuthConfig,
-    options: { usePlural?: boolean } = {},
-): Promise<string> {
-    // Optional schema tooling is loaded only by combined auth generation.
-    const { drizzleAdapter: authAdapter } = await import('@better-auth/drizzle-adapter/relations-v2')
+export async function generateCombinedSchema(config: SiteAdminConfig, auth: NativeAuthConfig): Promise<string> {
     const resolved = typeof auth === 'function' ? auth({ db: undefined, runtimeConfig: {} }) : auth
+    if (typeof resolved.database !== 'function')
+        throw new Error(
+            'Auth generation requires the application-selected native adapter factory with createSchema. Defer opening its database during schema inspection.',
+        )
+    const plugins = [...(resolved.plugins ?? [])]
+    if (!plugins.some((plugin) => plugin.id === 'admin')) plugins.push(admin())
     const authOptions: BetterAuthOptions = {
         ...resolved,
-        database: authAdapter({}, { provider: 'sqlite', usePlural: options.usePlural }),
-        plugins: [...(resolved.plugins ?? []), admin()],
+        plugins,
     }
-    const adapter = (authOptions.database as Exclude<BetterAuthOptions['database'], undefined>)(authOptions)
-    if (adapter.id !== 'drizzle' || !adapter.createSchema)
-        throw new Error('Auth generation requires a Drizzle adapter with createSchema (relations-v2).')
+    const adapter = resolved.database(authOptions)
+    if (!adapter.createSchema)
+        throw new Error('The application-selected native auth adapter does not implement createSchema.')
     const { getAuthTables } = await import('better-auth/db')
     const generated = await adapter.createSchema({ tables: getAuthTables(authOptions), file: 'schema.ts' })
     if (!generated?.code) throw new Error('Better Auth returned no schema source.')
