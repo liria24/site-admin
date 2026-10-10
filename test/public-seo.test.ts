@@ -209,6 +209,13 @@ describe('public entry SEO payload', () => {
             description: 'Configured description',
             title: 'Configured',
         })
+        const response = await handlePublicRequest(
+            admin,
+            new Request('https://example.com/api/content/settings?markdown=summary'),
+        )
+        expect(await response.json()).toMatchObject([
+            { data: { _siteAdmin: { seo: { description: 'Configured description' } } } },
+        ])
         expect((await admin.getPublicEntry('disabled', disabled.id))?.seo).toEqual({ image: false })
         expect((await admin.getPublicEntry('generated', generated.id))?.seo).toEqual({ image: component })
         expect((await admin.getPublicEntry('gallery', gallery.id))?.seo).toEqual({
@@ -401,7 +408,7 @@ describe('public entry SEO payload', () => {
     it('derives Markdown descriptions after the existing parser without re-running plugins or resolvers', async () => {
         const plugin = vi.fn()
         const resolver = vi.fn((entry: PublicEntry) => {
-            expect(entry.data.summary).toBe('Intro **summary**\n\n<!-- more -->\n\nLong body')
+            expect(entry.data.summary).toBeTypeOf('string')
             return { description: 'Model fallback' }
         })
         const admin = await createMigratedTestAdmin({
@@ -409,7 +416,8 @@ describe('public entry SEO payload', () => {
                 markdown: { plugins: [{ name: 'seo-parser-count', post: plugin }] },
                 models: {
                     posts: {
-                        fields: { summary: markdown() },
+                        fields: { body: markdown(), description: textarea(), summary: markdown() },
+                        displayFields: { description: 'body' },
                         publishing: false,
                         seo: resolver,
                     },
@@ -431,8 +439,20 @@ describe('public entry SEO payload', () => {
         expect((await client.list('posts'))[0]?.seo?.description).toBe('Intro summary')
         expect(resolver).toHaveBeenCalledTimes(1)
         expect(plugin).toHaveBeenCalledTimes(1)
+        expect(resolver.mock.calls[0]?.[0].data.summary).toBe('Intro **summary**\n\n<!-- more -->\n\nLong body')
         // The direct server projection preserves its Markdown source contract.
         expect((await admin.getPublicEntry('posts', entry.id))?.seo?.description).toBe('Model fallback')
+        let version = entry.version
+        for (const [data, description] of [
+            [{ body: '---', description: ' Later text ', summary: '---' }, 'Later text'],
+            [{ body: '---', description: ' ', summary: 'Later **summary**' }, 'Later summary'],
+        ] as const) {
+            version = (await admin.updateEntry(entry.id, { expectedVersion: version, data })).version
+            expect((await client.get('posts', entry.id))?.seo?.description).toBe(description)
+            const parsed = plugin.mock.calls.length
+            expect((await client.list('posts', { markdown: 'summary' }))[0]?.seo?.description).toBe(description)
+            expect(plugin).toHaveBeenCalledTimes(parsed)
+        }
     })
 
     it('only serializes known SEO properties and JSON-only component inputs', async () => {
