@@ -175,7 +175,7 @@ describe('native Better Auth integration', () => {
         const hook = await setup(true)
         expect(hook.mock.calls.some(([name]) => name === 'better-auth:database:providers')).toBe(false)
         const runtime = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
-        expect(runtime).toContain('resolveSiteAdminDatabase(context.database ?? domainConfig.database')
+        expect(runtime).toContain('createSiteAdminDatabaseScope(domainConfig.database')
         expect(runtime).not.toContain('database-sqlite')
         expect(runtime).not.toContain('database-d1')
     })
@@ -235,6 +235,33 @@ describe('native Better Auth integration', () => {
             ),
         ).toBe(true)
         expect(filters.some((filter) => filter.test('/app/node_modules/better-auth/dist/index.mjs'))).toBe(true)
+    })
+
+    it('keeps direct-provider middleware lazy and prepares only the legacy native auth bridge', async () => {
+        const initialize = () => {
+            const source = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
+            const expression = source.match(/initializeRequest: (.+),\n/u)![1]
+            const nativeEvents = new WeakMap()
+            const databases = { prepare: vi.fn(async () => undefined), resolve: vi.fn() }
+            const run = new Function('nativeEvents', 'databases', `return (${expression})`)(nativeEvents, databases)
+            return { run, nativeEvents, databases }
+        }
+        await setup(true)
+        const direct = initialize()
+        const event = { req: new Request('https://example.test/unrelated'), context: {} }
+        await direct.run(event)
+        expect(direct.nativeEvents.get(event.context)).toBe(event)
+        expect(direct.databases.prepare).not.toHaveBeenCalled()
+        expect(direct.databases.resolve).not.toHaveBeenCalled()
+
+        kit.templates.length = 0
+        await setup(true, undefined, (config) => {
+            delete config.database
+        })
+        const bridge = initialize()
+        await bridge.run(event)
+        expect(bridge.databases.prepare).toHaveBeenCalledOnce()
+        expect(bridge.databases.resolve).not.toHaveBeenCalled()
     })
 
     it('serializes only approved SEO defaults and rules into public config', async () => {

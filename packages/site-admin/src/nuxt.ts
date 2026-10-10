@@ -24,7 +24,6 @@ import {
 } from 'nuxt/kit'
 import type { Nuxt } from 'nuxt/schema'
 import type { AppSession } from '@nuxtjs/better-auth'
-import type { BetterAuthOptions } from 'better-auth'
 import type { RequestEvent } from 'nuxt/server'
 import { transformNitroCloudflareRequest } from './runtime/nitro2'
 import { stopNitroDevReloadOnClose } from './nuxt/dev-close'
@@ -37,7 +36,7 @@ import {
 import type { Nitro, NitroConfig } from 'nitropack/types'
 import { createJiti } from 'jiti'
 import type { ModuleOptions as NuxtLLMsOptions } from 'nuxt-llms'
-import type { SiteAdminDatabase } from './adapter'
+import type { SiteAdminDatabaseScopeContext } from './runtime/database'
 
 import type { SiteAdminConfig, SiteAdminConfigInput } from './config'
 import { resolveSiteAdminConfig } from './config-resolution'
@@ -91,14 +90,7 @@ export interface SiteAdminAuthorizeContext {
     session: AppSession
 }
 
-export interface SiteAdminDatabaseContext {
-    request?: Request
-    authDatabase?: BetterAuthOptions['database']
-    database?: SiteAdminDatabase
-    event?: RequestEvent
-    /** Native task context, including Cloudflare bindings, for event-free work. */
-    platformContext?: object
-}
+export type SiteAdminDatabaseContext = SiteAdminDatabaseScopeContext<RequestEvent>
 
 // Build-time registries live on @nuxt/schema and are bridged by nuxt/schema.
 declare module '@nuxt/schema' {
@@ -779,7 +771,7 @@ import { useServerHooks } from 'nuxt/server'
 ${authImport}
 ${filesImport}
 ${namedAiActions || legacyAiModel ? `import { ${[namedAiActions ? 'executeSiteAdminAiAction' : '', legacyAiModel ? 'createSiteAdminAI' : ''].filter(Boolean).join(', ')} } from '@liria24/site-admin/ai'` : ''}
-import { resolveSiteAdminDatabase } from '@liria24/site-admin/runtime/database'
+import { createSiteAdminDatabaseScope } from '@liria24/site-admin/runtime/database'
 import inputConfig from ${JSON.stringify(normalize(configPath))}
 import { resolveSiteAdminConfig } from '@liria24/site-admin/config-resolution'
 const domainConfig = resolveSiteAdminConfig(inputConfig, ${JSON.stringify(environments)})
@@ -793,10 +785,7 @@ export default defineNitroPlugin((nitroApp) => {
   const hooks = useServerHooks()
   /** @type {WeakMap<import('@liria24/site-admin/server').SiteAdminDatabase, import('@liria24/site-admin/server').SiteAdmin<import('nuxt/server').RequestEvent>>} */
   const instances = new WeakMap()
-  /** @type {WeakMap<object, Promise<import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>>} */
-  const pending = new WeakMap()
-  /** @type {WeakMap<object, import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>} */
-  const databases = new WeakMap()
+  const databases = createSiteAdminDatabaseScope(domainConfig.database, (context) => hooks.callHook('site-admin:database', context))
   /** @type {WeakMap<object, import('nuxt/server').RequestEvent>} */
   const nativeEvents = new WeakMap()
   const authorize = ${authorize}
@@ -804,29 +793,9 @@ export default defineNitroPlugin((nitroApp) => {
     captureNitroRequest(event, ${JSON.stringify(options.server.managementBase)}, ${JSON.stringify(Boolean(domainConfig.assets))})
   })
   /** @param {import('nuxt/server').RequestEvent} [event] @returns {Promise<import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>} */
-  const resolveDatabases = async (event, platformContext, authOnly = false) => {
-    if (event) {
-      nativeEvents.set(event.context, event)
-      const cached = authOnly ? databases.get(event.context) : pending.get(event.context)
-      if (cached) return cached
-    }
-    const resolve = async () => {
-      /** @type {import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext} */
-      const context = { ...(event ? { event, request: event.req } : {}), ...(platformContext ? { platformContext } : {}) }
-      await hooks.callHook('site-admin:database', context)
-      if (!authOnly) context.database = await resolveSiteAdminDatabase(context.database ?? domainConfig.database, {
-        ...(event ? { event, request: event.req, platformContext: event.context } : {}),
-        ...(platformContext ? { platformContext } : {}),
-      })
-      if (event) databases.set(event.context, context)
-      return context
-    }
-    const result = resolve()
-    if (event && !authOnly) {
-      pending.set(event.context, result)
-      result.catch(() => { pending.delete(event.context); databases.delete(event.context) })
-    }
-    return result
+  const resolveDatabases = (event, platformContext) => {
+    if (event) nativeEvents.set(event.context, event)
+    return databases.resolve(event, platformContext)
   }
   /** @param {import('nuxt/server').RequestEvent} [event] @returns {Promise<import('@liria24/site-admin/server').SiteAdmin<import('nuxt/server').RequestEvent>>} */
   const getSiteAdmin = async (event, platformContext) => {
@@ -874,7 +843,7 @@ export default defineNitroPlugin((nitroApp) => {
     publicBase: ${JSON.stringify(options.client.basePath)},
     tasks: ${JSON.stringify(domainConfig.tasks ?? {})},
     getSiteAdmin,
-    initializeRequest: async (event) => { await resolveDatabases(event, undefined, ${cmsConfigured ? (namedAiActions ? `new URL(event.req.url).pathname.startsWith(${JSON.stringify(options.server.managementBase + '/ai/actions/')})` : 'false') : 'true'}) },
+    initializeRequest: ${options.auth && !domainConfig.database && cmsConfigured ? 'async (event) => { nativeEvents.set(event.context, event); await databases.prepare(event) }' : '(event) => { nativeEvents.set(event.context, event) }'},
     ${
         namedAiActions
             ? `runAiAction: async (event, name, input) => executeSiteAdminAiAction(domainConfig, name, input, {
