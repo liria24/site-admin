@@ -49,6 +49,9 @@ const entry = useSiteAdminEntry('posts', slug)
 const awaitable: AsyncData<InferSiteAdminPublicModels<typeof config>['posts'] | null | undefined, NuxtError | undefined> = entry
 const title: string | undefined = entry.data.value?.data.title
 const nodes: import('comark').Node[] | undefined = entry.data.value?.data.content.nodes
+const summary: import('comark').Node[] | undefined = entry.data.value?.data.content.meta.summary
+// @ts-expect-error Native summary is optional AST, never an excerpt string.
+const invalidSummary: string | undefined = entry.data.value?.data.content.meta.summary
 const transformed = useSiteAdminEntry('posts', () => slug.value, {
   transform: (entry) => ({ title: entry?.data.title ?? '' }), default: () => ({ title: '' }),
   locale: computed(() => locale.value), lazy: true, server: false, immediate: false,
@@ -115,7 +118,7 @@ batch.clear()
 void [artUrl, socialHref, company, rankImage, postNodes, featuredTitle, itemErrorStatus, batchTitles, pickedPostTitle, selectedTitle]
 const status: string = entry.status.value
 const error: NuxtError | undefined = entry.error.value
-void [awaitable, title, nodes, transformedTitle, titleList, pickedTitle, defaultTitle, count, invalidBody, status, error]
+void [awaitable, title, nodes, summary, invalidSummary, transformedTitle, titleList, pickedTitle, defaultTitle, count, invalidBody, status, error]
 `,
     )
     await writeFile(

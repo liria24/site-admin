@@ -2,6 +2,7 @@ import type { ParserOptions, Node } from 'comark'
 import summary from 'comark/plugins/summary'
 import type { SiteAdminConfig } from '../config'
 import { markdownAssets, type AssetUrlResolver } from './assets'
+import { paragraphSummary } from './summary'
 
 export const markdownPlugins = (
     options: SiteAdminConfig['markdown'],
@@ -12,6 +13,14 @@ export const markdownPlugins = (
     const plugins: Array<NonNullable<ParserOptions['plugins']>[number]> = [assets, ...configured]
     if (options?.summary?.enabled !== false) {
         plugins.push(summary({ delimiter: options?.summary?.delimiter ?? '<!-- more -->' }))
+        plugins.push({
+            name: 'site-admin-summary-fallback',
+            post(state) {
+                if (state.tree.meta.summary !== undefined) return
+                const fallback = paragraphSummary(state.tree.nodes)
+                if (fallback) state.tree.meta.summary = fallback
+            },
+        })
     }
     // Comark's summary plugin rebuilds nodes from tokens, independently of tree.nodes.
     // Resolve before applying the same configured URL safety policy to that separate tree.

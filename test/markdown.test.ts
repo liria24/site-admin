@@ -10,6 +10,7 @@ import {
 import { markdownPlugins } from '../packages/site-admin/src/markdown/plugins'
 import { createMarkdownContent } from '../packages/site-admin/src/markdown/content'
 import { astText, cleanText } from '../packages/site-admin/src/markdown/document'
+import { paragraphSummary } from '../packages/site-admin/src/markdown/summary'
 import { array, markdown, object } from '../packages/site-admin/src/fields'
 import { collectReferences } from '../packages/site-admin/src/validation'
 
@@ -22,6 +23,55 @@ const elements = (nodes: Node[], tag: string): ElementNode[] =>
     )
 
 describe('internal Markdown asset contracts', () => {
+    it('uses explicit native summaries before bounded paragraph fallback and respects disable/empty overrides', async () => {
+        const parse = (source: string, options: Parameters<typeof markdownPlugins>[0] = {}) =>
+            parseMarkdown(source, { plugins: markdownPlugins(options, url) })
+        const source = '# Heading\n\nFirst **body** paragraph.\n\nSecond paragraph.\n\nThird paragraph.'
+        const document = await parse(source)
+        expect(document.meta.summary).toEqual([
+            ['p', {}, 'First ', ['strong', {}, 'body'], ' paragraph.'],
+            ['p', {}, 'Second paragraph.'],
+        ])
+        expect((await parse('Intro\n\n<!-- more -->\n\nLater')).meta.summary).toEqual([['p', {}, 'Intro']])
+        expect((await parse(source, { summary: { enabled: false } })).meta.summary).toBeUndefined()
+        expect(
+            (
+                await parse(source, {
+                    plugins: [
+                        {
+                            name: 'summary',
+                            post(state) {
+                                state.tree.meta.summary = []
+                            },
+                        },
+                    ],
+                })
+            ).meta.summary,
+        ).toEqual([])
+        expect(
+            (await parse('![image](https://example.test/a)\n\n```js\ncode\n```\n\n<div>raw</div>')).meta.summary,
+        ).toBeUndefined()
+    })
+
+    it('excludes inline code/images/raw HTML, preserves Unicode and leaves the native AST untouched', async () => {
+        const source = 'Text **bold** `code` ![image](https://example.test/a) <strong>raw</strong> end.\n\nNext.'
+        const document = await parseMarkdown(source)
+        const before = structuredClone(document.nodes)
+        const summary = paragraphSummary(document.nodes)
+        expect(cleanText(astText(summary))).toBe('Text bold end. Next.')
+        expect(elements(summary!, 'code')).toHaveLength(0)
+        expect(elements(summary!, 'img')).toHaveLength(0)
+        expect(document.nodes).toEqual(before)
+        const family = '👨‍👩‍👧‍👦'
+        const accent = 'e\u0301'
+        const nodes: Node[] = [
+            ['p', {}, '界'.repeat(279), ['strong', {}, family + accent]],
+            ['p', {}, 'Later'],
+        ]
+        const unicodeSummary = paragraphSummary(nodes)
+        expect(unicodeSummary).toEqual([['p', {}, '界'.repeat(279), ['strong', {}, family]]])
+        expect(nodes[0]).toEqual(['p', {}, '界'.repeat(279), ['strong', {}, family + accent]])
+    })
     it('keeps legacy source-order ledger metadata and string projection without reformatting', () => {
         const source =
             '  ![a](site-admin://asset/a)\r\n\r\n`site-admin://asset/code`\r\n' +

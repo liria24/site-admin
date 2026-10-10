@@ -99,6 +99,7 @@ const entry = await useSiteAdminEntry('posts', () => String(route.params.slug), 
     default: () => null,
 })
 const posts = await useSiteAdminList('posts', { default: () => [], lazy: true })
+const summary = computed(() => entry.data.value?.data.body.meta.summary)
 const batch = await useSiteAdminBatch({
     posts: { list: 'posts' },
     featured: { entry: 'posts', slugOrId: () => String(route.params.slug) },
@@ -113,6 +114,8 @@ These composables return native Nuxt `AsyncData`: `data`, `error`, `status`, `re
 Nuxt 4.6.0 with Vue 3.6.0-rc.9/rc.10 needs the explicit application-owned [temporary compatibility patch](https://github.com/liria24/site-admin/blob/main/patches/nuxt%404.6.0.patch) for shared reactive keys. Site Admin does not apply it to consumers. Remove it after an upstream compatible release passes the [same native regression](https://github.com/liria24/site-admin/blob/main/test/nuxt-native-reentrancy.test.ts) and browser checks.
 
 Public entries have typed `entry.data.value?.data.title`; Markdown fields are parsed Comark documents; see [Markdown handling](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/markdown/content.ts). A batch preserves each named model's type and exposes its own `{ data, error }`, for example `batch.data.value?.featured.data?.data.title`. A missing entry is `null`; unknown/private model names are rejected by the generated types. See [public data examples and inference checks](https://github.com/liria24/site-admin/blob/main/test/nuxt-public-data-types.test.ts).
+
+`entry.data.value?.data.body.meta.summary` is typed as `Node[] | undefined`. An explicit native Comark summary before `<!-- more -->` wins, including an empty summary. Otherwise it contains up to two body paragraphs and 280 graphemes, excluding images, code and raw HTML. The body AST is unchanged; `markdown.summary.enabled: false` disables both. Render the AST with Comark and use CSS for the visible line limit; no AI runs.
 
 Native transformations preserve their output type:
 

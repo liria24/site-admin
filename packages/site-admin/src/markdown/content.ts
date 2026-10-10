@@ -1,4 +1,4 @@
-import { comarkContent, type Source, type JsonSchema } from 'comark-content'
+import { comarkContent, type Source, type JsonSchema, type ContentFile } from 'comark-content'
 import json from 'comark-content/plugins/json'
 import markdownFields, { markdownField } from 'comark-content/plugins/markdown-fields'
 import type { ModelDefinition, SiteAdminConfig } from '../config'
@@ -47,6 +47,7 @@ export const createMarkdownContent = (
     entries: PublicEntry[],
     options: SiteAdminConfig['markdown'],
     resolve: AssetUrlResolver,
+    parsed?: (id: string) => ContentFile | undefined,
 ) => {
     const items = new Map(
         entries.map((entry) => [
@@ -81,10 +82,29 @@ export const createMarkdownContent = (
         getItemRaw: async (key) => items.get(key),
     }
     const plugins = markdownPlugins(options, resolve)
-    return comarkContent(modelName, {
+    const contentOptions = {
         markdown: { plugins },
-        onError: 'throw',
+        onError: 'throw' as const,
         plugins: [json(), markdownFields()],
         source,
+    }
+    const raw = comarkContent(modelName, contentOptions)
+    if (!parsed) return raw
+    // A parsed provider exposes the complete source index. update() before init would
+    // persist an incomplete manifest containing only the reused detail documents.
+    const content = comarkContent(modelName, {
+        ...contentOptions,
+        source: {
+            parsed: true,
+            schema: source.schema!,
+            keys: source.keys,
+            get: async (key) => {
+                const item = items.get(key)
+                if (!item) return null
+                return parsed(item['_siteAdmin'].id) ?? raw.get(key)
+            },
+        },
     })
+    raw.hooks.hook('file:parsed', (context) => content.hooks.callHook('file:parsed', context))
+    return content
 }

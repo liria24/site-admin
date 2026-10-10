@@ -24,6 +24,81 @@ const database = () => {
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 describe('public entry SEO payload', () => {
+    it('retains the complete model list after sequential detail parsing and publication', async () => {
+        const plugin = vi.fn()
+        const admin = await createMigratedTestAdmin({
+            config: defineSiteAdminConfig({
+                markdown: { plugins: [{ name: 'detail-list-count', post: plugin }] },
+                models: {
+                    posts: {
+                        fields: { title: text(), body: markdown() },
+                        displayFields: { description: 'body' },
+                        route: '/posts/:slug',
+                    },
+                },
+            }),
+            database: database(),
+        })
+        const client = createSiteAdminClient<Record<string, PublicEntry>>({
+            origin: 'https://example.test',
+            fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
+        })
+        for (const slug of ['one', 'two']) {
+            const entry = await admin.createEntry('posts', {
+                slug,
+                data: { title: slug, body: `${slug} intro\n\n<!-- more -->\n\n${slug} full body` },
+            })
+            await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+            expect(await admin.resolvePath(`/posts/${slug}`)).toMatchObject({ entry: { slug } })
+            expect(await client.get('posts', slug)).toMatchObject({ slug })
+        }
+        expect((await client.list('posts')).map(({ slug }) => slug).sort()).toEqual(['one', 'two'])
+        const parsed = plugin.mock.calls.length
+        expect((await (await admin.content('posts')).list()).map(({ data }) => String(data.title)).sort()).toEqual([
+            'one',
+            'two',
+        ])
+        expect(await client.get('posts', 'one')).toMatchObject({ seo: { description: 'one intro' } })
+        expect(plugin).toHaveBeenCalledTimes(parsed)
+    })
+    it.each(['route-first', 'content-first'])(
+        'shares Markdown summary SEO between route and content (%s)',
+        async (order) => {
+            const plugin = vi.fn()
+            const admin = await createMigratedTestAdmin({
+                config: defineSiteAdminConfig({
+                    markdown: { plugins: [{ name: 'route-seo-count', post: plugin }] },
+                    models: {
+                        posts: {
+                            displayFields: { description: 'body' },
+                            fields: { title: text(), body: markdown() },
+                            route: '/posts/:slug',
+                        },
+                    },
+                }),
+                database: database(),
+            })
+            const draft = await admin.createEntry('posts', {
+                slug: 'hello',
+                data: { title: 'Post', body: 'Intro **summary**.\n\n<!-- more -->\n\nFull body' },
+            })
+            await admin.publishEntry(draft.id, { expectedVersion: draft.version })
+            if (order === 'content-first') await (await admin.content('posts')).list()
+            const response = await handlePublicRequest(
+                admin,
+                new Request('https://example.test/api/content/_route?path=/posts/hello'),
+            )
+            expect(response.status).toBe(200)
+            expect(await response.json()).toMatchObject({
+                kind: 'page',
+                entry: { seo: { title: 'Post', canonical: '/posts/hello', description: 'Intro summary .' } },
+            })
+            expect((await (await admin.content('posts')).list())[0]?.data).toMatchObject({
+                _siteAdmin: { seo: { description: 'Intro summary .' } },
+            })
+            expect(plugin).toHaveBeenCalledTimes(1)
+        },
+    )
     it('resolves model defaults and projected fields without descriptors or fetch-side head work', async () => {
         const resolver = vi.fn((entry: PublicEntry) => {
             expect(entry.data.cover).toMatchObject({ alt: 'Public cover', url: expect.stringContaining('/_assets/') })
