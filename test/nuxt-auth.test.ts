@@ -262,6 +262,17 @@ describe('native Better Auth integration', () => {
         await bridge.run(event)
         expect(bridge.databases.prepare).toHaveBeenCalledOnce()
         expect(bridge.databases.resolve).not.toHaveBeenCalled()
+
+        kit.templates.length = 0
+        const hook = await setup(true, undefined, (config) => {
+            delete config.database
+            config.models = {}
+        })
+        const withoutModels = initialize()
+        await withoutModels.run(event)
+        expect(hook.mock.calls.some(([name]) => name === 'better-auth:database:providers')).toBe(false)
+        expect(withoutModels.databases.prepare).not.toHaveBeenCalled()
+        expect(withoutModels.databases.resolve).not.toHaveBeenCalled()
     })
 
     it('serializes only approved SEO defaults and rules into public config', async () => {

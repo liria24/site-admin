@@ -30,7 +30,7 @@ afterEach(async () => {
 it('returns only mutation receipts without readDraft, including sort, older publication, and every sibling action', async () => {
     const config = defineSiteAdminConfig({
         authorization: defineSiteAdminAuthorization({
-            operator: { models: { posts: ['create', 'update', 'sort', 'publish', 'schedule', 'restore', 'ai'] } },
+            operator: { models: { posts: ['create', 'update', 'sort', 'publish', 'schedule', 'restore'] } },
         }),
         models: { posts: { fields: { title: text() }, sortable: true } },
     })
@@ -83,7 +83,8 @@ it('returns only mutation receipts without readDraft, including sort, older publ
             body: '{}',
         }),
     )
-    expect(ai.status).toBe(403)
+    expect(ai.status).toBe(404)
+    expect(await ai.text()).not.toContain('secret')
     const relationConfig = defineSiteAdminConfig({
         ...config,
         models: {

@@ -15,14 +15,6 @@ import type {
     SiteAdminModelAction,
     SiteAdminSystemAction,
 } from '../config'
-import type {
-    SiteAdminAIDraftProposal,
-    SiteAdminAIProposal,
-    SiteAdminAIModelContext,
-    SiteAdminAIRuntime,
-    SiteAdminMetadataInput,
-    SiteAdminProofreadInput,
-} from '../ai'
 import { createSiteAdminDescriptor, type SiteAdminDescriptor } from '../descriptor'
 import { SiteAdminError, type SiteAdminIssue } from '../errors'
 import { createSiteAdminRouteResolver, serializeSiteAdminSeo, type SiteAdminRouteResolver } from '../seo'
@@ -150,10 +142,6 @@ export class SiteAdmin<Context = unknown> {
         this.#options = options
         this.#resolveRouteRule = createSiteAdminRouteResolver(options.config.routeRules)
         this.#descriptor = createSiteAdminDescriptor(options.config)
-        for (const [name, model] of Object.entries(this.#descriptor.models))
-            model.ai =
-                options.aiEnabled !== false &&
-                Boolean(options.aiRuntime || (options.aiActions?.models ?? options.config.ai?.models)?.[name])
     }
 
     get config(): SiteAdminOptions<Context>['config'] {
@@ -167,12 +155,7 @@ export class SiteAdmin<Context = unknown> {
     descriptorFor(actor: import('./types').SiteAdminActor): SiteAdminDescriptor {
         const descriptor = this.descriptor
         descriptor.models = Object.fromEntries(
-            Object.entries(descriptor.models)
-                .filter(([modelName]) => this.can(actor, 'model', 'readDraft', modelName))
-                .map(([modelName, model]) => [
-                    modelName,
-                    { ...model, ai: model.ai === true && this.can(actor, 'model', 'ai', modelName) },
-                ]),
+            Object.entries(descriptor.models).filter(([modelName]) => this.can(actor, 'model', 'readDraft', modelName)),
         )
         if (!this.can(actor, 'asset', 'read')) descriptor.assets = false
         return descriptor
@@ -363,135 +346,6 @@ export class SiteAdmin<Context = unknown> {
         await this.initialize()
         await this.#requiredEntry(entryId)
         return this.#storage.revisions(entryId)
-    }
-
-    async runAIAction(
-        entryId: string,
-        actionName: string,
-        input: Record<string, unknown>,
-        context?: SiteAdminAIModelContext,
-    ): Promise<SiteAdminAIProposal> {
-        await this.initialize()
-        const entry = await this.getEntry(entryId)
-        if (this.#options.aiEnabled === false)
-            throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'AI operations are not available.')
-        if (input.draft !== undefined) {
-            if (
-                !isObject(input.draft) ||
-                !isObject(input.draft.data) ||
-                (input.draft.slug !== undefined && typeof input.draft.slug !== 'string')
-            )
-                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'AI draft must contain data and an optional slug.')
-            if (input.expectedVersion !== entry.version)
-                throw new SiteAdminError(
-                    'SITE_ADMIN_CONFLICT',
-                    'Entry changed. Reload latest before generating a proposal.',
-                )
-        }
-        const action = (this.#options.aiActions?.models ?? this.config.ai?.models)?.[entry.model]?.[actionName]
-        if (!action) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `AI action "${actionName}" does not exist.`)
-        const snapshot = isObject(input.draft)
-            ? {
-                  ...entry,
-                  data: input.draft.data as Record<string, unknown>,
-                  ...(typeof input.draft.slug === 'string' ? { slug: input.draft.slug } : {}),
-              }
-            : entry
-        let output
-        try {
-            const ai = this.#options.aiExecution?.(context)
-            output = await action({
-                entry: structuredClone(snapshot),
-                input: structuredClone(input.draft !== undefined ? (isObject(input.input) ? input.input : {}) : input),
-                ...(context ? { context } : {}),
-                ...(ai ? { ai } : {}),
-            })
-        } catch {
-            throw new SiteAdminError('SITE_ADMIN_AI_FAILED', 'AI operation failed. Your draft is kept.')
-        }
-        const latest = await this.getEntry(entryId)
-        if (latest.version !== entry.version || latest.currentRevisionId !== entry.currentRevisionId)
-            throw new SiteAdminError('SITE_ADMIN_CONFLICT', 'Entry changed while generating a proposal.')
-        const definition = this.#model(entry.model)
-        const validated = await validateModelData(definition, output.data)
-        const issues = [...(output.issues ?? []), ...validated.issues]
-        let slug = output.slug ?? snapshot.slug
-        try {
-            if (slug !== '') slug = validateSlug(slug, this.config.modelDefaults?.slug?.maxLength ?? 80)
-        } catch (error) {
-            issues.push({ message: error instanceof Error ? error.message : 'Invalid slug.', path: 'slug' })
-        }
-        return {
-            baseRevisionId: entry.currentRevisionId,
-            data: validated.data ?? output.data,
-            issues,
-            slug,
-            version: entry.version,
-        }
-    }
-
-    async generateMetadata(
-        modelName: string,
-        input: SiteAdminMetadataInput,
-        context?: Context,
-    ): Promise<SiteAdminAIDraftProposal> {
-        const definition = this.#model(modelName)
-        if (!isObject(input) || !isObject(input.data))
-            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
-        if (!isObject(input.generate))
-            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"generate" must be an object.')
-        for (const [field, value] of Object.entries(input.generate))
-            if (!['slug', 'excerpt'].includes(field) || typeof value !== 'boolean')
-                throw new SiteAdminError(
-                    'SITE_ADMIN_INVALID_INPUT',
-                    '"generate" may contain only boolean slug and excerpt flags.',
-                )
-        if (input.slug !== undefined && typeof input.slug !== 'string')
-            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"slug" must be a string.')
-        return this.#runDraftAI(context, (runtime) =>
-            runtime.generateMetadata(modelName, definition, input, this.config.modelDefaults?.slug?.maxLength ?? 80),
-        )
-    }
-
-    /** Proposes proofreading edits. The caller must explicitly apply and save the proposal. */
-    async proofreadDraft(
-        modelName: string,
-        input: SiteAdminProofreadInput,
-        context?: Context,
-    ): Promise<SiteAdminAIDraftProposal> {
-        const definition = this.#model(modelName)
-        if (!isObject(input) || !isObject(input.data))
-            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
-        if (
-            input.fields !== undefined &&
-            (!Array.isArray(input.fields) || input.fields.some((field) => typeof field !== 'string'))
-        )
-            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"fields" must be an array of strings.')
-        return this.#runDraftAI(context, (runtime) => runtime.proofreadDraft(modelName, definition, input))
-    }
-
-    async #runDraftAI(
-        context: Context | undefined,
-        operation: (runtime: SiteAdminAIRuntime) => Promise<SiteAdminAIDraftProposal>,
-    ): Promise<SiteAdminAIDraftProposal> {
-        if (this.#options.aiEnabled === false || !this.#options.aiRuntime)
-            throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'AI operations are not available.')
-        try {
-            const runtime =
-                typeof this.#options.aiRuntime === 'function'
-                    ? await this.#options.aiRuntime(context)
-                    : this.#options.aiRuntime
-            return await operation(runtime)
-        } catch (error) {
-            if (error instanceof SiteAdminError) {
-                if (error.code === 'SITE_ADMIN_INVALID_INPUT') throw error
-                if (error.code === 'SITE_ADMIN_AI_UNAVAILABLE')
-                    throw new SiteAdminError(error.code, 'AI operations are not available.')
-                if (error.code === 'SITE_ADMIN_AI_OUTPUT_INVALID')
-                    throw new SiteAdminError(error.code, 'AI returned an invalid response.')
-            }
-            throw new SiteAdminError('SITE_ADMIN_AI_FAILED', 'AI operation failed.')
-        }
     }
 
     async referencesTo(

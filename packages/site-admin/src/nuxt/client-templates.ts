@@ -231,8 +231,8 @@ const siteAdminResolveBatch = async (client: SiteAdminClient, requests: readonly
 /** Emit only if the consumer has installed the optional TanStack form peer. */
 export const siteAdminNuxtFormTemplate =
     (): string => `import { useSiteAdminForm as createForm } from '@liria24/site-admin/form'
-import type { UseSiteAdminFormOptions } from '@liria24/site-admin/form'
-import type { SiteAdminFormModels, SiteAdminManagementModels, SiteAdminAIActionModels, SiteAdminEntry } from '@liria24/site-admin/client'
+import type { UseSiteAdminFormOptions, SiteAdminFormActionNames } from '@liria24/site-admin/form'
+import type { SiteAdminFormModels, SiteAdminManagementModels, SiteAdminEntry } from '@liria24/site-admin/client'
 import { SiteAdminClientError } from '@liria24/site-admin/client'
 import { siteAdminManagementClientOptions, createNuxtSiteAdminManagementClient, useSiteAdminAuthScope, useSiteAdminModels, siteAdminAsyncData, siteAdminManagementKey } from '#build/site-admin/client'
 import { useNuxtApp, useState } from '#imports'
@@ -240,10 +240,10 @@ import * as Vue from 'vue'
 
 type ModelName = Extract<keyof SiteAdminFormModels, string>
 type ModelData<Name extends ModelName> = Extract<SiteAdminFormModels[Name], Record<string, unknown>>
-type NuxtFormOptions<Data extends Record<string, unknown>, EntryData = Record<string, unknown>> = Omit<UseSiteAdminFormOptions<Data>, 'descriptor' | 'modelName' | 'entry' | 'id' | 'drafts' | 'client' | 'presentation' | 'generateMetadataOnSubmit' | 'initialEntry' | 'loadDescriptor' | 'loadEntry'> &
+type NuxtFormOptions<Data extends Record<string, unknown>, EntryData = Record<string, unknown>> = Omit<UseSiteAdminFormOptions<Data>, 'descriptor' | 'modelName' | 'entry' | 'id' | 'drafts' | 'client' | 'presentation' | 'initialEntry' | 'loadDescriptor' | 'loadEntry'> &
   ({ entry?: SiteAdminEntry<EntryData>; id?: never } | { id?: Vue.MaybeRefOrGetter<string | null | undefined>; entry?: never })
 
-export function useSiteAdminForm<Name extends ModelName & keyof SiteAdminManagementModels & keyof SiteAdminAIActionModels>(modelName: Name, options?: NuxtFormOptions<ModelData<Name>, SiteAdminManagementModels[Name]>): Promise<ReturnType<typeof createForm<ModelData<Name>, Extract<keyof SiteAdminAIActionModels[Name], string>, Extract<SiteAdminManagementModels[Name], Record<string, unknown>>>>>
+export function useSiteAdminForm<Name extends ModelName & keyof SiteAdminManagementModels>(modelName: Name, options?: NuxtFormOptions<ModelData<Name>, SiteAdminManagementModels[Name]>): Promise<ReturnType<typeof createForm<ModelData<Name>, SiteAdminFormActionNames<Extract<SiteAdminManagementModels[Name], Record<string, unknown>>>, Extract<SiteAdminManagementModels[Name], Record<string, unknown>>>>>
 export function useSiteAdminForm<Data extends Record<string, unknown>>(options: UseSiteAdminFormOptions<Data>): ReturnType<typeof createForm<Data>>
 export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOptions<Record<string, unknown>>, options: NuxtFormOptions<Record<string, unknown>> = {}) {
   const defaultConnection = siteAdminManagementClientOptions()
@@ -330,7 +330,7 @@ export const siteAdminNuxtModelTypes = (
     configPath: string,
     environments: readonly string[] = [],
 ): string => `import '@liria24/site-admin/client'
-import type { InferSiteAdminModels, InferSiteAdminFormModels, InferSiteAdminAIActions, InferSiteAdminNamedAiActions, InferSiteAdminPublicModels, ResolvedSiteAdminConfig } from '@liria24/site-admin'
+import type { InferSiteAdminModels, InferSiteAdminFormModels, InferSiteAdminNamedAiActions, InferSiteAdminPublicModels, ResolvedSiteAdminConfig } from '@liria24/site-admin'
 
 type SiteAdminDomainConfig = ResolvedSiteAdminConfig<typeof import(${JSON.stringify(normalize(configPath))}).default, readonly [${environments.map((environment) => JSON.stringify(environment)).join(', ')}]>
 
@@ -338,7 +338,6 @@ declare module '@liria24/site-admin/client' {
   interface SiteAdminClientRegistry {
     managementModels: InferSiteAdminModels<SiteAdminDomainConfig>
     formModels: InferSiteAdminFormModels<SiteAdminDomainConfig>
-    aiActions: InferSiteAdminAIActions<SiteAdminDomainConfig>
     namedAiActions: InferSiteAdminNamedAiActions<SiteAdminDomainConfig>
     publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>
     publicSummaryModels: InferSiteAdminPublicModels<SiteAdminDomainConfig, 'summary'>

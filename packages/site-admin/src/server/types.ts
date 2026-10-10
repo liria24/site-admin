@@ -2,7 +2,6 @@ import type { SiteAdminDatabase as Database } from '../adapter'
 import type { Body, Files, StoredFile } from 'files-sdk'
 
 import type { SiteAdminConfig } from '../config'
-import type { SiteAdminAIActionConfig, SiteAdminAIRuntime } from '../ai'
 import type { SiteAdminIssue } from '../errors'
 
 export interface SiteAdminActor {
@@ -13,12 +12,6 @@ export interface SiteAdminActor {
 export type FilesResolver = (storage: string) => Promise<Files>
 
 export interface SiteAdminOptions<Context = unknown> {
-    aiActions?: SiteAdminAIActionConfig
-    aiEnabled?: boolean
-    /** Optional native executor capability. Nuxt injects it only when AI is enabled. */
-    aiExecution?: (context?: import('../ai').SiteAdminAIModelContext) => import('../ai').SiteAdminAIExecution
-    /** Resolved for each operation so request-scoped provider bindings are never cached. */
-    aiRuntime?: SiteAdminAIRuntime | ((context?: Context) => Promise<SiteAdminAIRuntime>)
     authorize?: (request: Request, context?: Context) => Promise<SiteAdminActor | null> | SiteAdminActor | null
     config: SiteAdminConfig
     database: Database

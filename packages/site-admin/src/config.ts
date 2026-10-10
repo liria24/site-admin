@@ -2,7 +2,7 @@ import type { StandardSchemaV1 } from '@standard-schema/spec'
 import type { MarkdownDocument, MergePluginMeta, Node, ParserOptions } from 'comark'
 import type summary from 'comark/plugins/summary'
 import type { FilesEnvironmentConfig, FilesConfigInput, defineFilesConfig } from 'nuxt-files-sdk/config'
-import type { SiteAdminAIAction, SiteAdminAIModel } from './ai'
+import type { SiteAdminAIModel } from './ai'
 import type { SiteAdminDatabaseConfig } from './runtime/database'
 import type { SiteAdminTaskOptions } from './runtime/tasks'
 
@@ -91,14 +91,9 @@ export interface SiteAdminAIConfig {
     decisionModel?: SiteAdminDecisionModel
     /** Server-only, entry-independent application actions. */
     actions?: Record<string, SiteAdminNamedAiAction>
-    /** @deprecated Entry-bound callbacks for existing editors; new actions use ai.actions. */
-    models?: Record<string, Record<string, SiteAdminAIAction>>
-    /** @deprecated Draft saves never invoke AI. Move generation into an explicit models action. */
-    slug?: (input: { data: Record<string, unknown>; model: string }) => Promise<string | null> | string | null
 }
 
 export type SiteAdminModelAction =
-    | 'ai'
     | 'create'
     | 'delete'
     | 'publish'
@@ -159,7 +154,6 @@ export interface SiteAdminConfig<
     }
     modelDefaults?: {
         historicalRedirectStatus?: 301 | 302 | 307 | 308
-        relationOnDelete?: 'restrict'
         slug?: { maxLength?: number }
     }
     models: Models
@@ -287,15 +281,6 @@ export type InferModelData<Model extends ModelDefinition> = InferFields<Model['f
 
 export type InferSiteAdminModels<Config extends SiteAdminConfig> = {
     [Name in keyof Config['models']]: InferModelData<Config['models'][Name]>
-}
-
-/** Configured action names remain part of the Nuxt model registry without exposing implementations. */
-export type InferSiteAdminAIActions<Config extends SiteAdminConfig> = {
-    [Name in keyof Config['models']]: Config extends { ai: { models: infer Actions } }
-        ? Name extends keyof Actions
-            ? Actions[Name]
-            : {}
-        : {}
 }
 
 type FormField<F extends AnyField> = F extends { kind: 'image' | 'file' }

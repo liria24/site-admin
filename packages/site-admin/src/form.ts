@@ -14,7 +14,12 @@ import {
 } from 'vue'
 
 import { createSiteAdminManagementClient, SiteAdminClientError } from './client'
-import type { SiteAdminDraftProposal, SiteAdminEntryMutation, SiteAdminManagementClient } from './client'
+import type {
+    SiteAdminDraftProposal,
+    SiteAdminEntryMutation,
+    SiteAdminManagementClient,
+    SiteAdminNamedAiActions,
+} from './client'
 import { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset, type SiteAdminAsset } from './management-assets'
 import { projectStoredFields } from './stored-data'
 import type { FieldDescriptor, ModelDescriptor } from './descriptor'
@@ -49,8 +54,6 @@ export interface UseSiteAdminFormOptions<Data extends Record<string, unknown>> {
     initialEntry?: EntryRecord
     client?: SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     presentation?: boolean
-    /** @deprecated Saves never invoke AI. Select an explicit ai.run action instead. */
-    generateMetadataOnSubmit?: boolean
     loadDescriptor?: (signal: AbortSignal) => Promise<ModelDescriptor>
     loadEntry?: (id: string, signal: AbortSignal) => Promise<EntryRecord>
 }
@@ -67,6 +70,18 @@ export interface SiteAdminSessionDraft {
 
 export { presentSiteAdminData, serializeSiteAdminData }
 export type { SiteAdminAsset }
+
+/** Only native actions returning model-compatible proposals can be applied by a typed form. */
+export type SiteAdminFormActionNames<Data> = string extends keyof SiteAdminNamedAiActions
+    ? string
+    : {
+          [Name in keyof SiteAdminNamedAiActions]: SiteAdminNamedAiActions[Name]['data'] extends {
+              data: { [Field in keyof Data]?: Data[Field] | undefined }
+          }
+              ? Name
+              : never
+      }[keyof SiteAdminNamedAiActions] &
+          string
 
 const fieldDefault = (field: FieldDescriptor): unknown => {
     if (field.default !== undefined) return structuredClone(toRaw(field.default))
@@ -96,7 +111,9 @@ const descriptorIssues = (
     data: Record<string, unknown>,
     parent = '',
 ): SiteAdminIssue[] => {
-    const issues: SiteAdminIssue[] = []
+    const issues: SiteAdminIssue[] = Object.keys(data)
+        .filter((name) => !Object.hasOwn(fields, name))
+        .map((name) => ({ path: [parent, name].filter(Boolean).join('.'), message: 'Unknown field.' }))
     for (const [name, field] of Object.entries(fields)) {
         const path = [parent, name].filter(Boolean).join('.')
         const value = data[name]
@@ -159,7 +176,7 @@ const uploadWithProgress = (url: string, file: File, progress: Ref<number | null
 
 export const useSiteAdminForm = <
     Data extends Record<string, unknown>,
-    Action extends string = string,
+    Action extends Extract<keyof SiteAdminNamedAiActions, string> = SiteAdminFormActionNames<Data>,
     RawData extends Record<string, unknown> = Data,
 >(
     options: UseSiteAdminFormOptions<Data>,
@@ -498,14 +515,20 @@ export const useSiteAdminForm = <
     const aiError = shallowRef<unknown>(null)
     const aiStale = ref(false)
     let proposalSnapshot: string | null = null
+    let proposalProps: unknown
+    let proposalPropsSnapshot: string | null = null
     const inputSnapshot = () =>
         canonical([identity.value, serialize(values.value), slug.value, metadata.value, version.value])
-    const propose = async (kind: string, actionInput?: Record<string, unknown>): Promise<void> => {
+    const propose = async <Name extends Action>(
+        kind: Name,
+        props: SiteAdminNamedAiActions[Name]['props'],
+    ): Promise<void> => {
         aiRequest?.abort()
         const transportRequest = new AbortController()
         aiRequest = transportRequest
         const request = ++generation
         const snapshot = inputSnapshot()
+        const propsSnapshot = canonical(props)
         const snapshotVersion = version.value
         aiBusy.value = kind
         aiError.value = null
@@ -513,25 +536,45 @@ export const useSiteAdminForm = <
         proposal.value = null
         try {
             const data = serialize(form.state.values)
-            if (actionInput !== undefined && (entryId.value === null || version.value === null))
-                throw new SiteAdminClientError(
-                    'SITE_ADMIN_INVALID_INPUT',
-                    'Save the draft before running an entry action.',
-                    400,
-                )
-            const result = await client.runAIAction(
-                entryId.value!,
-                kind,
-                { expectedVersion: version.value!, draft: { data, slug: slug.value }, input: actionInput ?? {} },
-                { signal: transportRequest.signal },
-            )
+            const result: unknown = await client.runAiAction(kind, { props }, { signal: transportRequest.signal })
             if (request !== generation) return
-            if (transportRequest.signal.aborted || snapshot !== inputSnapshot() || result.version !== snapshotVersion) {
+            if (
+                transportRequest.signal.aborted ||
+                snapshot !== inputSnapshot() ||
+                propsSnapshot !== canonical(props) ||
+                (isRecord(result) && result.version !== undefined && result.version !== snapshotVersion)
+            ) {
                 aiStale.value = true
                 return
             }
+            if (
+                !isRecord(result) ||
+                !isRecord(result.data) ||
+                (result.slug !== undefined && typeof result.slug !== 'string') ||
+                (result.issues !== undefined &&
+                    (!Array.isArray(result.issues) ||
+                        result.issues.some(
+                            (issue) =>
+                                !isRecord(issue) || typeof issue.path !== 'string' || typeof issue.message !== 'string',
+                        )))
+            )
+                throw new SiteAdminClientError(
+                    'SITE_ADMIN_INVALID_RESPONSE',
+                    'A form action must return a data proposal.',
+                    502,
+                )
+            const issues = descriptorIssues(descriptor.value.fields, {
+                ...data,
+                ...serialize(result.data as Data),
+            })
             proposalSnapshot = snapshot
-            proposal.value = { ...result, data: present(result.data) }
+            proposalProps = props
+            proposalPropsSnapshot = propsSnapshot
+            proposal.value = {
+                data: present(result.data),
+                issues: [...((result.issues as SiteAdminIssue[] | undefined) ?? []), ...issues],
+                ...(typeof result.slug === 'string' ? { slug: result.slug } : {}),
+            }
         } catch (error) {
             if (request === generation) aiError.value = error
         } finally {
@@ -543,6 +586,8 @@ export const useSiteAdminForm = <
         aiRequest?.abort()
         proposal.value = null
         proposalSnapshot = null
+        proposalProps = undefined
+        proposalPropsSnapshot = null
         aiBusy.value = null
         aiStale.value = false
         aiError.value = null
@@ -550,7 +595,12 @@ export const useSiteAdminForm = <
     const applyProposal = (
         selection: { fields?: readonly Extract<keyof Data, string>[]; slug?: boolean } = {},
     ): boolean => {
-        if (!proposal.value || aiStale.value || proposalSnapshot !== inputSnapshot()) {
+        if (
+            !proposal.value ||
+            aiStale.value ||
+            proposalSnapshot !== inputSnapshot() ||
+            proposalPropsSnapshot !== canonical(proposalProps)
+        ) {
             aiStale.value = true
             return false
         }
@@ -575,9 +625,13 @@ export const useSiteAdminForm = <
             { flush: 'sync' },
         )
     watch(
-        [values, slug, metadata],
+        [values, slug, metadata, () => (proposal.value ? canonical(proposalProps) : null)],
         () => {
-            if (proposal.value && proposalSnapshot !== inputSnapshot()) aiStale.value = true
+            if (
+                proposal.value &&
+                (proposalSnapshot !== inputSnapshot() || proposalPropsSnapshot !== canonical(proposalProps))
+            )
+                aiStale.value = true
             remember()
         },
         { deep: true, flush: 'sync' },
@@ -694,14 +748,8 @@ export const useSiteAdminForm = <
             stale: aiStale,
             apply: applyProposal,
             discard: discardProposal,
-            run: (action: Action, input: Record<string, unknown> = {}) => propose(action, input),
-            /** @deprecated Use application-owned config.ai.models actions with ai.run. */
-            generateMetadata: () =>
-                propose('metadata', {
-                    generate: { slug: metadata.value.slug === 'auto', excerpt: metadata.value.excerpt === 'auto' },
-                }),
-            proofread: (fields?: readonly Extract<keyof Data, string>[]) =>
-                propose('proofread', { ...(fields ? { fields } : {}) }),
+            run: <Name extends Action>(action: Name, props: SiteAdminNamedAiActions[Name]['props']) =>
+                propose(action, props),
         },
         entryId,
         form,

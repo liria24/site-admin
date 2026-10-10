@@ -1,9 +1,3 @@
-import type {
-    SiteAdminAIDraftProposal,
-    SiteAdminAIProposal,
-    SiteAdminMetadataInput,
-    SiteAdminProofreadInput,
-} from './ai'
 import type { SiteAdminDescriptor } from './descriptor'
 import type { SiteAdminIssue } from './errors'
 import type {
@@ -42,9 +36,6 @@ export type SiteAdminManagementModels = SiteAdminClientRegistry extends { manage
 export type SiteAdminFormModels = SiteAdminClientRegistry extends { formModels: infer Models }
     ? Models
     : SiteAdminManagementModels
-export type SiteAdminAIActionModels = SiteAdminClientRegistry extends { aiActions: infer Actions }
-    ? Actions
-    : Record<string, Record<string, unknown>>
 export { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset } from './management-assets'
 export type { SiteAdminAsset } from './management-assets'
 
@@ -62,22 +53,12 @@ export type SiteAdminCreateEntryInput<Data = Record<string, unknown>> = Omit<Ent
 export type SiteAdminUpdateEntryInput<Data = Record<string, unknown>> = Omit<UpdateEntryInput, 'actorId' | 'data'> & {
     data: Data
 }
-export type SiteAdminMetadataDraftInput<Data = Record<string, unknown>> = Omit<SiteAdminMetadataInput, 'data'> & {
+/** Unsaved form proposal. Applying and saving remain explicit controller actions. */
+export interface SiteAdminDraftProposal<Data = Record<string, unknown>> {
     data: Partial<Data>
+    issues: SiteAdminIssue[]
+    slug?: string
 }
-export type SiteAdminProofreadDraftInput<Data = Record<string, unknown>> = Omit<
-    SiteAdminProofreadInput,
-    'data' | 'fields'
-> & {
-    data: Partial<Data>
-    fields?: readonly Extract<keyof Data, string>[]
-}
-export type SiteAdminDraftProposal<Data = Record<string, unknown>> = Omit<SiteAdminAIDraftProposal, 'data'> & {
-    data: Partial<Data>
-}
-export type SiteAdminAIActionRequest<Data = Record<string, unknown>> = Record<string, unknown> &
-    ({ draft?: never } | { expectedVersion: number; draft: { data: Data; slug?: string } })
-export type SiteAdminActionProposal<Data = Record<string, unknown>> = Omit<SiteAdminAIProposal, 'data'> & { data: Data }
 
 export const managementAssetUrl = (id: string, base = '/api/site-admin'): string =>
     `${base.replace(/\/$/u, '')}/assets/${encodeURIComponent(id)}/content`
@@ -390,22 +371,11 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
     ): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
     pruneRevisions(id: string, retain: number): Promise<{ deleted: string[] }>
     referencesTo(id: string, options: SiteAdminReferencesOptions): Promise<IncomingReference[]>
-    generateMetadata<Name extends ModelName<Models>>(
-        model: Name,
-        input: SiteAdminMetadataDraftInput<Models[Name]>,
+    runAiAction<Name extends Extract<keyof SiteAdminNamedAiActions, string>>(
+        name: Name,
+        input: { props: SiteAdminNamedAiActions[Name]['props'] },
         options?: SiteAdminRequestOptions,
-    ): Promise<SiteAdminDraftProposal<Models[Name]>>
-    proofreadDraft<Name extends ModelName<Models>>(
-        model: Name,
-        input: SiteAdminProofreadDraftInput<Models[Name]>,
-        options?: SiteAdminRequestOptions,
-    ): Promise<SiteAdminDraftProposal<Models[Name]>>
-    runAIAction<Data extends ManagementData<Models> = ManagementData<Models>>(
-        id: string,
-        action: string,
-        input: SiteAdminAIActionRequest<Data>,
-        options?: SiteAdminRequestOptions,
-    ): Promise<SiteAdminActionProposal<Data>>
+    ): Promise<SiteAdminNamedAiActions[Name]['data']>
     uploadAsset(file: File): Promise<AssetRecord>
     uploadAsset(body: Blob, options: SiteAdminAssetUploadOptions): Promise<AssetRecord>
     getAsset(id: string): Promise<AssetRecord>
@@ -534,12 +504,8 @@ export const createSiteAdminManagementClient = <
             mutateEntry(`${entryPath(id)}/revisions/${encodeURIComponent(revisionId)}/restore`, 'POST', input),
         pruneRevisions: (id, retain) => mutate(`${entryPath(id)}/revisions/prune`, 'POST', { retain }),
         referencesTo: (id, requestOptions) => get(`${entryPath(id)}/references`, { ...requestOptions }),
-        generateMetadata: (model, input, requestOptions) =>
-            mutate(`/models/${encodeURIComponent(model)}/ai/metadata`, 'POST', input, requestOptions),
-        proofreadDraft: (model, input, requestOptions) =>
-            mutate(`/models/${encodeURIComponent(model)}/ai/proofread`, 'POST', input, requestOptions),
-        runAIAction: (id, action, input, requestOptions) =>
-            mutate(`${entryPath(id)}/ai/${encodeURIComponent(action)}`, 'POST', input, requestOptions),
+        runAiAction: (name, input, requestOptions) =>
+            mutate('/ai/actions/' + encodeURIComponent(name), 'POST', input, requestOptions),
         uploadAsset: async (body, uploadOptions) => {
             const filename = uploadOptions?.filename ?? ('name' in body ? String(body.name) : undefined)
             if (!filename) throw new TypeError('A filename is required to upload an asset.')

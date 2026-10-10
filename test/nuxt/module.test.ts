@@ -12,7 +12,7 @@ const fixture = await mkdtemp(join(workspace, '.tmp/nuxt-module-'))
 const lifecycleFile = `${fixture}-lifecycle.jsonl`
 const config = (title: string, aiChanged = false) => `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
 import { required } from '#policy'
-export default defineSiteAdminConfig({ ai: { models: { posts: ${aiChanged ? "{ suggest: () => ({ data: { title: 'AI server sentinel' } }) }" : '{}'} } }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
+export default defineSiteAdminConfig({ ai: { actions: ${aiChanged ? "{ suggest: { prompt: 'AI server sentinel' } }" : '{}'} }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
 await mkdir(join(fixture, 'server/api'), { recursive: true })
 await mkdir(join(fixture, 'app'), { recursive: true })
 await writeFile(join(fixture, 'policy.ts'), 'export const required = true\n')

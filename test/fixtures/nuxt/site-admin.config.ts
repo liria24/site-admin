@@ -8,7 +8,6 @@ export default defineSiteAdminConfig({
     storage: { ignoredCommonStorage: { adapter: 'memory' } },
     assets: { maxUploadSize: 123 },
     ai: {
-        models: { posts: { suggest: () => ({ data: { title: 'SITE_ADMIN_SERVER_ONLY_AI_SENTINEL' } }) } },
         actions: {
             proofread: {
                 type: 'text-generation',
