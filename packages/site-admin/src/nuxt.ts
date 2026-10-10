@@ -173,7 +173,7 @@ const localeOptions = (nuxt: Nuxt): { defaultLocale?: string; strategy: string; 
     }
 }
 
-const accessControl = (config: SiteAdminConfig): string => {
+const accessControl = (config: SiteAdminConfig) => {
     const modelActions = ['create', 'delete', 'publish', 'prune', 'readDraft', 'restore', 'schedule', 'sort', 'update']
     const assetActions = ['delete', 'gc', 'read', 'upload']
     const systemActions = ['diagnostics', 'publishDue']
@@ -216,36 +216,34 @@ const accessControl = (config: SiteAdminConfig): string => {
             return [name, statements]
         }),
     )
-    const definitions = {
-        admin: 'ac.newRole(resources)',
-        user: 'ac.newRole(Object.fromEntries(Object.keys(resources).map((name) => [name, []])))',
-        ...Object.fromEntries(
-            Object.entries(custom).map(([name, permissions]) => [name, `ac.newRole(${JSON.stringify(permissions)})`]),
-        ),
+    const permissions = {
+        admin: resources,
+        user: Object.fromEntries(Object.keys(resources).map((name) => [name, []])),
+        ...custom,
     }
-    return `const resources = ${JSON.stringify(resources)}
-const ac = createAccessControl(resources)
-const roles = {
-  ${Object.entries(definitions)
-      .map(([name, code]) => `${JSON.stringify(name)}: ${code},`)
-      .join('\n  ')}
-}`
+    return {
+        source: `const resources = ${JSON.stringify(resources)}\nconst permissions = ${JSON.stringify(permissions)}`,
+        roleNames: Object.keys(permissions),
+    }
 }
 
 const serverAccessPlugin = (
-    config: SiteAdminConfig,
-): string => `import { createAccessControl } from '#better-auth/plugins'
-import type { BetterAuthOptions } from '#better-auth'
+    access: ReturnType<typeof accessControl>,
+): string => `import type { BetterAuthOptions } from '#better-auth'
 import { extendSiteAdminAuth } from '@liria24/site-admin/nuxt/server'
-${accessControl(config)}
-export default <const T extends BetterAuthOptions>(options: T) => extendSiteAdminAuth(options, resources, Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, role.statements])))
+${access.source}
+export default <const T extends BetterAuthOptions>(options: T) => extendSiteAdminAuth(options, resources, permissions)
 `
 
 const clientAccessPlugin = (
-    config: SiteAdminConfig,
+    access: ReturnType<typeof accessControl>,
 ): string => `import { adminClient } from '#better-auth/client/plugins'
 import { createAccessControl } from '#better-auth/plugins'
-${accessControl(config)}
+${access.source}
+const ac = createAccessControl(resources)
+const roles = {
+  ${access.roleNames.map((name) => `${JSON.stringify(name)}: ac.newRole(permissions[${JSON.stringify(name)}]),`).join('\n  ')}
+}
 export default adminClient({ ac, roles })
 `
 
@@ -476,14 +474,15 @@ export default defineNuxtModule<ModuleConfig>({
                 })
             }
             if (options.server.enabled && options.auth === true) {
+                const access = accessControl(domainConfig)
                 const serverAuthPlugin = addTemplate({
                     filename: 'site-admin/better-auth-server-plugin.ts',
-                    getContents: () => serverAccessPlugin(domainConfig!),
+                    getContents: () => serverAccessPlugin(access),
                     write: true,
                 })
                 const clientAuthPlugin = addTemplate({
                     filename: 'site-admin/better-auth-client-plugin.mjs',
-                    getContents: () => clientAccessPlugin(domainConfig!),
+                    getContents: () => clientAccessPlugin(access),
                     write: true,
                 })
                 nuxt.hook('better-auth:plugins:extend', (sources) => {
