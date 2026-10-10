@@ -239,7 +239,12 @@ export const chromiumProbe = async (origin, directory) => {
 export const verifyPublicDataConsumer = async (tarball, { browser = true } = {}) => {
     const directory = await mkdtemp(join(tmpdir(), 'site-admin-public-data-consumer-'))
     const run = (command, args) => {
-        const result = spawnSync(command, args, { cwd: directory, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+        const result = spawnSync(command, args, {
+            cwd: directory,
+            encoding: 'utf8',
+            shell: process.platform === 'win32' && command === 'npm',
+            maxBuffer: 16 * 1024 * 1024,
+        })
         if (result.status !== 0)
             throw new Error(`${command} ${args.join(' ')} failed.\n${result.stdout}\n${result.stderr}`)
         return result.stdout

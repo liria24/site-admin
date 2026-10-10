@@ -1,6 +1,10 @@
-import { readFile } from 'node:fs/promises'
-import { createRequire, stripTypeScriptTypes } from 'node:module'
-import { dirname, join } from 'node:path'
+import {
+    generatedRuntimeSource,
+    nativeNuxtDependencies,
+    nativeNuxtHash,
+    nativeRuntimeSource,
+    readNuxtSource,
+} from './nuxt-native-runtime'
 import { createError } from 'h3'
 import { describe, expect, it } from 'vitest'
 import * as Vue from 'vue'
@@ -60,20 +64,12 @@ interface Helpers {
 
 const nativeEnvironment = async (
     request: typeof fetch,
-    i18n = false,
-    aiActions = false,
-    serverFetch = false,
-    serverRuntime = false,
+    { i18n = false, aiActions = false, serverFetch = false, serverRuntime = false } = {},
 ) => {
-    const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
-    const root = dirname(requireNuxt.resolve('nuxt/package.json'))
-    const script = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
-    const native = script(await readFile(join(root, 'dist/app/composables/asyncData.js'), 'utf8'))
-        .replace(/^const createUseAsyncData =.*?^\}\);/gmsu, '')
-        .replaceAll('import.meta.client', String(!serverRuntime))
-        .replaceAll('import.meta.server', String(serverRuntime))
-        .replaceAll('import.meta.dev', 'false')
-        .replaceAll('import.meta.prerender', 'false')
+    const native = nativeRuntimeSource(await readNuxtSource('composables/asyncData.js'), {
+        serverRuntime,
+        asyncData: true,
+    })
     const hooks = new Map<string, Set<(...args: unknown[]) => unknown>>()
     const hook = (name: string, callback: (...args: unknown[]) => unknown) => {
         const callbacks = hooks.get(name) ?? new Set()
@@ -102,27 +98,12 @@ const nativeEnvironment = async (
         },
         runWithContext: <Value>(callback: () => Value): Value => callback(),
     }
-    const debounceSource = script(await readFile(join(root, 'dist/app/utils/debounce-tick.js'), 'utf8'))
-    const debounceTick = new Function('queuePostFlushCb', `${debounceSource}; return debounceTick`)(
-        Vue.queuePostFlushCb,
-    ) as unknown
     const nativeDependencies = {
-        ...Object.fromEntries(Object.entries(Vue).filter(([name]) => /^[a-zA-Z_$][a-zA-Z_$0-9]*$/u.test(name))),
-        useNuxtApp: () => app,
-        createError,
-        debounceTick,
-        asyncDataDefaults: { deep: false },
-        granularCachedData: true,
-        pendingWhenIdle: false,
-        purgeCachedData: false,
-        stripNeverHydratedData: false,
-        tracingChannelNuxt: false,
-        vapor: false,
-        clientOnlySymbol: Symbol('client-only'),
+        ...(await nativeNuxtDependencies(app)),
         onNuxtReady: (callback: () => void) => callback(),
         toArray: (value: unknown) => (Array.isArray(value) ? value : [value]),
         defineKeyedFunctionFactory: (options: { factory: unknown }) => options.factory,
-        hashKey: (await import(join(root, 'dist/app/utils/hash.js'))).hashKey as unknown,
+        hashKey: await nativeNuxtHash(),
         isPlainObject: (value: unknown) => Object.prototype.toString.call(value) === '[object Object]',
         alwaysRunFetchOnKeyChange: false,
         fetchDefaults: {},
@@ -136,28 +117,21 @@ const nativeEnvironment = async (
             return response.json()
         },
     }
-    const fetchSource = script(await readFile(join(root, 'dist/app/composables/fetch.js'), 'utf8'))
-        .replaceAll('import.meta.client', String(!serverRuntime))
-        .replaceAll('import.meta.server', String(serverRuntime))
-        .replaceAll('import.meta.dev', 'false')
-    const addonsSource = script(await readFile(join(root, 'dist/app/composables/addons.js'), 'utf8'))
+    const fetchSource = nativeRuntimeSource(await readNuxtSource('composables/fetch.js'), { serverRuntime })
+    const addonsSource = nativeRuntimeSource(await readNuxtSource('composables/addons.js'), { serverRuntime })
     const runtime = new Function(
         ...Object.keys(nativeDependencies),
         `${native}\n${addonsSource}\n${fetchSource}; return { useAsyncData, clearNuxtData, refreshNuxtData, useNuxtData, createUseFetch, defineUseFetchAddon }`,
     )(...Object.values(nativeDependencies)) as Record<string, unknown>
-    const generated = stripTypeScriptTypes(
+    const generated = generatedRuntimeSource(
         siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage', i18n, aiActions }),
+        { serverFetch, asyncData: true },
     )
-        .replace(/^import .*$/gmu, '')
-        .replace(/^export const siteAdminAsyncData = createUseAsyncData\(\)\s*$/gmu, '')
-        .replace(/^export /gmu, '')
-        .replaceAll('import.meta.server', String(serverFetch))
     let managementFactories = 0
     let requestFetches = 0
     const dependencies = {
-        ...Object.fromEntries(Object.entries(Vue).filter(([name]) => /^[a-zA-Z_$][a-zA-Z_$0-9]*$/u.test(name))),
+        ...nativeDependencies,
         ...runtime,
-        hashKey: nativeDependencies.hashKey,
         siteAdminAsyncData: runtime.useAsyncData,
         createSiteAdminClient,
         createSiteAdminManagementClient: (...args: Parameters<typeof createSiteAdminManagementClient>) => {
@@ -196,10 +170,7 @@ const nativeEnvironment = async (
             return states.get(key)!
         },
     }
-    const formSource = stripTypeScriptTypes(siteAdminNuxtFormTemplate())
-        .replace(/^import .*$/gmu, '')
-        .replace(/^export /gmu, '')
-        .replaceAll('import.meta.server', 'false')
+    const formSource = generatedRuntimeSource(siteAdminNuxtFormTemplate())
     helpers.useSiteAdminForm = new Function(...Object.keys(formDependencies), `${formSource}; return useSiteAdminForm`)(
         ...Object.values(formDependencies),
     ) as Helpers['useSiteAdminForm']
@@ -252,8 +223,7 @@ describe('native createUseFetch AI actions', () => {
                         calls++
                         return Response.json('Retried')
                     },
-                    false,
-                    true,
+                    { aiActions: true },
                 )
                 const scope = Vue.effectScope()
                 // Exercise extensions on the awaited instance, as used by async component setup.
@@ -291,8 +261,7 @@ describe('native createUseFetch AI actions', () => {
                 })
                 return Response.json('Completed')
             },
-            false,
-            true,
+            { aiActions: true },
         )
         const scope = Vue.effectScope()
         // Also exercise extensions on the unawaited native composable return.
@@ -335,8 +304,7 @@ describe('native createUseFetch AI actions', () => {
                 }
                 return Response.json('Retried')
             },
-            false,
-            true,
+            { aiActions: true },
         )
         const scope = Vue.effectScope()
         const state = await scope.run(() =>
@@ -367,8 +335,7 @@ describe('native createUseFetch AI actions', () => {
                 calls++
                 return Response.json('Retried')
             },
-            false,
-            true,
+            { aiActions: true },
         )
         const scope = Vue.effectScope()
         const state = await scope.run(() =>
@@ -410,8 +377,7 @@ describe('native createUseFetch AI actions', () => {
                 }
                 return Response.json('Retried')
             },
-            false,
-            true,
+            { aiActions: true },
         )
         const scope = Vue.effectScope()
         const state = await scope.run(() =>
@@ -442,8 +408,7 @@ describe('native createUseFetch AI actions', () => {
                 expect(init?.method?.toLowerCase()).toBe('post')
                 return Response.json({ content: 'Corrected' })
             },
-            false,
-            true,
+            { aiActions: true },
         )
         const props = Vue.ref({ content: 'First' })
         const scope = Vue.effectScope()
@@ -471,8 +436,7 @@ describe('native createUseFetch AI actions', () => {
                 calls++
                 return Response.json(JSON.parse(String(init?.body)).props.content)
             },
-            false,
-            true,
+            { aiActions: true },
         )
         const scope = Vue.effectScope()
         const auth = Vue.ref('alice')
@@ -509,8 +473,7 @@ describe('native createUseFetch AI actions', () => {
                 })
                 return Response.json({ error: { code: 'SITE_ADMIN_AI_FAILED' } }, { status: 502 })
             },
-            false,
-            true,
+            { aiActions: true },
         )
         const scope = Vue.effectScope()
         const state = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }))!
@@ -595,10 +558,7 @@ describe('native management AsyncData and mutation invalidation', () => {
                     requests.push(path)
                     return Response.json(modelDescriptor)
                 },
-                false,
-                false,
-                true,
-                true,
+                { serverFetch: true, serverRuntime: true },
             )
             let state: State | undefined
             const html = await renderToString(
@@ -629,10 +589,7 @@ describe('native management AsyncData and mutation invalidation', () => {
                 const entry = { id: 'one', model: 'posts', data: { title: 'SSR', image: 'asset' } }
                 return Response.json(path === '/manage/entries' ? { items: [entry], total: 1 } : entry)
             },
-            false,
-            false,
-            true,
-            true,
+            { serverFetch: true, serverRuntime: true },
         )
         const html = await renderToString(
             Vue.createSSRApp({
@@ -684,7 +641,7 @@ describe('native management AsyncData and mutation invalidation', () => {
 
     it('shares one native request-fetch wrapper per SSR app without retaining it across requests', async () => {
         const request = async () => Response.json(modelDescriptor)
-        const first = await nativeEnvironment(request, false, false, true)
+        const first = await nativeEnvironment(request, { serverFetch: true })
         const a = first.helpers.siteAdminManagementClientOptions()
         const b = first.helpers.siteAdminManagementClientOptions()
         expect(a.fetch).toBe(b.fetch)
@@ -695,7 +652,7 @@ describe('native management AsyncData and mutation invalidation', () => {
                 'alice',
             )
             .models()
-        const second = await nativeEnvironment(request, false, false, true)
+        const second = await nativeEnvironment(request, { serverFetch: true })
         const c = second.helpers.siteAdminManagementClientOptions()
         expect(c.fetch).not.toBe(a.fetch)
         expect(second.requestFetches()).toBe(1)
@@ -791,25 +748,28 @@ describe('native management AsyncData and mutation invalidation', () => {
     })
     it('uses only explicit management locales while public helpers keep reactive i18n defaults', async () => {
         const urls: URL[] = []
-        const { app, helpers } = await nativeEnvironment(async (input) => {
-            const url = new URL(String(input))
-            urls.push(url)
-            if (url.pathname === '/manage/models') return Response.json(modelDescriptor)
-            const entry = {
-                id: 'one',
-                model: 'posts',
-                locale: url.searchParams.get('locale') ?? '',
-                slug: 'one',
-                version: 1,
-                data: { title: 'Title' },
-            }
-            if (url.pathname === '/manage/entries')
-                return Response.json({ items: [entry], total: 1, limit: 50, offset: 0 })
-            if (url.pathname === '/manage/entries/one') return Response.json(entry)
-            return Response.json([
-                { data: { _siteAdmin: { id: 'one', model: 'posts', slug: 'one' }, title: 'Public' } },
-            ])
-        }, true)
+        const { app, helpers } = await nativeEnvironment(
+            async (input) => {
+                const url = new URL(String(input))
+                urls.push(url)
+                if (url.pathname === '/manage/models') return Response.json(modelDescriptor)
+                const entry = {
+                    id: 'one',
+                    model: 'posts',
+                    locale: url.searchParams.get('locale') ?? '',
+                    slug: 'one',
+                    version: 1,
+                    data: { title: 'Title' },
+                }
+                if (url.pathname === '/manage/entries')
+                    return Response.json({ items: [entry], total: 1, limit: 50, offset: 0 })
+                if (url.pathname === '/manage/entries/one') return Response.json(entry)
+                return Response.json([
+                    { data: { _siteAdmin: { id: 'one', model: 'posts', slug: 'one' }, title: 'Public' } },
+                ])
+            },
+            { i18n: true },
+        )
         const scope = Vue.effectScope()
         const explicit = Vue.ref('ja')
         const states = scope.run(() => ({
@@ -1068,7 +1028,10 @@ describe('native management AsyncData and mutation invalidation', () => {
         const scope = Vue.effectScope()
         scope.run(() => ({
             entry: helpers.useSiteAdminEntry('posts', 'old'),
-            batch: helpers.useSiteAdminBatch({ entry: { entry: 'posts', slugOrId: 'old' } }),
+            batch: helpers.useSiteAdminBatch({
+                entry: { entry: 'posts', slugOrId: 'old' },
+                second: { entry: 'posts', slugOrId: 'second' },
+            }),
         }))
         await flush()
         const dependencies = () =>
