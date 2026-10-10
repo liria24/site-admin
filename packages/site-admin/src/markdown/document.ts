@@ -35,26 +35,22 @@ export const entryDescription = (
     data: Record<string, unknown>,
     format: 'full' | 'summary' = 'full',
 ): { text?: string; hasMarkdownCandidate: boolean } => {
-    const keys = [definition.displayFields?.description, 'description', 'summary'].filter((key): key is string =>
-        Boolean(key),
-    )
-    const hasMarkdownCandidate = keys.some((key) => definition.fields[key]?.kind === 'markdown')
-    for (const key of keys) {
-        const value = data[key]
-        const document = markdownDocument(value)
-        const description =
-            definition.fields[key]?.kind === 'markdown'
-                ? astText(
-                      format === 'summary'
-                          ? Array.isArray(document?.meta?.summary)
-                              ? document.meta.summary
-                              : undefined
-                          : (document?.meta?.summary ?? document?.nodes),
-                  )
-                : typeof value === 'string'
-                  ? value
-                  : ''
-        const text = cleanText(description)
+    let hasMarkdownCandidate = false
+    for (const key of [definition.displayFields?.description, 'description', 'summary']) {
+        if (!key) continue
+        let value = data[key]
+        if (definition.fields[key]?.kind === 'markdown') {
+            hasMarkdownCandidate = true
+            const document = markdownDocument(value)
+            value = astText(
+                format === 'full'
+                    ? (document?.meta?.summary ?? document?.nodes)
+                    : Array.isArray(document?.meta?.summary)
+                      ? document.meta.summary
+                      : undefined,
+            )
+        }
+        const text = typeof value === 'string' ? cleanText(value) : ''
         if (text) return { text, hasMarkdownCandidate }
     }
     return { hasMarkdownCandidate }

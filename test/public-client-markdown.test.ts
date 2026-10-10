@@ -211,6 +211,10 @@ describe('public client Markdown contract', () => {
                 const admin = await createMigratedTestAdmin({
                     config: {
                         ...config,
+                        models: {
+                            ...config.models,
+                            posts: { ...config.models.posts, displayFields: { description: 'body' } },
+                        },
                         markdown: {
                             summary: { enabled: false },
                             ...(custom
@@ -249,6 +253,7 @@ describe('public client Markdown contract', () => {
                 }>
                 expect(item!.data.body.nodes).toEqual([])
                 expect(item!.data.author.data.bio.nodes).toEqual([])
+                expect(item!.data).not.toHaveProperty('_siteAdmin.seo.description')
                 if (custom) {
                     const full = await (await admin.content('posts')).list()
                     expect(full[0]?.data.body).toMatchObject({

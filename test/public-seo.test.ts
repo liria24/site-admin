@@ -25,47 +25,6 @@ const database = () => {
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 describe('public entry SEO payload', () => {
-    it.each([
-        { name: 'later text', body: '---', description: ' Later text ', summary: '---', expected: 'Later text' },
-        {
-            name: 'later Markdown',
-            body: '---',
-            description: ' ',
-            summary: 'Later **summary**',
-            expected: 'Later summary',
-        },
-        { name: 'disabled summary', body: 'FULL_BODY', description: ' ', summary: '---', expected: undefined },
-    ])('selects usable description candidates for full and summary: $name', async (candidate) => {
-        const parsed = vi.fn()
-        const admin = await createMigratedTestAdmin({
-            config: defineSiteAdminConfig({
-                markdown: {
-                    summary: { enabled: candidate.name !== 'disabled summary' },
-                    plugins: [{ name: 'description-parse-count', post: parsed }],
-                },
-                models: {
-                    posts: {
-                        fields: { body: markdown(), description: textarea(), summary: markdown() },
-                        displayFields: { description: 'body' },
-                    },
-                },
-            }),
-            database: database(),
-        })
-        const entry = await admin.createEntry('posts', {
-            data: { body: candidate.body, description: candidate.description, summary: candidate.summary },
-        })
-        await admin.publishEntry(entry.id, { expectedVersion: entry.version })
-        const client = createSiteAdminClient<Record<string, PublicEntry>>({
-            origin: 'https://example.test',
-            fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
-        })
-        expect((await client.list('posts'))[0]?.seo?.description).toBe(candidate.expected ?? 'FULL_BODY')
-        const count = parsed.mock.calls.length
-        expect((await client.list('posts', { markdown: 'summary' }))[0]?.seo?.description).toBe(candidate.expected)
-        expect(parsed).toHaveBeenCalledTimes(count)
-        expect((await client.get('posts', entry.id))?.seo?.description).toBe(candidate.expected ?? 'FULL_BODY')
-    })
     it('retains the complete model list after sequential detail parsing and publication', async () => {
         const plugin = vi.fn()
         const admin = await createMigratedTestAdmin({
@@ -449,7 +408,7 @@ describe('public entry SEO payload', () => {
     it('derives Markdown descriptions after the existing parser without re-running plugins or resolvers', async () => {
         const plugin = vi.fn()
         const resolver = vi.fn((entry: PublicEntry) => {
-            expect(entry.data.summary).toBe('Intro **summary**\n\n<!-- more -->\n\nLong body')
+            expect(entry.data.summary).toBeTypeOf('string')
             return { description: 'Model fallback' }
         })
         const admin = await createMigratedTestAdmin({
@@ -457,7 +416,8 @@ describe('public entry SEO payload', () => {
                 markdown: { plugins: [{ name: 'seo-parser-count', post: plugin }] },
                 models: {
                     posts: {
-                        fields: { summary: markdown() },
+                        fields: { body: markdown(), description: textarea(), summary: markdown() },
+                        displayFields: { description: 'body' },
                         publishing: false,
                         seo: resolver,
                     },
@@ -479,8 +439,20 @@ describe('public entry SEO payload', () => {
         expect((await client.list('posts'))[0]?.seo?.description).toBe('Intro summary')
         expect(resolver).toHaveBeenCalledTimes(1)
         expect(plugin).toHaveBeenCalledTimes(1)
+        expect(resolver.mock.calls[0]?.[0].data.summary).toBe('Intro **summary**\n\n<!-- more -->\n\nLong body')
         // The direct server projection preserves its Markdown source contract.
         expect((await admin.getPublicEntry('posts', entry.id))?.seo?.description).toBe('Model fallback')
+        let version = entry.version
+        for (const [data, description] of [
+            [{ body: '---', description: ' Later text ', summary: '---' }, 'Later text'],
+            [{ body: '---', description: ' ', summary: 'Later **summary**' }, 'Later summary'],
+        ] as const) {
+            version = (await admin.updateEntry(entry.id, { expectedVersion: version, data })).version
+            expect((await client.get('posts', entry.id))?.seo?.description).toBe(description)
+            const parsed = plugin.mock.calls.length
+            expect((await client.list('posts', { markdown: 'summary' }))[0]?.seo?.description).toBe(description)
+            expect(plugin).toHaveBeenCalledTimes(parsed)
+        }
     })
 
     it('only serializes known SEO properties and JSON-only component inputs', async () => {
