@@ -24,6 +24,7 @@ import type {
 } from '../config'
 import { createSiteAdminDescriptor, type SiteAdminDescriptor } from '../descriptor'
 import { SiteAdminError, type SiteAdminIssue } from '../errors'
+import { searchQuery } from '../storage'
 import { createSiteAdminRouteResolver, serializeSiteAdminSeo, type SiteAdminRouteResolver } from '../seo'
 import type { AnyField, AssetInput, FieldRecord } from '../fields'
 import {
@@ -344,6 +345,7 @@ export class SiteAdmin<Context = unknown> {
         filter: StorageEntryFilter,
         page: { limit: number; offset: number },
     ): Promise<{ items: EntryRecord[]; total: number }> {
+        searchQuery(filter.q)
         await this.initialize()
         for (const model of filter.models ?? []) this.#model(model)
         return this.#storage.pageEntries(filter, page)

@@ -11,30 +11,31 @@ const config = defineSiteAdminConfig({
 export async function searchProbe(request: Request, binding: AnyD1Database, schema: Record<string, unknown>) {
     const path = new URL(request.url).pathname
     const database = drizzleAdapter(drizzle(binding), { schema })
-    if (path === '/search-large' || path === '/search-long-query') {
-        const core = createSiteAdmin({ config, database })
-        const longQuery = path === '/search-long-query'
+    if (path === '/search-large') {
+        const core = createSiteAdmin({ config, database, authorize: () => ({ id: 'probe', roles: ['admin'] }) })
         const marker = 'A😀B%_[]C'
-        const title = longQuery ? 'a'.repeat(1_050_000) : 'İ'.repeat(65_528) + marker + 'İ'.repeat(634_472)
+        const title = 'İ'.repeat(65_528) + marker + 'İ'.repeat(634_472)
         const entry = await core.createEntry('posts', { slug: 'large-local-probe', data: { title } })
         const storage = database.bind(config)
         const before = JSON.stringify(await storage.revisions(entry.id))
         const counts: number[] = []
-        const started = performance.now()
-        for (const q of longQuery
-            ? ['a'.repeat(1_050_001), 'a'.repeat(1_100_000), 'a'.repeat(1_050_000)]
-            : [marker, 'i\u0307'.repeat(100) + marker + 'i\u0307'.repeat(75_000), 'A😀B%_[]X'])
+        for (const q of [marker, 'i\u0307'.repeat(100) + marker + 'i\u0307'.repeat(100), 'A😀B%_[]X', 'İ'.repeat(256)])
             counts.push((await storage.pageEntries({ models: ['posts'], q }, { limit: 1, offset: 0 })).total)
         await database.atomic([{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
-        counts.push(
-            (
-                await storage.pageEntries(
-                    { models: ['posts'], q: longQuery ? 'a'.repeat(1_050_001) : marker },
-                    { limit: 1, offset: 0 },
-                )
-            ).total,
+        counts.push((await storage.pageEntries({ models: ['posts'], q: marker }, { limit: 1, offset: 0 })).total)
+        const rejected: string[] = []
+        for (const q of ['a'.repeat(513), '😀'.repeat(513), 'İ'.repeat(257)]) {
+            try {
+                await storage.pageEntries({ q }, { limit: 1, offset: 0 })
+            } catch (error) {
+                rejected.push((error as { code: string }).code)
+            }
+        }
+        const response = await handleManagementRequest(
+            core,
+            new Request('http://localhost/manage/entries?q=' + 'a'.repeat(513)),
+            '/manage',
         )
-        const elapsed = performance.now() - started
         const unchanged =
             before === JSON.stringify(await storage.revisions(entry.id)) &&
             (await core.getEntry(entry.id)).data.title === title
@@ -42,7 +43,7 @@ export async function searchProbe(request: Request, binding: AnyD1Database, sche
             "SELECT length(CAST(key AS BLOB))+length(CAST(value AS BLOB)) AS bytes FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'",
         )
         await core.deleteEntry(entry.id, { expectedVersion: entry.version })
-        return Response.json({ counts, unchanged, sizes, elapsed })
+        return Response.json({ counts, unchanged, sizes, rejected, status: response.status })
     }
     if (path === '/search-cold/seed') {
         const candidates = JSON.stringify(

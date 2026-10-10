@@ -14,6 +14,7 @@ import type {
 } from '../packages/site-admin/src/adapter'
 import type { AssetRecord, EntryRecord, IncomingReference } from '../packages/site-admin/src/server/types'
 import { SiteAdminError } from '../packages/site-admin/src/errors'
+import { searchQuery } from '../packages/site-admin/src/storage'
 
 /** Deliberately SQL/ORM-free test backend, with domain objects and atomic copy-on-write commits. */
 export function createMemoryDatabase() {
@@ -48,10 +49,12 @@ export function createMemoryDatabase() {
         (filter.models ?? Object.keys(config.models)).includes(value.model) &&
         (filter.locale === undefined || filter.locale === value.locale) &&
         (!filter.q ||
-            value.slug.toLowerCase().includes(filter.q.toLowerCase()) ||
-            JSON.stringify(value.data).toLowerCase().includes(filter.q.toLowerCase()))
-    const entries = (filter: StorageEntryFilter = {}) =>
-        [...state.entries.values()]
+            value.slug.toLowerCase().includes(filter.q) ||
+            JSON.stringify(value.data).toLowerCase().includes(filter.q))
+    const entries = (filter: StorageEntryFilter = {}) => {
+        const q = searchQuery(filter.q, (value) => value.toLowerCase())
+        filter = { ...filter, ...(q === undefined ? {} : { q }) }
+        return [...state.entries.values()]
             .map(materializeEntry)
             .filter((value) => matches(value, filter))
             .sort(
@@ -61,6 +64,7 @@ export function createMemoryDatabase() {
                     b.updatedAt.localeCompare(a.updatedAt) ||
                     a.id.localeCompare(b.id),
             )
+    }
     const allRelations = () =>
         [...state.revisions.values()].flatMap((revision) => revision.relations.map((ref) => ({ revision, ref })))
     const incoming = (

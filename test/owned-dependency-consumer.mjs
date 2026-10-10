@@ -82,7 +82,14 @@ assert.equal(aliases['#better-auth/dist/index.mjs'], undefined)
             .replaceAll('../packages/site-admin/src/adapter', '@liria24/site-admin/adapter')
             .replaceAll('../packages/site-admin/src/server/types', '@liria24/site-admin/server')
             .replaceAll('../packages/site-admin/src/errors', '@liria24/site-admin')
+            .replaceAll('../packages/site-admin/src/storage', './site-admin-storage')
         await put('server/memory-storage.ts', memorySource)
+        await put(
+            'server/site-admin-storage.ts',
+            (await readFile(new URL('../packages/site-admin/src/storage.ts', import.meta.url), 'utf8'))
+                .replaceAll('./server/types', '@liria24/site-admin/server')
+                .replaceAll('./errors', '@liria24/site-admin'),
+        )
         await put(
             'nuxt.config.ts',
             `
