@@ -61,14 +61,20 @@ ${siteAdminNuxtManagementDataTemplate(options)}
 ${options.aiActions ? siteAdminNuxtAiTemplate(options) : ''}
 `
 
-const publicDataOverloads = (kind: 'Entry' | 'List'): string => {
-    const response = kind === 'Entry' ? 'SiteAdminPublicModels[Name] | null' : 'SiteAdminPublicModels[Name][]'
+const publicDataOverloads = (kind: 'Entry' | 'List', summary = false): string => {
+    const response =
+        kind === 'Entry'
+            ? 'SiteAdminPublicModels[Name] | null'
+            : summary
+              ? 'SiteAdminPublicSummaryModels[Name][]'
+              : 'SiteAdminPublicModels[Name][]'
     const slug = kind === 'Entry' ? ', slugOrId: MaybeRefOrGetter<string>' : ''
+    const mode = kind === 'List' ? (summary ? " & { markdown: 'summary' }" : " & { markdown?: 'full' }") : ''
     return ['WithTransform', '']
         .flatMap((transform) =>
             ['undefined', 'DataT'].map(
                 (defaultType) =>
-                    `export function useSiteAdmin${kind}<Name extends PublicModelName, ErrorData = unknown, DataT = ${response}, PickKeys extends KeysOf<DataT> = KeysOf<DataT>, DefaultT = ${defaultType}>(model: Name${slug}, options${transform ? '' : '?'}: AsyncDataOptions${transform}<${response}, DataT, PickKeys, DefaultT> & SiteAdminLocaleOptions): AsyncData<PickFrom<DataT, PickKeys> | DefaultT, SiteAdminAsyncDataError<ErrorData> | undefined>`,
+                    `export function useSiteAdmin${kind}<Name extends PublicModelName${summary ? ' & keyof SiteAdminPublicSummaryModels' : ''}, ErrorData = unknown, DataT = ${response}, PickKeys extends KeysOf<DataT> = KeysOf<DataT>, DefaultT = ${defaultType}>(model: Name${slug}, options${transform || summary ? '' : '?'}: AsyncDataOptions${transform}<${response}, DataT, PickKeys, DefaultT> & SiteAdminLocaleOptions${mode}): AsyncData<PickFrom<DataT, PickKeys> | DefaultT, SiteAdminAsyncDataError<ErrorData> | undefined>`,
             ),
         )
         .join('\n')
@@ -80,7 +86,7 @@ const siteAdminNuxtPublicDataTemplate = (
 ): string => `import { createUseAsyncData } from '#app/composables/asyncData'
 import type { AsyncData, AsyncDataOptions, AsyncDataOptionsWithTransform, KeysOf, PickFrom } from '#app/composables/asyncData'
 import type { NuxtError } from '#app'
-import type { SiteAdminPublicModels } from '@liria24/site-admin/client'
+import type { SiteAdminPublicModels, SiteAdminPublicSummaryModels } from '@liria24/site-admin/client'
 import type { SiteAdminIssue } from '@liria24/site-admin'
 import { computed, toValue, type MaybeRefOrGetter } from 'vue'
 
@@ -98,8 +104,8 @@ const useSiteAdminLocale = (provided: SiteAdminLocaleOptions['locale']) => {
   return computed(() => toValue(provided)${options.i18n ? ' ?? toValue(i18n?.locale)' : ''})
 }
 
-const siteAdminDataKey = (connection: SiteAdminClientOptions, operation: 'entry' | 'list', model: string, slug: string | null, locale: string | undefined): string =>
-  'site-admin:' + JSON.stringify([connection.origin ?? 'same-origin', connection.basePath ?? ${JSON.stringify(options.basePath)}, operation, model, slug, locale ?? null])
+const siteAdminDataKey = (connection: SiteAdminClientOptions, operation: 'entry' | 'list', model: string, slug: string | null, locale: string | undefined, markdown?: 'full' | 'summary'): string =>
+  'site-admin:' + JSON.stringify([connection.origin ?? 'same-origin', connection.basePath ?? ${JSON.stringify(options.basePath)}, operation, model, slug, locale ?? null, ...(markdown === 'summary' ? ['summary'] : [])])
 
 ${publicDataOverloads('Entry')}
 export function useSiteAdminEntry(model: PublicModelName, slugOrId: MaybeRefOrGetter<string>, options: AsyncDataOptions<SiteAdminPublicModels[PublicModelName] | null> & SiteAdminLocaleOptions = {}) {
@@ -114,16 +120,19 @@ export function useSiteAdminEntry(model: PublicModelName, slugOrId: MaybeRefOrGe
   }, asyncOptions)
 }
 
+${publicDataOverloads('List', true)}
 ${publicDataOverloads('List')}
-export function useSiteAdminList(model: PublicModelName, options: AsyncDataOptions<SiteAdminPublicModels[PublicModelName][]> & SiteAdminLocaleOptions = {}) {
+export function useSiteAdminList(model: PublicModelName, options: AsyncDataOptions<SiteAdminPublicModels[PublicModelName][] | SiteAdminPublicSummaryModels[keyof SiteAdminPublicSummaryModels][]> & SiteAdminLocaleOptions & { markdown?: 'full' | 'summary' } = {}) {
   const clientOptions = siteAdminPublicClientOptions()
-  const client = createSiteAdminClient(clientOptions)
+  const client = createSiteAdminClient<SiteAdminPublicModels, SiteAdminPublicSummaryModels>(clientOptions)
   const locale = useSiteAdminLocale(options.locale)
-  const key = computed(() => siteAdminDataKey(clientOptions, 'list', model, null, locale.value))
-  const { locale: _locale, ...asyncOptions } = options
-  return siteAdminAsyncData(() => key.value, (_app, { signal }) => {
+  const key = computed(() => siteAdminDataKey(clientOptions, 'list', model, null, locale.value, options.markdown))
+  const { locale: _locale, markdown: _markdown, ...asyncOptions } = options
+  return siteAdminAsyncData(() => key.value, (_app, { signal }): Promise<SiteAdminPublicModels[PublicModelName][] | SiteAdminPublicSummaryModels[keyof SiteAdminPublicSummaryModels][]> => {
     const effectiveLocale = locale.value
-    return client.list(model, { signal, ...(effectiveLocale === undefined ? {} : { locale: effectiveLocale }) })
+    const request = { signal, ...(effectiveLocale === undefined ? {} : { locale: effectiveLocale }) }
+    if (options.markdown === 'summary') return client.list<PublicModelName & keyof SiteAdminPublicSummaryModels>(model, { ...request, markdown: 'summary' })
+    return client.list<PublicModelName>(model, { ...request, markdown: 'full' })
   }, asyncOptions)
 }
 
@@ -157,8 +166,8 @@ export const siteAdminNuxtBatchTransportTemplate = (
     basePath = '/api/content',
 ): string => `export type SiteAdminBatchRequest = {
   [Name in PublicModelName]:
-    | { list: Name; entry?: never; slugOrId?: never }
-    | { entry: Name; slugOrId: MaybeRefOrGetter<string>; list?: never }
+    | { list: Name; markdown?: 'full' | 'summary'; entry?: never; slugOrId?: never }
+    | { entry: Name; slugOrId: MaybeRefOrGetter<string>; list?: never; markdown?: never }
 }[PublicModelName]
 
 export interface SiteAdminBatchItemError {
@@ -171,26 +180,29 @@ export interface SiteAdminBatchItem<Data> {
   data: Data
   error: SiteAdminBatchItemError | null
 }
+type SiteAdminBatchListData<Name extends PublicModelName, Mode> = Mode extends 'summary'
+  ? SiteAdminPublicSummaryModels[Name & keyof SiteAdminPublicSummaryModels][]
+  : SiteAdminPublicModels[Name][]
 type SiteAdminBatchRequestData<Request> = Request extends { list: infer Name extends PublicModelName }
-  ? SiteAdminPublicModels[Name][]
+  ? SiteAdminBatchListData<Name, Request extends { markdown: infer Mode } ? Mode : Request extends { markdown?: infer Mode } ? Mode | undefined : 'full'>
   : Request extends { entry: infer Name extends PublicModelName }
     ? SiteAdminPublicModels[Name] | null
     : never
 export type SiteAdminBatchResult<Requests extends Record<string, SiteAdminBatchRequest>> = {
   [Name in keyof Requests]: SiteAdminBatchItem<SiteAdminBatchRequestData<Requests[Name]>>
 }
-type SiteAdminResolvedBatchRequest = { name: string; operation: 'list' | 'entry'; model: PublicModelName; slug: string | null }
+type SiteAdminResolvedBatchRequest = { name: string; operation: 'list' | 'entry'; model: PublicModelName; slug: string | null; markdown?: 'summary' }
 
 const siteAdminSnapshotBatchRequests = (requests: Record<string, SiteAdminBatchRequest>): SiteAdminResolvedBatchRequest[] =>
   Object.keys(requests).sort().map((name) => {
     const request = requests[name]!
     return request.list !== undefined
-      ? { name, operation: 'list', model: request.list, slug: null }
+      ? { name, operation: 'list', model: request.list, slug: null, ...(request.markdown === 'summary' ? { markdown: 'summary' as const } : {}) }
       : { name, operation: 'entry', model: request.entry, slug: toValue(request.slugOrId) }
   })
 
 const siteAdminBatchDataKey = (connection: SiteAdminClientOptions, requests: readonly SiteAdminResolvedBatchRequest[], locale: string | undefined): string =>
-  'site-admin:' + JSON.stringify([connection.origin ?? 'same-origin', connection.basePath ?? ${JSON.stringify(basePath)}, 'batch', locale ?? null, requests.map(({ name, operation, model, slug }) => [name, operation, model, slug])])
+  'site-admin:' + JSON.stringify([connection.origin ?? 'same-origin', connection.basePath ?? ${JSON.stringify(basePath)}, 'batch', locale ?? null, requests.map(({ name, operation, model, slug, markdown }) => [name, operation, model, slug, ...(markdown ? [markdown] : [])])])
 
 const siteAdminBatchItemError = (error: unknown): SiteAdminBatchItemError => error instanceof SiteAdminClientError
   ? { code: error.code, message: error.message, status: error.status,
@@ -199,10 +211,10 @@ const siteAdminBatchItemError = (error: unknown): SiteAdminBatchItemError => err
 
 const siteAdminResolveBatch = async (client: SiteAdminClient, requests: readonly SiteAdminResolvedBatchRequest[], locale: string | undefined, signal: AbortSignal): Promise<SiteAdminBatchResult<Record<string, SiteAdminBatchRequest>>> => {
   signal.throwIfAborted()
-  const items = await Promise.all(requests.map(async ({ name, operation, model, slug }) => {
+  const items = await Promise.all(requests.map(async ({ name, operation, model, slug, markdown }) => {
     try {
       const options = { signal, ...(locale === undefined ? {} : { locale }) }
-      const data = operation === 'list' ? await client.list(model, options) : await client.get(model, slug!, options)
+      const data = operation === 'list' ? markdown === 'summary' ? await client.list(model, { ...options, markdown }) : await client.list(model, options) : await client.get(model, slug!, options)
       return [name, { data, error: null }] as const
     } catch (error) {
       signal.throwIfAborted()
@@ -329,6 +341,7 @@ declare module '@liria24/site-admin/client' {
     aiActions: InferSiteAdminAIActions<SiteAdminDomainConfig>
     namedAiActions: InferSiteAdminNamedAiActions<SiteAdminDomainConfig>
     publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>
+    publicSummaryModels: InferSiteAdminPublicModels<SiteAdminDomainConfig, 'summary'>
   }
 }
 export {}

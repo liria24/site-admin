@@ -28,7 +28,7 @@ declare module '#imports' {
     await writeFile(
         join(directory, 'consumer.ts'),
         `import { computed, ref } from 'vue'
-import { array, datetime, defineSiteAdminConfig, image, images, markdown, text, textarea, url, type InferSiteAdminPublicModels } from '@liria24/site-admin'
+import { array, datetime, defineSiteAdminConfig, image, images, markdown, relation, text, textarea, url, type InferSiteAdminPublicModels } from '@liria24/site-admin'
 import type { AsyncData } from '#app/composables/asyncData'
 import type { NuxtError } from '#app'
 import { useSiteAdminBatch, useSiteAdminEntry, useSiteAdminList } from './client'
@@ -37,11 +37,12 @@ const config = defineSiteAdminConfig({ models: {
   socials: { fields: { href: url({ required: true }), icon: text({ required: true }), label: text({ required: true }) } },
   careers: { fields: { period: text({ required: true }), position: text({ required: true }), company: text({ required: true }) } },
   ranks: { fields: { game: text({ required: true }), season: text(), rank: text({ required: true }), image: image({ required: true }), href: url() } },
-  posts: { fields: { title: text({ required: true }), excerpt: textarea(), content: markdown({ required: true }), tags: array(text(), { required: true, default: [] }), image: image(), authorUserId: text(), createdAt: datetime() } },
+  posts: { fields: { title: text({ required: true }), excerpt: textarea(), content: markdown({ required: true }), tags: array(text(), { required: true, default: [] }), image: image(), author: relation('authors'), authorUserId: text(), createdAt: datetime() } },
+  authors: { fields: { bio: markdown({ required: true }) } },
   private: { fields: { secret: text() }, public: false },
 } })
 declare module '@liria24/site-admin/client' {
-  interface SiteAdminClientRegistry { publicModels: InferSiteAdminPublicModels<typeof config> }
+  interface SiteAdminClientRegistry { publicModels: InferSiteAdminPublicModels<typeof config>; publicSummaryModels: InferSiteAdminPublicModels<typeof config, 'summary'> }
 }
 const slug = ref('slug')
 const locale = ref('ja')
@@ -61,6 +62,18 @@ const transformed = useSiteAdminEntry('posts', () => slug.value, {
 const transformedTitle: string = transformed.data.value.title
 const titles = useSiteAdminList('posts', { transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
 const titleList: string[] = titles.data.value
+const summaryList = useSiteAdminList('posts', { markdown: 'summary' })
+const summaryNodes: import('comark').Node[] | undefined = summaryList.data.value?.[0]?.data.content.nodes
+// @ts-expect-error Summary rendering documents do not expose arbitrary plugin metadata.
+summaryList.data.value?.[0]?.data.content.meta.rawSource
+// @ts-expect-error Summary rendering documents do not expose Markdown source.
+summaryList.data.value?.[0]?.data.content.source
+const summaryTitles = useSiteAdminList('posts', { markdown: 'summary', transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
+const summaryTitleList: string[] = summaryTitles.data.value
+// @ts-expect-error Summary mode belongs to list requests only.
+useSiteAdminEntry('posts', 'slug', { markdown: 'summary' })
+// @ts-expect-error Unknown projection modes are rejected.
+useSiteAdminList('posts', { markdown: 'excerpt' })
 const picked = useSiteAdminEntry('posts', 'slug', { pick: ['data'] })
 const pickedTitle: string | undefined = picked.data.value?.data.title
 // @ts-expect-error Native pick removes the top-level slug.
@@ -103,6 +116,22 @@ const pickedPostTitle: string | undefined = pickedBatch.data.value?.posts.data[0
 pickedBatch.data.value?.arts
 const dynamicBatch = useSiteAdminBatch(computed(() => ({ selected: { entry: 'posts', slugOrId: slug } } as const)))
 const selectedTitle: string | undefined = dynamicBatch.data.value?.selected.data?.data.title
+const summaryBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: 'summary' }, featured: { entry: 'posts', slugOrId: slug } })
+const batchSummaryNodes: import('comark').Node[] | undefined = summaryBatch.data.value?.posts.data[0]?.data.content.nodes
+// @ts-expect-error The batch list mode also removes arbitrary plugin metadata.
+summaryBatch.data.value?.posts.data[0]?.data.content.meta.rawSource
+// @ts-expect-error Batch detail requests retain their full contract.
+useSiteAdminBatch({ featured: { entry: 'posts', slugOrId: slug, markdown: 'summary' } })
+void [summaryNodes, summaryTitleList, batchSummaryNodes]
+declare const mode: 'full' | 'summary'
+const mixedBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: mode } })
+const mixedBio: string | import('@liria24/site-admin').SiteAdminMarkdownSummary | undefined = mixedBatch.data.value?.posts.data[0]?.data.author?.data.bio
+// @ts-expect-error A runtime union mode cannot promise a raw relation string.
+const rawMixedBio: string | undefined = mixedBatch.data.value?.posts.data[0]?.data.author?.data.bio
+const fullBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: 'full' } })
+const fullBio: string | undefined = fullBatch.data.value?.posts.data[0]?.data.author?.data.bio
+const summaryBio: import('@liria24/site-admin').SiteAdminMarkdownSummary | undefined = summaryBatch.data.value?.posts.data[0]?.data.author?.data.bio
+void [mixedBio, rawMixedBio, fullBio, summaryBio]
 // @ts-expect-error Unknown batch models must fail.
 useSiteAdminBatch({ item: { list: 'missing' } })
 // @ts-expect-error Private batch models must fail.

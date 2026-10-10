@@ -1,4 +1,4 @@
-import { boolean, defineSiteAdminAuthorization, defineSiteAdminConfig, text, url } from '@liria24/site-admin'
+import { boolean, defineSiteAdminAuthorization, defineSiteAdminConfig, markdown, text, url } from '@liria24/site-admin'
 import { Output } from 'ai'
 import { z } from 'zod'
 import { aiModel } from './server/ai-model.ts'
@@ -42,7 +42,7 @@ export default defineSiteAdminConfig({
             route: { path: '/go/:slug', redirect: 'destination' },
         },
         posts: {
-            fields: { description: text(), title: text({ required: true }) },
+            fields: { description: text(), title: text({ required: true }), body: markdown() },
             localized: true,
             displayFields: { description: 'description', title: 'title' },
             route: true,

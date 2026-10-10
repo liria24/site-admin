@@ -278,6 +278,24 @@ try {
         )
     }
     const redirect = await fetch(`http://127.0.0.1:${port}/go/external`, { redirect: 'manual' })
+    const summaryResponse = await fetch(`http://127.0.0.1:${port}/summary-probe`)
+    const summaryHtml = await summaryResponse.text()
+    if (
+        !summaryResponse.ok ||
+        !summaryHtml.includes('Native summary') ||
+        summaryHtml.includes('FULL_SSR_') ||
+        !summaryHtml.includes('id="summary-batch-nodes"')
+    )
+        throw new Error(
+            'List/batch summary SSR must render native summary nodes without the full body/frontmatter in its payload.',
+        )
+    const summaryHttp = await fetch(`http://127.0.0.1:${port}/api/content/posts?locale=en&markdown=summary`)
+    const summaryJson = await summaryHttp.text()
+    if (!summaryHttp.ok || summaryJson.includes('FULL_SSR_') || !summaryJson.includes('Native summary'))
+        throw new Error('Summary HTTP response contains body/frontmatter or lacks native summary nodes.')
+    const detailHttp = await fetch(`http://127.0.0.1:${port}/api/content/posts/hello?locale=en`)
+    if (!(await detailHttp.text()).includes('FULL_SSR_BODY_SENTINEL'))
+        throw new Error('Summary SSR must not modify the subsequent full detail cache.')
     if (redirect.status !== 302 || redirect.headers.get('location') !== 'https://example.com/destination') {
         throw new Error('Nuxt route middleware redirect probe failed.')
     }

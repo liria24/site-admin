@@ -1,5 +1,6 @@
 import { SiteAdminError } from '../errors'
 import { projectStoredFields } from '../stored-data'
+import { projectMarkdownListSummary } from '../markdown/list-summary'
 import type { SiteAdminMetadataInput, SiteAdminProofreadInput } from '../ai'
 import type { SiteAdmin } from './site-admin'
 
@@ -522,8 +523,22 @@ export const handlePublicRequest = async <Context>(
                     })
                 } else {
                     const content = await siteAdmin.content(modelName, locale)
-                    if (path.length === 1) response = jsonResponse(await content.list())
-                    else {
+                    if (path.length === 1) {
+                        const mode = url.searchParams.get('markdown') ?? 'full'
+                        if (mode !== 'full' && mode !== 'summary')
+                            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Unknown Markdown list mode.')
+                        const items = await content.list()
+                        response = jsonResponse(
+                            mode === 'summary'
+                                ? await projectMarkdownListSummary(
+                                      items,
+                                      modelName,
+                                      siteAdmin.config,
+                                      (id) => `${base.replace(/\/$/u, '')}/_assets/${encodeURIComponent(id)}`,
+                                  )
+                                : items,
+                        )
+                    } else {
                         const key = path.slice(1).join('/')
                         const item = (await content.list()).find((document) => {
                             const metadata = document.data['_siteAdmin'] as { id?: string; slug?: string } | undefined

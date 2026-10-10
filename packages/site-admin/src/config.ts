@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import type { MarkdownDocument, MergePluginMeta, ParserOptions } from 'comark'
+import type { MarkdownDocument, MergePluginMeta, Node, ParserOptions } from 'comark'
 import type summary from 'comark/plugins/summary'
 import type { FilesEnvironmentConfig, FilesConfigInput, defineFilesConfig } from 'nuxt-files-sdk/config'
 import type { SiteAdminAIAction, SiteAdminAIModel } from './ai'
@@ -329,22 +329,35 @@ export type SiteAdminMarkdownDocument = MarkdownDocument<
     Record<string, unknown>
 >
 
+/** Rendering document for a list summary: no body source, frontmatter or arbitrary plugin metadata. */
+export interface SiteAdminMarkdownSummary {
+    nodes: Node[]
+    frontmatter: Record<string, never>
+    meta: { summary?: Node[] }
+}
+
 type PublicField<
     F extends AnyField,
     Models extends Record<string, ModelDefinition>,
-    ParseMarkdown extends boolean,
+    ParseMarkdown extends boolean | 'summary',
 > = F['kind'] extends 'file' | 'image'
     ? PublicAsset
     : F['kind'] extends 'images'
       ? PublicAsset[]
       : F['kind'] extends 'markdown'
-        ? ParseMarkdown extends true
-            ? SiteAdminMarkdownDocument
-            : InferField<F>
+        ? ParseMarkdown extends 'summary'
+            ? SiteAdminMarkdownSummary
+            : ParseMarkdown extends true
+              ? SiteAdminMarkdownDocument
+              : InferField<F>
         : F extends RelationField<infer Name>
           ? Name extends keyof Models
               ? // The content parser treats relation projections as opaque objects.
-                PublicEntry<Partial<InferPublicModelData<Models[Name], Models, false>>> | null
+                PublicEntry<
+                    Partial<
+                        InferPublicModelData<Models[Name], Models, ParseMarkdown extends 'summary' ? 'summary' : false>
+                    >
+                > | null
               : PublicEntry | null
           : F extends ObjectField<infer Fields>
             ? PublicFields<Fields, Models, ParseMarkdown>
@@ -355,7 +368,7 @@ type PublicField<
 type PublicFields<
     Fields extends FieldRecord,
     Models extends Record<string, ModelDefinition>,
-    ParseMarkdown extends boolean,
+    ParseMarkdown extends boolean | 'summary',
 > = {
     [Key in keyof InferFields<Fields>]: Key extends keyof Fields
         ? PublicField<Fields[Key], Models, ParseMarkdown> | (null extends InferFields<Fields>[Key] ? null : never)
@@ -366,11 +379,14 @@ type PublicFields<
 export type InferPublicModelData<
     Model extends ModelDefinition,
     Models extends Record<string, ModelDefinition> = Record<string, ModelDefinition>,
-    ParseMarkdown extends boolean = true,
+    ParseMarkdown extends boolean | 'summary' = true,
 > = PublicFields<Model['fields'], Models, ParseMarkdown>
 
-export type InferSiteAdminPublicModels<Config extends SiteAdminConfig> = {
+export type InferSiteAdminPublicModels<
+    Config extends SiteAdminConfig,
+    ParseMarkdown extends boolean | 'summary' = true,
+> = {
     [Name in keyof Config['models'] as Config['models'][Name] extends { public: false } ? never : Name]: PublicEntry<
-        InferPublicModelData<Config['models'][Name], Config['models']>
+        InferPublicModelData<Config['models'][Name], Config['models'], ParseMarkdown>
     >
 }
