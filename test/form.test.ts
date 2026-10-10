@@ -87,6 +87,8 @@ describe('form consumer', () => {
             },
         })
         controller.metadata.slug.value = 'controller'
+        expect(controller.dirty.value).toBe(true)
+        expect(controller.draft.serialize().slug).toBe('controller')
         await controller.form.handleSubmit()
         expect(submitted).toMatchObject({ slug: 'controller', expectedVersion: 1 })
         expect(controller.metadata.slug.value).toBe('controller')

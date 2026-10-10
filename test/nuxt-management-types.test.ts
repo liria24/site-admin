@@ -69,6 +69,11 @@ editor.form.setFieldValue('title', 'Typed')
 editor.form.setFieldValue('image', { id: 'asset', url: '/manage/assets/asset/content' })
 editor.ai.run('correct', { content: editor.form.state.values.copy, fields: ['copy'] })
 editor.ai.run('publication', { mode: 'automatic' })
+const slug: string = editor.metadata.slug.value
+// @ts-expect-error Generation choices now belong to native action props.
+editor.metadata.modes
+// @ts-expect-error The legacy metadata mode setter is removed.
+editor.metadata.setMode('slug', 'auto')
 editor.ai.apply({ fields: ['title'], slug: false })
 const snapshot = editor.draft.serialize()
 const snapshotTitle: string = snapshot.data.title
@@ -85,7 +90,7 @@ editor.ai.run('plain', {})
 editor.ai.apply({ fields: ['missing'] })
 // @ts-expect-error Draft serialization returns raw asset references, without presentation URLs.
 snapshot.data.image?.url
-void [snapshotTitle, scheduled]
+void [snapshotTitle, scheduled, slug]
 const uploadUrl: string = (await editor.upload(new File(['image'], 'image.png'))).url
 const list = useSiteAdminManagementList('posts', { q: ref('search'), locale: ref('ja'), limit: 25 })
 const listUrl: string | undefined = list.data.value?.items[0]?.data.image?.url
