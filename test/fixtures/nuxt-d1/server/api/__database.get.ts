@@ -14,7 +14,7 @@ export default defineEventHandler(async (event) => {
         batch: binding.batch.bind(binding),
     } as AnyD1Database
     const alternateContext = { platformContext: { cloudflare: { env: { DB: alternateBinding } } } }
-    const users = (await adapter.query('SELECT COUNT(*) AS count FROM user')) as Array<{ count: number }>
+    const users = (await binding.prepare('SELECT COUNT(*) AS count FROM user').all<{ count: number }>()).results
     return {
         users: Number(users[0]?.count ?? 0),
         sameClientInFreshContext: getAppDb(freshContext) === database,

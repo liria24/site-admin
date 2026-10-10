@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { defineSiteAdminConfig, file, text } from '../packages/site-admin/dist/index.js'
 import { generateFixtureSQL } from './generate-fixture.mjs'
+import { createSiteAdminManagementClient } from '../packages/site-admin/dist/client.js'
 
 const run = promisify(execFile)
 const fixture = fileURLToPath(new URL('./fixtures/cloudflare/', import.meta.url))
@@ -98,6 +99,50 @@ try {
     }
     const rollback = await (await fetch(`http://127.0.0.1:${port}/rollback`)).json()
     if (!rollback.rolledBack) throw new Error('Cloudflare D1 batch did not roll back atomically.')
+    const origin = `http://127.0.0.1:${port}`
+    const large = await (await fetch(origin + '/search-large', { signal: AbortSignal.timeout(30000) })).json()
+    if (String(large.counts) !== '1,1,0,1' || !large.unchanged || !large.sizes?.every(({ bytes }) => bytes < 2_000_000))
+        throw new Error(`Native D1 chunk-boundary/canonical-history probe failed: ${JSON.stringify(large)}`)
+    const longQuery = await (await fetch(origin + '/search-long-query', { signal: AbortSignal.timeout(30000) })).json()
+    if (String(longQuery.counts) !== '0,0,1,0' || !longQuery.unchanged || longQuery.elapsed >= 2_000)
+        throw new Error(`Native D1 long-query bounds failed: ${JSON.stringify(longQuery)}`)
+    const seeded = await (await fetch(origin + '/search-cold/seed')).json()
+    if (seeded.seeded !== 257) throw new Error(`Native D1 cold-search seeding failed: ${JSON.stringify(seeded)}`)
+    const before = await (await fetch(origin + '/search-cold/state')).text()
+    const calls = [],
+        remaining = []
+    const client = createSiteAdminManagementClient({
+        origin,
+        basePath: '/search-cold/manage',
+        fetch: async (input, init) => {
+            const nativeResponse = await fetch(input, init)
+            calls.push(Number(nativeResponse.headers.get('x-native-query-calls')))
+            if (nativeResponse.status === 503)
+                remaining.push((await nativeResponse.clone().json()).error.searchRemaining)
+            return nativeResponse
+        },
+    })
+    const page = await client.listEntries('posts', {
+        q: 'école',
+        limit: 1,
+        offset: 256,
+        signal: AbortSignal.timeout(30000),
+    })
+    const after = await (await fetch(origin + '/search-cold/state')).text()
+    if (
+        page.total !== 257 ||
+        page.items.length !== 1 ||
+        before !== after ||
+        calls.length < 2 ||
+        calls.some((value) => value < 10 || value > 50) ||
+        remaining.some((value, index) => !(value > 0) || (index > 0 && value >= remaining[index - 1]))
+    )
+        throw new Error(
+            `Native D1 fresh-request search preparation failed: ${JSON.stringify({ page, calls, remaining, unchanged: before === after })}`,
+        )
+    console.log(
+        `Native local D1 search: chunk boundaries/history passed; fresh request calls ${calls.join(',')}, progress ${remaining.join(',')}.`,
+    )
     const reorder = await (await fetch(`http://127.0.0.1:${port}/reorder`)).json()
     if (!reorder.conflict || !reorder.unchanged || reorder.generation !== 1 || String(reorder.sorted) !== '0,1')
         throw new Error(`D1 reorder failed: ${JSON.stringify(reorder)}`)

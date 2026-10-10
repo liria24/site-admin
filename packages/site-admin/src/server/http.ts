@@ -17,6 +17,7 @@ const errorResponse = (error: unknown): Response => {
                 error: {
                     code: error.code,
                     ...(error.issues ? { issues: error.issues } : {}),
+                    ...(error.searchRemaining !== undefined ? { searchRemaining: error.searchRemaining } : {}),
                     message: error.message,
                 },
             },
@@ -162,8 +163,6 @@ const handleManagementRequestInner = async <Context>(
             const url = new URL(request.url)
             const model = url.searchParams.get('model') ?? undefined
             if (model) siteAdmin.assertPermission(actor, 'model', 'readDraft', model)
-            let entries = await siteAdmin.listEntries(model)
-            if (!model) entries = entries.filter((entry) => siteAdmin.can(actor, 'model', 'readDraft', entry.model))
             const locale = url.searchParams.get('locale')
             const query = url.searchParams.get('q')?.toLocaleLowerCase()
             const limit = Number(url.searchParams.get('limit') ?? 50)
@@ -173,17 +172,18 @@ const handleManagementRequestInner = async <Context>(
                     'SITE_ADMIN_INVALID_INPUT',
                     'limit must be 1–100 and offset a non-negative integer.',
                 )
-            if (locale) entries = entries.filter((entry) => entry.locale === locale)
-            if (query) {
-                entries = entries.filter(
-                    (entry) =>
-                        entry.slug.toLocaleLowerCase().includes(query) ||
-                        JSON.stringify(entry.data).toLocaleLowerCase().includes(query),
-                )
-            }
+            const models = model
+                ? [model]
+                : Object.keys(siteAdmin.config.models).filter((name) =>
+                      siteAdmin.can(actor, 'model', 'readDraft', name),
+                  )
+            const result = await siteAdmin.pageEntries(
+                { models, ...(locale ? { locale } : {}), ...(query ? { q: query } : {}) },
+                { limit, offset },
+            )
             return json({
-                items: entries.slice(offset, offset + limit).map((entry) => storedResult(entry, entry.model)),
-                total: entries.length,
+                ...result,
+                items: result.items.map((entry) => storedResult(entry, entry.model)),
                 limit,
                 offset,
             })

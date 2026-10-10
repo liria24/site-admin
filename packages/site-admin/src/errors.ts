@@ -23,6 +23,7 @@ export type SiteAdminErrorCode =
     | 'SITE_ADMIN_ROUTE_CONFLICT'
     | 'SITE_ADMIN_SCHEMA_INCOMPATIBLE'
     | 'SITE_ADMIN_SCHEMA_MIGRATION_REQUIRED'
+    | 'SITE_ADMIN_SEARCH_PREPARING'
     | 'SITE_ADMIN_STORAGE_UNAVAILABLE'
 
 const statuses: Record<SiteAdminErrorCode, number> = {
@@ -45,6 +46,7 @@ const statuses: Record<SiteAdminErrorCode, number> = {
     SITE_ADMIN_ROUTE_CONFLICT: 409,
     SITE_ADMIN_SCHEMA_INCOMPATIBLE: 503,
     SITE_ADMIN_SCHEMA_MIGRATION_REQUIRED: 409,
+    SITE_ADMIN_SEARCH_PREPARING: 503,
     SITE_ADMIN_STORAGE_UNAVAILABLE: 503,
 }
 
@@ -52,12 +54,14 @@ export class SiteAdminError extends Error {
     readonly code: SiteAdminErrorCode
     readonly issues?: SiteAdminIssue[]
     readonly status: number
+    readonly searchRemaining?: number
 
-    constructor(code: SiteAdminErrorCode, message: string, issues?: SiteAdminIssue[]) {
+    constructor(code: SiteAdminErrorCode, message: string, issues?: SiteAdminIssue[], searchRemaining?: number) {
         super(message)
         this.name = 'SiteAdminError'
         this.code = code
         this.status = statuses[code]
         if (issues) this.issues = issues
+        if (searchRemaining !== undefined) this.searchRemaining = searchRemaining
     }
 }

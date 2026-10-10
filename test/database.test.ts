@@ -3,7 +3,10 @@ import { createDatabase, type Database, type Primitive } from 'db0'
 import cloudflareD1 from 'db0/connectors/cloudflare-d1'
 import nodeSqlite from 'db0/connectors/node-sqlite'
 
-import { queryRows, runAtomic } from '../packages/site-admin/src/server/database'
+import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
+const queryRows = (database: DrizzleSiteAdminDatabase, sql: string) => database.query(sql)
+const runAtomic = (database: DrizzleSiteAdminDatabase, statements: Parameters<DrizzleSiteAdminDatabase['atomic']>[0]) =>
+    database.atomic(statements)
 import { testAdapter } from './migrate'
 import { drizzleAdapter, type DrizzleConnection } from '../packages/site-admin/src/adapters/drizzle'
 import {
@@ -28,8 +31,6 @@ describe('atomic database execution', () => {
         const gate = new Promise<void>((resolve) => (release = resolve))
         const fake = {
             lockKey: {},
-            capabilities: { transactions: true },
-            connector: 'test',
             dialect: 'sqlite',
             getInstance: () => ({
                 prepare: () => ({

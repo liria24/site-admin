@@ -171,13 +171,15 @@ export class SiteAdminClientError extends Error {
     readonly code: string
     readonly issues?: SiteAdminIssue[]
     readonly status: number
+    readonly searchRemaining?: number
 
-    constructor(code: string, message: string, status: number, issues?: SiteAdminIssue[]) {
+    constructor(code: string, message: string, status: number, issues?: SiteAdminIssue[], searchRemaining?: number) {
         super(message)
         this.name = 'SiteAdminClientError'
         this.code = code
         this.status = status
         if (issues !== undefined) this.issues = issues
+        if (searchRemaining !== undefined) this.searchRemaining = searchRemaining
     }
 }
 
@@ -192,13 +194,18 @@ const responseError = async (response: Response): Promise<SiteAdminClientError> 
         'error' in payload &&
         typeof payload.error === 'object' &&
         payload.error !== null
-            ? (payload.error as { code?: unknown; issues?: unknown; message?: unknown })
+            ? (payload.error as { code?: unknown; issues?: unknown; message?: unknown; searchRemaining?: unknown })
             : undefined
     return new SiteAdminClientError(
         String(error?.code ?? 'SITE_ADMIN_REQUEST_FAILED'),
         String(error?.message ?? `Request failed with status ${response.status}.`),
         response.status,
         Array.isArray(error?.issues) ? (error.issues as SiteAdminIssue[]) : undefined,
+        typeof error?.searchRemaining === 'number' &&
+            Number.isSafeInteger(error.searchRemaining) &&
+            error.searchRemaining > 0
+            ? error.searchRemaining
+            : undefined,
     )
 }
 
@@ -431,6 +438,33 @@ export const createSiteAdminManagementClient = <
             /* A cache observer cannot undo a committed mutation. */
         }
     }
+    const entriesPage = async <Value>(
+        query: Record<string, string | number | undefined>,
+        signal?: AbortSignal,
+    ): Promise<Value> => {
+        let previous = Infinity
+        while (true) {
+            signal?.throwIfAborted()
+            try {
+                return await get<Value>('/entries', query, signal)
+            } catch (error) {
+                // Only this resumable search GET may retry. Strictly decreasing positive integers
+                // bound further requests by the first remaining count, without a global retry policy.
+                if (
+                    !query.q ||
+                    !(error instanceof SiteAdminClientError) ||
+                    error.status !== 503 ||
+                    error.code !== 'SITE_ADMIN_SEARCH_PREPARING' ||
+                    error.searchRemaining === undefined ||
+                    !Number.isSafeInteger(error.searchRemaining) ||
+                    error.searchRemaining <= 0 ||
+                    error.searchRemaining >= previous
+                )
+                    throw error
+                previous = error.searchRemaining
+            }
+        }
+    }
     const mutateEntry = async <Value extends SiteAdminMutation | SiteAdminMutation[]>(
         path: string,
         method: string,
@@ -446,7 +480,7 @@ export const createSiteAdminManagementClient = <
         models: (requestOptions = {}) => get('/models', undefined, requestOptions.signal),
         listEntries: (model: ModelName<Models> | undefined, requestOptions: ManagementListOptions = {}) => {
             const { signal, ...query } = requestOptions
-            return get('/entries', { model, ...query }, signal)
+            return entriesPage({ model, ...query }, signal)
         },
         listAllEntries: async (
             model: ModelName<Models> | undefined,
@@ -456,8 +490,7 @@ export const createSiteAdminManagementClient = <
             const items: SiteAdminEntry<ManagementData<Models>>[] = []
             let total: number
             do {
-                const page = await get<SiteAdminEntryPage<ManagementData<Models>>>(
-                    '/entries',
+                const page = await entriesPage<SiteAdminEntryPage<ManagementData<Models>>>(
                     {
                         model,
                         ...query,

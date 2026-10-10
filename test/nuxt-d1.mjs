@@ -236,6 +236,14 @@ try {
     const forbiddenOperation = await fetch(origin + '/api/site-admin/entries?model=posts', { headers: { cookie } })
     if (forbiddenOperation.status !== 403)
         throw new Error('The first D1 signup unexpectedly received management permissions.')
+    const unicodeSearch = await request('/api/__search', { method: 'POST' })
+    if (
+        unicodeSearch.status !== 200 ||
+        unicodeSearch.data.total !== 1 ||
+        unicodeSearch.data.items[0]?.data.title !== 'ΣΟΣ '.repeat(250) ||
+        unicodeSearch.elapsed >= 2000
+    )
+        throw new Error(`Native D1 management Unicode search failed or was too slow: ${JSON.stringify(unicodeSearch)}`)
     const crossDatabaseManagement = await fetch(origin + '/api/site-admin/models', {
         headers: { cookie, ...alternateHeaders },
     })

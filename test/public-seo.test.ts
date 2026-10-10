@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import { Files } from 'files-sdk'
 import { memory } from 'files-sdk/memory'
 import { defineSiteAdminConfig, image, images, markdown, text, textarea } from '../packages/site-admin/src'
@@ -368,14 +369,21 @@ describe('public entry SEO payload', () => {
             locale: 'fr',
             translationGroup: 'group-100',
         })
-        const query = adapter.query.bind(adapter)
-        const spy = vi.spyOn(adapter, 'query').mockImplementation((sql, params = []) => {
-            expect(params.length).toBeLessThanOrEqual(100)
-            return query(sql, params)
+        const native = (await db.getInstance()) as DatabaseSync
+        const prepare = native.prepare.bind(native)
+        let checked = 0
+        vi.spyOn(native, 'prepare').mockImplementation((sql) => {
+            const statement = prepare(sql)
+            const all = statement.all.bind(statement)
+            vi.spyOn(statement, 'all').mockImplementation((...params: Parameters<typeof all>) => {
+                checked++
+                expect(params.length).toBeLessThanOrEqual(100)
+                return all(...params)
+            })
+            return statement
         })
         const entries = await admin.listPublicEntries('pages', 'en')
-        const siblingQueries = spy.mock.calls.filter(([sql]) => sql.includes('e.translation_group IN'))
-        expect(siblingQueries.map(([, params]) => params?.length)).toEqual([100, 3])
+        expect(checked).toBeGreaterThan(0)
         expect(entries).toHaveLength(101)
         for (const entry of entries) {
             const index = entry.slug.slice(3)

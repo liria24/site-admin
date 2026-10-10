@@ -1,6 +1,6 @@
 import type { DrizzleConnection as Database } from './drizzle'
-import type { AtomicStatement, AtomicResult, DatabaseValue as Primitive } from '../adapter'
-import { assertAtomicResults } from '../adapter'
+import type { AtomicStatement, AtomicResult, DatabaseValue as Primitive } from './sqlite-statements'
+import { assertAtomicResults } from './sqlite-statements'
 
 import { SiteAdminError } from '../errors'
 

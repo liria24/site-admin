@@ -7,7 +7,7 @@ import { memory } from 'files-sdk/memory'
 
 import { defineSiteAdminAuthorization, defineSiteAdminConfig, file, relation, text } from '../packages/site-admin/src'
 import { handleManagementRequest, handlePublicRequest } from '../packages/site-admin/src/server'
-import { queryRow, runAtomic } from '../packages/site-admin/src/server/database'
+import { queryRow, runAtomic } from './sqlite-queries'
 
 const databases: Database[] = []
 

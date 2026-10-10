@@ -1,12 +1,11 @@
-import type { EmptyRelations } from 'drizzle-orm'
-import type { SQLiteAsyncDatabase } from 'drizzle-orm/sqlite-core/async/db'
 import { is, getTableName, getTableColumns, entityKind } from 'drizzle-orm'
 import { SQLiteTable } from 'drizzle-orm/sqlite-core'
 import { SiteAdminError } from '../errors'
-import type { SiteAdminDatabase, DatabaseValue as Primitive } from '../adapter'
+import type { SiteAdminDatabase } from '../adapter'
+import type { AtomicStatement, AtomicResult, DatabaseValue as Primitive } from './sqlite-statements'
 import { queryRows, runAtomic } from './drizzle-database'
 import { assertSiteAdminSchema, contentTables } from './drizzle-schema'
-import { revisionSource } from './drizzle-tables'
+import { sqliteStorage } from './sqlite-storage'
 
 // Structural input also accepts a consumer's separately installed copy of Drizzle.
 type DrizzleDatabase = { $client: unknown; insert: (...args: never[]) => unknown }
@@ -22,7 +21,15 @@ interface Client {
 }
 
 /** Uses the application's Drizzle instance and its native SQLite/D1 transaction boundary. */
-export function drizzleAdapter(db: DrizzleDatabase, options: { schema: Record<string, unknown> }): SiteAdminDatabase {
+export interface DrizzleSiteAdminDatabase extends SiteAdminDatabase {
+    query(sql: string, params?: Primitive[]): Promise<unknown[]>
+    atomic(statements: AtomicStatement[]): Promise<AtomicResult[]>
+}
+
+export function drizzleAdapter(
+    db: DrizzleDatabase,
+    options: { schema: Record<string, unknown> },
+): DrizzleSiteAdminDatabase {
     const client = db?.$client as Client | undefined
     if (
         !client ||
@@ -53,11 +60,9 @@ export function drizzleAdapter(db: DrizzleDatabase, options: { schema: Record<st
         tables.set(name, value)
     }
     const connection: DrizzleConnection = {
-        orm: db as unknown as Pick<SQLiteAsyncDatabase<'sync' | 'async', unknown, EmptyRelations>, 'insert'>,
         tables,
         lockKey: native,
         dialect: 'sqlite',
-        connector: native.batch ? 'd1' : 'sqlite',
         getInstance: async () => native,
         prepare: (sql: string) => ({
             all: async (...params: Primitive[]): Promise<unknown[]> => {
@@ -71,7 +76,6 @@ export function drizzleAdapter(db: DrizzleDatabase, options: { schema: Record<st
         }),
     }
     return {
-        dialect: 'sqlite',
         query: (sql, params) => queryRows(connection, sql, params),
         atomic: async (statements) => {
             try {
@@ -91,24 +95,28 @@ export function drizzleAdapter(db: DrizzleDatabase, options: { schema: Record<st
         },
         bind(config) {
             const mapped = contentTables(connection, config)
+            const insertRevisionData = (
+                model: string,
+                revisionId: string,
+                data: Record<string, unknown>,
+            ): AtomicStatement => {
+                const table = mapped[model]
+                if (!table) throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', `Unknown Model "${model}".`)
+                const columns = getTableColumns(table)
+                const keys = ['revisionId', ...Object.keys(config.models[model]!.fields)]
+                const values: Record<string, unknown> = { ...data, revisionId }
+                const params = keys.map((key) => {
+                    const value = values[key]
+                    return value === undefined || value === null ? null : columns[key]!.mapToDriverValue(value)
+                }) as Primitive[]
+                return {
+                    sql: `INSERT INTO ${JSON.stringify(getTableName(table))}(${keys.map((key) => JSON.stringify(columns[key]!.name)).join(',')}) SELECT ${keys.map(() => '?').join(',')} WHERE EXISTS (SELECT 1 FROM site_admin_revisions WHERE id = ?)`,
+                    params: [...params, revisionId],
+                }
+            }
             return {
                 assertSchema: () => assertSiteAdminSchema(connection, config),
-                revisionSource: revisionSource(config),
-                insertRevisionData(model, revisionId, data) {
-                    const table = mapped[model]
-                    if (!table) throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', `Unknown Model "${model}".`)
-                    const columns = getTableColumns(table)
-                    const keys = ['revisionId', ...Object.keys(config.models[model]!.fields)]
-                    const values: Record<string, unknown> = { ...data, revisionId }
-                    const params = keys.map((key) => {
-                        const value = values[key]
-                        return value === undefined || value === null ? null : columns[key]!.mapToDriverValue(value)
-                    }) as Primitive[]
-                    return {
-                        sql: `INSERT INTO ${JSON.stringify(getTableName(table))}(${keys.map((key) => JSON.stringify(columns[key]!.name)).join(',')}) SELECT ${keys.map(() => '?').join(',')} WHERE EXISTS (SELECT 1 FROM site_admin_revisions WHERE id = ?)`,
-                        params: [...params, revisionId],
-                    }
-                },
+                ...sqliteStorage(connection, config, insertRevisionData),
             }
         },
     }
@@ -116,11 +124,9 @@ export function drizzleAdapter(db: DrizzleDatabase, options: { schema: Record<st
 
 /** Adapter-private native connection. Not part of the Core storage contract. */
 export interface DrizzleConnection {
-    orm: Pick<SQLiteAsyncDatabase<'sync' | 'async', unknown, EmptyRelations>, 'insert'>
     tables: Map<string, SQLiteTable>
     lockKey: object
     dialect: string
-    connector: string
     getInstance(): Promise<Client>
     prepare(sql: string): {
         all(...params: Primitive[]): Promise<unknown[]>

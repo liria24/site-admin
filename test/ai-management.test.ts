@@ -3,6 +3,7 @@ import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
 
 import type { SiteAdminDatabase, SiteAdminStorage } from '../packages/site-admin/src/adapter'
+import { createMemoryDatabase } from './memory-storage'
 import type { SiteAdminAIRuntime } from '../packages/site-admin/src/ai'
 import { defineSiteAdminConfig, markdown, text, textarea } from '../packages/site-admin/src'
 import { SiteAdminError } from '../packages/site-admin/src/errors'
@@ -40,23 +41,16 @@ const setup = <Context = unknown>(
     } = {},
 ) => {
     const storage = {
+        ...createMemoryDatabase().storage,
         assertSchema: vi.fn(async () => {
             throw new Error('AI proposals must not initialize storage.')
         }),
-        insertRevisionData: vi.fn(() => {
+        commit: vi.fn(async () => {
             throw new Error('AI proposals must not create revisions.')
         }),
-        revisionSource: 'site_admin_revisions',
     } satisfies SiteAdminStorage
     const database = {
-        atomic: vi.fn(async () => {
-            throw new Error('AI proposals must not write storage.')
-        }),
         bind: () => storage,
-        dialect: 'sqlite',
-        query: vi.fn(async () => {
-            throw new Error('AI proposals must not read storage.')
-        }),
     } satisfies SiteAdminDatabase
     const admin = new SiteAdmin<Context>({
         ...options,
@@ -102,7 +96,7 @@ describe('unsaved AI management proposals', () => {
     })
     it('uses model permission, forwards definition and slug limits, and never reads or writes entries', async () => {
         const ai = runtime()
-        const { admin, database, storage } = setup({ aiRuntime: ai })
+        const { admin, storage } = setup({ aiRuntime: ai })
         const response = await handleManagementRequest(admin, request('metadata', metadataInput), '/manage')
         expect(response.status).toBe(200)
         expect(await response.json()).toEqual({
@@ -123,10 +117,8 @@ describe('unsaved AI management proposals', () => {
             issues: [{ message: 'A required field is missing.', path: 'summary' }],
         })
         expect(ai.proofreadDraft).toHaveBeenCalledWith('posts', config.models.posts, proofread)
-        expect(database.query).not.toHaveBeenCalled()
-        expect(database.atomic).not.toHaveBeenCalled()
         expect(storage.assertSchema).not.toHaveBeenCalled()
-        expect(storage.insertRevisionData).not.toHaveBeenCalled()
+        expect(storage.commit).not.toHaveBeenCalled()
     })
 
     it('resolves AI lazily for each native request context rather than caching the first binding', async () => {
