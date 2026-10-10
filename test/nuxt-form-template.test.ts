@@ -48,6 +48,16 @@ const generatedForm = (
         SiteAdminClientError,
         useSiteAdminAuthScope: () => Vue.ref('actor'),
         useSiteAdminModels: () => asyncData(models),
+        siteAdminReadModels: async (
+            modelsState: ReturnType<typeof asyncData<SiteAdminDescriptor>>,
+            _auth: unknown,
+            signal: AbortSignal,
+        ) => {
+            await modelsState
+            signal.throwIfAborted()
+            if (modelsState.error.value) throw modelsState.error.value
+            return modelsState.data.value!
+        },
         siteAdminAsyncData: (
             _key: unknown,
             handler: (_app: unknown, context: { signal: AbortSignal }) => Promise<unknown>,

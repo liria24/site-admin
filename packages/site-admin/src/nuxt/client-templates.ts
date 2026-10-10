@@ -18,10 +18,15 @@ export const siteAdminNuxtClientTemplate = (
 import type { SiteAdminClient, SiteAdminClientOptions, SiteAdminManagementClient, SiteAdminManagementClientOptions, PublicRouteResult } from '@liria24/site-admin/client'
 import { useRequestFetch, useRequestURL, useState } from '#imports'
 
+const siteAdminLocalFetches = new WeakMap<ReturnType<typeof useNuxtApp>, NonNullable<SiteAdminClientOptions['fetch']>>()
 const useLocalFetch = (): NonNullable<SiteAdminClientOptions['fetch']> => {
+  if (!import.meta.server) return globalThis.fetch
+  const nuxtApp = useNuxtApp()
+  const cached = siteAdminLocalFetches.get(nuxtApp)
+  if (cached) return cached
   const requestFetch = import.meta.server ? useRequestFetch() : undefined
   const origin = useRequestURL().origin
-  return requestFetch ? async (input, init) => {
+  const fetch: NonNullable<SiteAdminClientOptions['fetch']> = requestFetch ? async (input, init) => {
     const url = new URL(String(input), origin)
     const method = init?.method?.toLowerCase() ?? 'get'
     if (method !== 'get' && method !== 'head' && method !== 'post' && method !== 'put' && method !== 'patch' && method !== 'delete' && method !== 'options') {
@@ -35,6 +40,8 @@ const useLocalFetch = (): NonNullable<SiteAdminClientOptions['fetch']> => {
     if (!response) throw new Error('Site Admin internal fetch did not return a response.')
     return response
   } : globalThis.fetch
+  siteAdminLocalFetches.set(nuxtApp, fetch)
+  return fetch
 }
 
 export const siteAdminPublicClientOptions = (): SiteAdminClientOptions => ({
@@ -88,7 +95,7 @@ import type { AsyncData, AsyncDataOptions, AsyncDataOptionsWithTransform, KeysOf
 import type { NuxtError } from '#app'
 import type { SiteAdminPublicModels, SiteAdminPublicSummaryModels } from '@liria24/site-admin/client'
 import type { SiteAdminIssue } from '@liria24/site-admin'
-import { computed, toValue, type MaybeRefOrGetter } from 'vue'
+import { computed, nextTick, toValue, type MaybeRefOrGetter } from 'vue'
 
 type PublicModelName = Extract<keyof SiteAdminPublicModels, string>
 type SiteAdminAsyncDataError<ErrorData> = ErrorData extends Error | NuxtError ? ErrorData : NuxtError<ErrorData>
@@ -234,7 +241,7 @@ export const siteAdminNuxtFormTemplate =
 import type { UseSiteAdminFormOptions, SiteAdminFormActionNames } from '@liria24/site-admin/form'
 import type { SiteAdminFormModels, SiteAdminManagementModels, SiteAdminEntry } from '@liria24/site-admin/client'
 import { SiteAdminClientError } from '@liria24/site-admin/client'
-import { siteAdminManagementClientOptions, createNuxtSiteAdminManagementClient, useSiteAdminAuthScope, useSiteAdminModels, siteAdminAsyncData, siteAdminManagementKey } from '#build/site-admin/client'
+import { siteAdminManagementClientOptions, createNuxtSiteAdminManagementClient, useSiteAdminAuthScope, useSiteAdminModels, siteAdminReadModels, siteAdminAsyncData, siteAdminManagementKey } from '#build/site-admin/client'
 import { useNuxtApp, useState } from '#imports'
 import * as Vue from 'vue'
 
@@ -262,6 +269,7 @@ export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOption
   const management = createNuxtSiteAdminManagementClient<Record<string, Record<string, unknown>>>(requestOptions, auth)
   const drafts = useState<Record<string, import('@liria24/site-admin/form').SiteAdminSessionDraft>>('site-admin:form-drafts', () => Object.create(null)).value
   const modelsSource = useSiteAdminModels(requestOptions, auth)
+  const initialAuth = auth.value
   const id = () => options.entry?.id ?? Vue.toValue(options.id) ?? null
   const readId = Vue.ref(id())
   Vue.watch(id, (value) => { readId.value = value }, { flush: 'sync' })
@@ -277,6 +285,7 @@ export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOption
   }
   const [pending, restore] = withAsyncContext(async () => {
     await Promise.all([modelsSource, entrySource])
+    if (initialAuth !== auth.value) throw new DOMException('Form authentication changed while loading.', 'AbortError')
     if (modelsSource.error.value) throw modelsSource.error.value
     if (entrySource?.error.value) throw entrySource.error.value
     return modelsSource.data.value!
@@ -288,12 +297,7 @@ export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOption
     const controller = createForm({ ...defaults, ...options, ...('slug' in options ? { get slug() { return options.slug } } : {}), descriptor, modelName: modelOrOptions, authScope: auth, drafts, client: management, presentation: true,
       ...(entrySource?.data.value?.entry ? { initialEntry: entrySource.data.value.entry } : {}),
       loadDescriptor: async (signal) => {
-        await Vue.nextTick()
-        signal.throwIfAborted()
-        if (!modelsSource.data.value) await modelsSource.execute({ signal, dedupe: 'defer' })
-        signal.throwIfAborted()
-        if (modelsSource.error.value) throw modelsSource.error.value
-        const source = modelsSource.data.value!
+        const source = await siteAdminReadModels(modelsSource, auth, signal)
         const current = Object.hasOwn(source.models, modelOrOptions) ? source.models[modelOrOptions] : undefined
         if (!current) throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', '[site-admin] Form model is unavailable to this actor.', 403)
         return current
