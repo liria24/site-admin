@@ -8,6 +8,7 @@ export interface FieldDescriptor {
     description?: string
     fields?: Record<string, FieldDescriptor>
     item?: FieldDescriptor
+    integer?: boolean
     kind: AnyField['kind']
     label?: string
     max?: number
@@ -17,6 +18,7 @@ export interface FieldDescriptor {
     minItems?: number
     minLength?: number
     model?: string
+    pattern?: string
     required: boolean
     serverValidation: boolean
     values?: readonly string[]
@@ -50,6 +52,8 @@ const describeField = (field: AnyField): FieldDescriptor => {
     if (field.default !== undefined) descriptor.default = structuredClone(field.default)
     if ('minLength' in field && field.minLength !== undefined) descriptor.minLength = field.minLength
     if ('maxLength' in field && field.maxLength !== undefined) descriptor.maxLength = field.maxLength
+    if ('pattern' in field && field.pattern !== undefined) descriptor.pattern = field.pattern
+    if (field.kind === 'number' && field.integer !== undefined) descriptor.integer = field.integer
     if ('min' in field && field.min !== undefined) descriptor.min = field.min
     if ('max' in field && field.max !== undefined) descriptor.max = field.max
     if ('minItems' in field && field.minItems !== undefined) descriptor.minItems = field.minItems

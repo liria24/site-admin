@@ -1,5 +1,6 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { markdownAssetReferences } from './markdown/assets'
+import { isRecord, validateBuiltinValue } from './validation-builtin'
 
 import type { ModelDefinition } from './config'
 import type { AnyField, AssetInput, FieldRecord } from './fields'
@@ -12,9 +13,6 @@ export interface IndexedReference {
 }
 
 export { projectStoredFields } from './stored-data'
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-    typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const issue = (path: string, message: string): SiteAdminIssue => ({ path, message })
 
@@ -45,133 +43,27 @@ const runSchema = async (
     }
 }
 
-const validateString = (field: AnyField, value: string, path: string): SiteAdminIssue[] => {
-    const issues: SiteAdminIssue[] = []
-    if ('minLength' in field && field.minLength !== undefined && value.length < field.minLength) {
-        issues.push(issue(path, `Must contain at least ${field.minLength} characters.`))
-    }
-    if ('maxLength' in field && field.maxLength !== undefined && value.length > field.maxLength) {
-        issues.push(issue(path, `Must contain at most ${field.maxLength} characters.`))
-    }
-    if ('pattern' in field && field.pattern !== undefined) {
-        try {
-            if (!new RegExp(field.pattern, 'u').test(value)) issues.push(issue(path, 'Has an invalid format.'))
-        } catch {
-            issues.push(issue(path, 'The configured pattern is invalid.'))
-        }
-    }
-    return issues
-}
-
-export const validateAsset = (value: unknown, path: string): SiteAdminIssue[] => {
-    if (typeof value === 'string' && value.length > 0) return []
-    if (isRecord(value) && typeof value.id === 'string' && value.id.length > 0) return []
-    return [issue(path, 'Must be an Asset ID or Asset reference.')]
-}
-
 const validateField = async (
     field: AnyField,
     value: unknown,
     path: string,
     schemas = true,
 ): Promise<{ issues: SiteAdminIssue[]; value: unknown }> => {
-    if (value === undefined || value === null) {
-        return { issues: field.required ? [issue(path, 'Required.')] : [], value }
-    }
-
-    let issues: SiteAdminIssue[] = []
+    const issues = validateBuiltinValue(field, value, path)
+    if (value === undefined || value === null) return { issues, value }
     let output: unknown = value
-    switch (field.kind) {
-        case 'text':
-        case 'textarea':
-        case 'markdown':
-            issues = typeof value === 'string' ? validateString(field, value, path) : [issue(path, 'Must be a string.')]
-            break
-        case 'url':
-            if (typeof value !== 'string') {
-                issues.push(issue(path, 'Must be a URL string.'))
-            } else {
-                issues.push(...validateString(field, value, path))
-                try {
-                    const parsed = new URL(value)
-                    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error()
-                } catch {
-                    issues.push(issue(path, 'Must be an absolute HTTP(S) URL.'))
-                }
-            }
-            break
-        case 'number':
-            if (typeof value !== 'number' || !Number.isFinite(value)) {
-                issues.push(issue(path, 'Must be a finite number.'))
-            } else {
-                if (field.integer && !Number.isInteger(value)) issues.push(issue(path, 'Must be an integer.'))
-                if (field.min !== undefined && value < field.min)
-                    issues.push(issue(path, `Must be at least ${field.min}.`))
-                if (field.max !== undefined && value > field.max)
-                    issues.push(issue(path, `Must be at most ${field.max}.`))
-            }
-            break
-        case 'boolean':
-            if (typeof value !== 'boolean') issues.push(issue(path, 'Must be a boolean.'))
-            break
-        case 'datetime':
-            if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) {
-                issues.push(issue(path, 'Must be an ISO-compatible date-time string.'))
-            }
-            break
-        case 'select':
-            if (typeof value !== 'string' || !field.values.includes(value)) {
-                issues.push(issue(path, `Must be one of: ${field.values.join(', ')}.`))
-            }
-            break
-        case 'relation':
-            if (typeof value !== 'string' || value.length === 0) issues.push(issue(path, 'Must be an Entry ID.'))
-            break
-        case 'file':
-        case 'image':
-            issues.push(...validateAsset(value, path))
-            break
-        case 'images':
-            if (!Array.isArray(value)) {
-                issues.push(issue(path, 'Must be an array of Asset references.'))
-            } else {
-                if (field.minItems !== undefined && value.length < field.minItems) {
-                    issues.push(issue(path, `Must contain at least ${field.minItems} items.`))
-                }
-                if (field.maxItems !== undefined && value.length > field.maxItems) {
-                    issues.push(issue(path, `Must contain at most ${field.maxItems} items.`))
-                }
-                for (const [index, item] of value.entries()) issues.push(...validateAsset(item, `${path}.${index}`))
-            }
-            break
-        case 'object':
-            if (!isRecord(value)) {
-                issues.push(issue(path, 'Must be an object.'))
-            } else {
-                const nested = await validateFields(field.fields, value, path, schemas)
-                issues.push(...nested.issues)
-                output = nested.data
-            }
-            break
-        case 'array':
-            if (!Array.isArray(value)) {
-                issues.push(issue(path, 'Must be an array.'))
-            } else {
-                if (field.minItems !== undefined && value.length < field.minItems) {
-                    issues.push(issue(path, `Must contain at least ${field.minItems} items.`))
-                }
-                if (field.maxItems !== undefined && value.length > field.maxItems) {
-                    issues.push(issue(path, `Must contain at most ${field.maxItems} items.`))
-                }
-                const items: unknown[] = []
-                for (const [index, item] of value.entries()) {
-                    const nested = await validateField(field.item, item, `${path}.${index}`, schemas)
-                    issues.push(...nested.issues)
-                    items.push(nested.value)
-                }
-                output = items
-            }
-            break
+    if (field.kind === 'object' && isRecord(value)) {
+        const nested = await validateFields(field.fields, value, path, schemas)
+        issues.push(...nested.issues)
+        output = nested.data
+    } else if (field.kind === 'array' && Array.isArray(value)) {
+        const items: unknown[] = []
+        for (const [index, item] of value.entries()) {
+            const nested = await validateField(field.item, item, path + '.' + index, schemas)
+            issues.push(...nested.issues)
+            items.push(nested.value)
+        }
+        output = items
     }
     if (issues.length === 0 && schemas) {
         const result = await runSchema(field.validate, output, path)

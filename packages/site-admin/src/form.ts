@@ -20,7 +20,7 @@ import { projectStoredFields } from './stored-data'
 import type { FieldDescriptor, ModelDescriptor } from './descriptor'
 import type { SiteAdminIssue } from './errors'
 import type { AssetRecord, EntryRecord } from './server/types'
-import { validateAsset } from './validation'
+import { isRecord, validateBuiltinValue } from './validation-builtin'
 
 export interface SiteAdminFormError {
     code: string
@@ -95,53 +95,17 @@ const descriptorIssues = (
     fields: Record<string, FieldDescriptor>,
     data: Record<string, unknown>,
     parent = '',
-): StandardSchemaV1.Issue[] => {
-    const issues: StandardSchemaV1.Issue[] = []
+): SiteAdminIssue[] => {
+    const issues: SiteAdminIssue[] = []
     for (const [name, field] of Object.entries(fields)) {
         const path = [parent, name].filter(Boolean).join('.')
         const value = data[name]
-        const add = (message: string): void => void issues.push({ message, path: path.split('.') })
-        if (value === undefined || value === null) {
-            if (field.required) add('Required.')
-            continue
-        }
-        if (field.kind === 'object') {
-            if (typeof value !== 'object' || Array.isArray(value)) add('Must be an object.')
-            else issues.push(...descriptorIssues(field.fields ?? {}, value as Record<string, unknown>, path))
-        } else if (field.kind === 'array' || field.kind === 'images') {
-            if (!Array.isArray(value)) add('Must be an array.')
-            else {
-                if (field.minItems !== undefined && value.length < field.minItems)
-                    add(`Minimum ${field.minItems} items.`)
-                if (field.maxItems !== undefined && value.length > field.maxItems)
-                    add(`Maximum ${field.maxItems} items.`)
-                if (field.kind === 'images')
-                    for (const [index, item] of value.entries())
-                        issues.push(
-                            ...validateAsset(item, `${path}.${index}`).map((issue) => ({
-                                message: issue.message,
-                                path: issue.path.split('.'),
-                            })),
-                        )
-                else if (field.item)
-                    for (const [index, item] of value.entries())
-                        issues.push(...descriptorIssues({ [index]: field.item }, { [index]: item }, path))
-            }
-        } else if (field.kind === 'image' || field.kind === 'file') {
-            for (const issue of validateAsset(value, path)) add(issue.message)
-        } else if (field.kind === 'number') {
-            if (typeof value !== 'number' || !Number.isFinite(value)) add('Must be a finite number.')
-            else if (field.min !== undefined && value < field.min) add(`Must be at least ${field.min}.`)
-            else if (field.max !== undefined && value > field.max) add(`Must be at most ${field.max}.`)
-        } else if (field.kind === 'boolean') {
-            if (typeof value !== 'boolean') add('Must be a boolean.')
-        } else if (field.kind === 'select') {
-            if (typeof value !== 'string' || !field.values?.includes(value)) add('Select a supported value.')
-        } else if (typeof value !== 'string') add('Must be a string.')
-        else if (field.minLength !== undefined && value.length < field.minLength)
-            add(`Minimum ${field.minLength} characters.`)
-        else if (field.maxLength !== undefined && value.length > field.maxLength)
-            add(`Maximum ${field.maxLength} characters.`)
+        issues.push(...validateBuiltinValue(field, value, path))
+        if (field.kind === 'object' && isRecord(value))
+            issues.push(...descriptorIssues(field.fields ?? {}, value, path))
+        else if (field.kind === 'array' && field.item && Array.isArray(value))
+            for (const [index, item] of value.entries())
+                issues.push(...descriptorIssues({ [index]: field.item }, { [index]: item }, path))
     }
     return issues
 }
@@ -152,7 +116,10 @@ const descriptorSchema = <Data extends Record<string, unknown>>(
     '~standard': {
         validate: (value) => {
             const data = value as Data
-            const issues = descriptorIssues(model.fields, data)
+            const issues = descriptorIssues(model.fields, data).map((issue) => ({
+                message: issue.message,
+                path: issue.path.split('.'),
+            }))
             return issues.length > 0 ? { issues } : { value: data }
         },
         vendor: 'site-admin',
