@@ -80,9 +80,9 @@ export const sqliteStorage = (
         queryRows<Row>(database, sql, params)
     const row = async <Row extends object>(sql: string, params: DatabaseValue[] = []) =>
         (await rows<Row>(sql, params))[0]
-    const execute = async (statements: AtomicStatement[]) => {
+    const execute = async (statements: AtomicStatement[], mode: 'read' | 'write' = 'write') => {
         try {
-            return await runAtomic(database, statements)
+            return await runAtomic(database, statements, mode)
         } catch (error) {
             if (
                 !(error instanceof SiteAdminError) &&
@@ -261,12 +261,15 @@ export const sqliteStorage = (
         for (let attempt = 0; attempt < 3; attempt++) {
             if (fingerprint) await populateSearch(filter, fingerprint, budget)
             const missing = fingerprint ? missingSearch(filter, fingerprint) : undefined
-            const result = await execute([
-                ...(missing
-                    ? [{ sql: `SELECT COUNT(*) AS missing ${missing.from}`, params: missing.params, query: true }]
-                    : []),
-                ...statements(from, params),
-            ])
+            const result = await execute(
+                [
+                    ...(missing
+                        ? [{ sql: `SELECT COUNT(*) AS missing ${missing.from}`, params: missing.params, query: true }]
+                        : []),
+                    ...statements(from, params),
+                ],
+                'read',
+            )
             // A writer using a different projection can install a new head during backfill.
             // Check completeness and count/page in the same native snapshot; never silently omit it.
             if (!missing) return result
