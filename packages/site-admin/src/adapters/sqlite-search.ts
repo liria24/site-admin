@@ -40,48 +40,15 @@ export const searchParts = (text: { data: string; slug: string }) =>
     })
 
 export const searchPredicate = (root: 'search_data' | 'search_slug', q: string) => {
-    const points = Array.from(q)
-    const length = points.length
-    if (length <= chunkCharacters)
-        return {
-            sql: `(instr(${root}.value,?)>0 OR EXISTS (
+    let length = 0
+    for (const codePoint of q) {
+        void codePoint
+        length++
+    }
+    return {
+        sql: `(instr(${root}.value,?)>0 OR EXISTS (
             SELECT 1 FROM site_admin_meta c JOIN site_admin_meta p ON p.key=CASE WHEN CAST(substr(c.key,length(${root}.key)+2) AS INTEGER)=1 THEN ${root}.key ELSE ${root}.key||':'||printf('%06d',CAST(substr(c.key,length(${root}.key)+2) AS INTEGER)-1) END
             WHERE c.key>=${root}.key||':000001' AND c.key<${root}.key||':~' AND instr(substr(p.value,max(1,length(p.value)-${length}+2))||c.value,?)>0))`,
-            params: [q, q],
-        }
-    // Prefix candidates and comparisons stay in native SQL without concatenating the full large text.
-    const frequencies = new Map<string, number>()
-    for (const point of points) frequencies.set(point, (frequencies.get(point) ?? 0) + 1)
-    let rarest = 0
-    for (let index = 1; index < length; index++)
-        if (frequencies.get(points[index]!)! < frequencies.get(points[rarest]!)!) rarest = index
-    const anchorOffset = Math.max(0, Math.min(rarest - 31, length - 64))
-    const anchor = points.slice(anchorOffset, anchorOffset + 64).join('')
-    const start = `(a.n*${chunkCharacters}+a.at-1-${anchorOffset})`
-    const local = `max(0,${start}-p.n*${chunkCharacters})`
-    const offset = `max(0,p.n*${chunkCharacters}-${start})`
-    const take = `min(length(p.value)-${local},length(needle.q)-${offset})`
-    const firstAnchor = `instr(substr(value,lo,hi-lo+length(anchor)),anchor)`
-    const nextAnchor = `instr(substr(value,at+1,hi-at+length(anchor)-1),anchor)`
-    return {
-        sql: `EXISTS (WITH RECURSIVE needle(q,anchor) AS (VALUES (?,?)),
-            parts(n,value) AS (
-                SELECT 0,${root}.value UNION ALL SELECT CAST(substr(m.key,length(${root}.key)+2) AS INTEGER),m.value FROM site_admin_meta m WHERE m.key>=${root}.key||':000001' AND m.key<${root}.key||':~'
-            ), extent(total) AS (SELECT max(n*${chunkCharacters}+length(value)) FROM parts),
-            windows(n,value,lo,hi) AS (
-                SELECT p.n,p.value||COALESCE(next.value,''),max(1,${anchorOffset}-p.n*${chunkCharacters}+1),min(length(p.value),total-length(q)+${anchorOffset}-p.n*${chunkCharacters}+1)
-                FROM parts p LEFT JOIN parts next ON next.n=p.n+1 CROSS JOIN needle CROSS JOIN extent WHERE length(q)<=total
-            ), candidates(n,value,hi,at) AS (
-                SELECT n,value,hi,CASE WHEN ${firstAnchor}>0 THEN lo-1+${firstAnchor} ELSE 0 END FROM windows,needle WHERE lo<=hi
-                UNION ALL SELECT n,value,hi,at+${nextAnchor} FROM candidates,needle WHERE at>0 AND at<hi AND ${nextAnchor}>0
-            )
-            SELECT 1 FROM needle WHERE (CASE WHEN length(${root}.value)>=length(q) THEN instr(${root}.value,q) ELSE 0 END)>0 OR (EXISTS (SELECT 1 FROM parts WHERE n>0) AND EXISTS (
-                SELECT 1 FROM candidates a WHERE a.at>0
-                AND ${start}>=0
-                AND ${start}+length(needle.q)<=(SELECT total FROM extent)
-                AND NOT EXISTS (SELECT 1 FROM parts p WHERE p.n*${chunkCharacters}<${start}+length(needle.q) AND p.n*${chunkCharacters}+length(p.value)>${start}
-                    AND substr(p.value,${local}+1,${take})<>substr(needle.q,${offset}+1,${take}))
-            )))`,
-        params: [q, anchor],
+        params: [q, q],
     }
 }

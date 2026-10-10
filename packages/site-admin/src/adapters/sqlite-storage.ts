@@ -13,6 +13,7 @@ import type {
     StorageEntryFilter,
 } from '../storage'
 import { SiteAdminError } from '../errors'
+import { searchQuery } from '../storage'
 import { queryRows, runAtomic } from './drizzle-database'
 import { revisionSource } from './drizzle-tables'
 import { searchKey, searchPrefix, searchScope, searchText, searchParts, searchPredicate } from './sqlite-search'
@@ -155,7 +156,7 @@ export const sqliteStorage = (
             params.push(filter.locale)
         }
         if (filter.q) {
-            const q = filter.q.toLocaleLowerCase()
+            const q = filter.q
             const slug = searchPredicate('search_slug', q),
                 data = searchPredicate('search_data', q)
             clauses.push(`(${slug.sql} OR ${data.sql})`)
@@ -250,6 +251,8 @@ export const sqliteStorage = (
         filter: StorageEntryFilter,
         statements: (from: string, params: DatabaseValue[]) => AtomicStatement[],
     ) => {
+        const q = searchQuery(filter.q)
+        filter = { ...filter, ...(q === undefined ? {} : { q }) }
         const fingerprint = filter.q ? await scope() : undefined
         const where = entryFilter(filter)
         const from = `${contentFrom}${fingerprint ? searchJoins : ''} WHERE ${where.sql}`

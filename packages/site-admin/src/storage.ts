@@ -1,4 +1,25 @@
 import type { AssetRecord, EntryRecord, IncomingReference, RevisionRecord } from './server/types'
+import { SiteAdminError } from './errors'
+
+export const searchQueryLimit = 512
+export const searchQuery = (
+    value: string | undefined,
+    lowercase: (text: string) => string = (text) => text.toLocaleLowerCase(),
+): string | undefined => {
+    const validate = (text: string) => {
+        let count = 0
+        for (const codePoint of text) {
+            void codePoint
+            if (++count > searchQueryLimit)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_INVALID_INPUT',
+                    `Search query exceeds ${searchQueryLimit} code points.`,
+                )
+        }
+        return text
+    }
+    return value === undefined ? undefined : validate(lowercase(validate(value)))
+}
 
 /** Storage data uses domain names and values, never SQL, ORM columns or encoded JSON. */
 export type StorageEntryState = Omit<EntryRecord, 'data' | 'revisionId' | 'slug'>

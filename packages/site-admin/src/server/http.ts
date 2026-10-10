@@ -147,7 +147,7 @@ const handleManagementRequestInner = async <Context>(
             const model = url.searchParams.get('model') ?? undefined
             if (model) siteAdmin.assertPermission(actor, 'model', 'readDraft', model)
             const locale = url.searchParams.get('locale')
-            const query = url.searchParams.get('q')?.toLocaleLowerCase()
+            const query = url.searchParams.get('q') ?? undefined
             const limit = Number(url.searchParams.get('limit') ?? 50)
             const offset = Number(url.searchParams.get('offset') ?? 0)
             if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0)

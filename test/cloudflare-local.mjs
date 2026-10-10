@@ -104,7 +104,11 @@ try {
     if (String(large.counts) !== '1,1,0,1' || !large.unchanged || !large.sizes?.every(({ bytes }) => bytes < 2_000_000))
         throw new Error(`Native D1 chunk-boundary/canonical-history probe failed: ${JSON.stringify(large)}`)
     const longQuery = await (await fetch(origin + '/search-long-query', { signal: AbortSignal.timeout(30000) })).json()
-    if (String(longQuery.counts) !== '0,0,1,0' || !longQuery.unchanged || longQuery.elapsed >= 2_000)
+    if (
+        String(longQuery.counts) !== '1' ||
+        longQuery.status !== 400 ||
+        String(longQuery.rejected) !== Array(3).fill('SITE_ADMIN_INVALID_INPUT').join(',')
+    )
         throw new Error(`Native D1 long-query bounds failed: ${JSON.stringify(longQuery)}`)
     const seeded = await (await fetch(origin + '/search-cold/seed')).json()
     if (seeded.seeded !== 257) throw new Error(`Native D1 cold-search seeding failed: ${JSON.stringify(seeded)}`)

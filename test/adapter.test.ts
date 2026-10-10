@@ -159,6 +159,31 @@ async function graph(storage: SiteAdminStorage) {
 }
 for (const kind of ['memory', 'sqlite', 'd1'] as const)
     describe(`${kind} domain storage conformance`, () => {
+        it('accepts 512 code points and rejects raw or lowercase-expanded queries before preparation', async () => {
+            const { core, storage, database } = await setup(kind)
+            await core.createEntry('posts', { data: { title: 'a'.repeat(512) + '😀'.repeat(512) + 'İ'.repeat(256) } })
+            for (const q of ['a'.repeat(512), '😀'.repeat(512), 'İ'.repeat(256)])
+                expect((await storage.pageEntries({ models: ['posts'], q }, { limit: 1, offset: 0 })).total).toBe(1)
+            const controls = batchControls.get(database)
+            if (controls) controls.trace = []
+            for (const q of ['a'.repeat(513), '😀'.repeat(513), 'İ'.repeat(257)]) {
+                await expect(storage.entries({ q })).rejects.toMatchObject({ code: 'SITE_ADMIN_INVALID_INPUT' })
+                await expect(storage.pageEntries({ q }, { limit: 1, offset: 0 })).rejects.toMatchObject({
+                    code: 'SITE_ADMIN_INVALID_INPUT',
+                })
+                await expect(core.pageEntries({ q }, { limit: 1, offset: 0 })).rejects.toMatchObject({
+                    code: 'SITE_ADMIN_INVALID_INPUT',
+                })
+                const response = await handleManagementRequest(
+                    core,
+                    new Request('https://example.test/manage/entries?q=' + encodeURIComponent(q)),
+                    '/manage',
+                )
+                expect(response.status).toBe(400)
+                expect(await response.json()).toMatchObject({ error: { code: 'SITE_ADMIN_INVALID_INPUT' } })
+            }
+            if (controls) expect(controls.trace).toEqual([])
+        })
         it('synchronizes public changes and a scheduled batch once while preserving each lifecycle hook', async () => {
             const events: string[] = []
             const definition = defineSiteAdminConfig({
@@ -581,7 +606,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 const entry = await core.createEntry('posts', { slug: 'large-value', data: { title } })
                 const before = await graph(storage)
                 expect((await core.getEntry(entry.id)).data.title).toBe(title)
-                for (const q of [marker, 'i\u0307'.repeat(100) + marker + 'i\u0307'.repeat(75_000)])
+                for (const q of [marker, 'i\u0307'.repeat(100) + marker + 'i\u0307'.repeat(100)])
                     expect((await storage.pageEntries({ models: ['posts'], q }, { limit: 1, offset: 0 })).total).toBe(1)
                 expect(
                     (await storage.pageEntries({ models: ['posts'], q: 'A😀B%_[]X' }, { limit: 1, offset: 0 })).total,
@@ -592,7 +617,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 expect(
                     (
                         await storage.pageEntries(
-                            { models: ['posts'], q: 'i\u0307'.repeat(150_000) },
+                            { models: ['posts'], q: 'i\u0307'.repeat(200) },
                             { limit: 1, offset: 0 },
                         )
                     ).total,
@@ -600,7 +625,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 expect(
                     (
                         await storage.pageEntries(
-                            { models: ['posts'], q: 'i\u0307'.repeat(75_000) + 'X' + 'i\u0307'.repeat(75_000) },
+                            { models: ['posts'], q: 'i\u0307'.repeat(100) + 'X' + 'i\u0307'.repeat(100) },
                             { limit: 1, offset: 0 },
                         )
                     ).total,
@@ -618,44 +643,6 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 expect((await core.getEntry(entry.id)).data.title).toBe(title)
                 expect(await graph(storage)).toEqual(before)
             }, 20_000)
-
-        if (kind !== 'memory')
-            it('bounds long near-whole-value query candidates before native recursion', async () => {
-                const definition = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
-                const database = await backend(kind, definition)
-                const core = createSiteAdmin({ config: definition, database }),
-                    storage = database.bind(definition)
-                const entry = await core.createEntry('posts', {
-                    slug: 'long-query',
-                    data: { title: 'a'.repeat(1_050_000) },
-                })
-                const started = performance.now()
-                for (const [q, total] of [
-                    ['a'.repeat(1_050_001), 0],
-                    ['a'.repeat(1_100_000), 0],
-                    ['a'.repeat(1_050_000), 1],
-                    ['a'.repeat(1_049_999) + 'b', 0],
-                ] as const)
-                    expect((await storage.pageEntries({ models: ['posts'], q }, { limit: 1, offset: 0 })).total).toBe(
-                        total,
-                    )
-                expect(performance.now() - started).toBeLessThan(2_000)
-                const periodic = 'a'.repeat(63) + 'b'
-                await core.updateEntry(entry.id, {
-                    expectedVersion: entry.version,
-                    data: { title: periodic.repeat(16_406) },
-                })
-                const rareAnchorStarted = performance.now()
-                expect(
-                    (
-                        await storage.pageEntries(
-                            { models: ['posts'], q: 'a'.repeat(1_049_983) + 'b' },
-                            { limit: 1, offset: 0 },
-                        )
-                    ).total,
-                ).toBe(0)
-                expect(performance.now() - rareAnchorStarted).toBeLessThan(2_000)
-            }, 10_000)
 
         if (kind === 'd1')
             it('resumes a large cold search through the standard client within each fresh request budget', async () => {
