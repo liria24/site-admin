@@ -138,15 +138,42 @@ describe('native Better Auth integration', () => {
     it('registers matching server/client permissions and a request-scoped database provider', async () => {
         const hook = await setup(true, undefined, (config) => {
             delete config.database
+            config.authorization = {
+                roles: {
+                    admin: { models: { '*': ['update'], posts: ['readDraft'] } },
+                    user: { ai: ['*'] },
+                    editor: { models: { '*': ['readDraft'] }, ai: ['proofread'] },
+                },
+            }
         })
-        const filenames = kit.templates.map(({ filename }) => filename)
-        expect(filenames).toContain('site-admin/better-auth-server-plugin.ts')
-        expect(filenames).toContain('site-admin/better-auth-client-plugin.mjs')
-        expect(
-            kit.templates
-                .find(({ filename }) => filename === 'site-admin/better-auth-client-plugin.mjs')!
-                .getContents(),
-        ).toContain('adminClient({ ac, roles })')
+        const { stripTypeScriptTypes } = await vi.importActual<typeof import('node:module')>('node:module')
+        const executable = (filename: string) =>
+            stripTypeScriptTypes(kit.templates.find((item) => item.filename === filename)!.getContents())
+                .replace(/^import .*$/gmu, '')
+                .replace('export default ', 'return ')
+        const server = new Function('extendSiteAdminAuth', executable('site-admin/better-auth-server-plugin.ts'))(
+            (
+                options: unknown,
+                resources: Record<string, string[]>,
+                permissions: Record<string, Record<string, string[]>>,
+            ) => ({ options, resources, permissions }),
+        )
+        const { resources, permissions } = server({ plugins: [] })
+        const client = new Function(
+            'createAccessControl',
+            'adminClient',
+            executable('site-admin/better-auth-client-plugin.mjs'),
+        )(
+            (statements: unknown) => ({ statements, newRole: (role: unknown) => role }),
+            (options: unknown) => options,
+        )
+        expect(client.ac.statements).toEqual(resources)
+        expect(client.roles).toEqual(permissions)
+        expect(Object.keys(client.roles)).toEqual(['admin', 'user', 'editor'])
+        expect(permissions.admin?.['siteAdmin:model:posts']).toEqual(['update', 'readDraft'])
+        expect(permissions.admin?.user).toEqual([])
+        expect(permissions.user?.['siteAdmin:ai']).toEqual(['proofread', 'plain'])
+        expect(permissions.editor?.['siteAdmin:ai']).toEqual(['proofread'])
 
         const providerHook = hook.mock.calls.find(([name]) => name === 'better-auth:database:providers')![1]
         const providers: Record<string, { buildDatabaseCode: () => string }> = {}
@@ -169,57 +196,6 @@ describe('native Better Auth integration', () => {
         expect(runtime).toContain('await getRequestSession(getNitroRequest(event))')
         expect(runtime).toContain('if (!session) return null')
         expect(kit.handlers.some(({ route }) => route === '/api/site-admin/**')).toBe(true)
-    })
-
-    it('passes the same plain permissions to the server and native client ACL, including overridden defaults', async () => {
-        await setup(true, undefined, (config) => {
-            config.authorization = {
-                roles: {
-                    admin: { models: { '*': ['update'], posts: ['readDraft'] } },
-                    user: { ai: ['*'] },
-                    editor: { models: { '*': ['readDraft'] }, ai: ['proofread'] },
-                },
-            }
-        })
-        const { stripTypeScriptTypes } = await vi.importActual<typeof import('node:module')>('node:module')
-        const { createAccessControl } = await import('better-auth/plugins')
-        const executable = (filename: string) =>
-            stripTypeScriptTypes(kit.templates.find((item) => item.filename === filename)!.getContents())
-                .replace(/^import .*$/gmu, '')
-                .replace('export default ', 'return ')
-        const extend = vi.fn((options: unknown) => options)
-        const server = new Function('extendSiteAdminAuth', executable('site-admin/better-auth-server-plugin.ts'))(
-            extend,
-        )
-        const options = { plugins: [] }
-        expect(server(options)).toBe(options)
-        const [, resources, permissions] = extend.mock.calls[0] as unknown as [
-            unknown,
-            Record<string, string[]>,
-            Record<string, Record<string, string[]>>,
-        ]
-        const client = new Function(
-            'createAccessControl',
-            'adminClient',
-            executable('site-admin/better-auth-client-plugin.mjs'),
-        )(
-            createAccessControl,
-            (value: { ac: { statements: unknown }; roles: Record<string, { statements: unknown }> }) => value,
-        )
-        expect(client.ac.statements).toEqual(resources)
-        expect(
-            Object.fromEntries(
-                Object.entries(client.roles).map(([name, role]) => [
-                    name,
-                    (role as { statements: unknown }).statements,
-                ]),
-            ),
-        ).toEqual(permissions)
-        expect(Object.keys(client.roles)).toEqual(['admin', 'user', 'editor'])
-        expect(permissions.admin?.['siteAdmin:model:posts']).toEqual(['update', 'readDraft'])
-        expect(permissions.admin?.user).toEqual([])
-        expect(permissions.user?.['siteAdmin:ai']).toEqual(['proofread', 'plain'])
-        expect(permissions.editor?.['siteAdmin:ai']).toEqual(['proofread'])
     })
 
     it('leaves application-owned auth providers intact with a direct content adapter resolver', async () => {
