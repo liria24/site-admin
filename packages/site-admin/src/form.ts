@@ -16,6 +16,7 @@ import {
 import { createSiteAdminManagementClient, SiteAdminClientError } from './client'
 import type { SiteAdminDraftProposal, SiteAdminEntryMutation, SiteAdminManagementClient } from './client'
 import { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset, type SiteAdminAsset } from './management-assets'
+import { projectStoredFields } from './stored-data'
 import type { FieldDescriptor, ModelDescriptor } from './descriptor'
 import type { SiteAdminIssue } from './errors'
 import type { AssetRecord, EntryRecord } from './server/types'
@@ -223,6 +224,7 @@ export const useSiteAdminForm = <
         options.presentation ? presentSiteAdminData<Data>(descriptor.value, data, assetUrl) : (data as Data)
     const serialize = (data: Record<string, unknown>): Record<string, unknown> =>
         serializeSiteAdminData(descriptor.value, data)
+    const initialData = initial ? projectStoredFields(descriptor.value.fields, initial.data) : options.defaultValues
     const clone = <Value>(value: Value): Value => JSON.parse(JSON.stringify(value)) as Value
     const canonical = (value: unknown): string =>
         JSON.stringify(value, (_name, item: unknown) =>
@@ -242,9 +244,7 @@ export const useSiteAdminForm = <
         ]),
     )
     const identity = ref(sourceIdentity.value)
-    const baseline = shallowRef(
-        serialize(present(siteAdminFormDefaults(descriptor.value, initial?.data ?? options.defaultValues))),
-    )
+    const baseline = shallowRef(serialize(present(siteAdminFormDefaults(descriptor.value, initialData))))
     let baseSlug = slug.value
     const serverError = ref<SiteAdminFormError | null>(null)
     const conflict = ref(false)
@@ -264,7 +264,7 @@ export const useSiteAdminForm = <
     let publishing: Promise<SiteAdminEntryMutation<Data> | undefined> | undefined
     const publishBusy = ref(false)
     const form = useForm({
-        defaultValues: present(siteAdminFormDefaults(descriptor.value, initial?.data ?? options.defaultValues)),
+        defaultValues: present(siteAdminFormDefaults(descriptor.value, initialData)),
         validators: [
             {
                 run: {
@@ -482,7 +482,7 @@ export const useSiteAdminForm = <
                 if (entry.version !== version.value) conflict.value = true
                 return
             }
-            baseline.value = serialize(present(entry.data))
+            baseline.value = serialize(present(projectStoredFields(descriptor.value.fields, entry.data)))
             baseSlug = entry.slug
             slug.value = entry.slug
             version.value = entry.version

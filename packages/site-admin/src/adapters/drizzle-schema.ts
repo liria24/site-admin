@@ -17,6 +17,9 @@ import {
     routes,
 } from './drizzle-tables'
 
+const nullDefault = (value: string | null): boolean =>
+    value === null || value.replace(/[\s()]/gu, '').toLowerCase() === 'null'
+
 export function contentTables(database: Database, config: SiteAdminConfig) {
     validateContentNames(config)
     return Object.fromEntries(
@@ -28,11 +31,7 @@ export function contentTables(database: Database, config: SiteAdminConfig) {
                     `Missing generated table for Model "${name}".`,
                 )
             const columns = getTableColumns(table)
-            if (
-                Object.keys(columns).length !== Object.keys(model.fields).length + 1 ||
-                columns.revisionId?.name !== 'revision_id' ||
-                !columns.revisionId.primary
-            )
+            if (columns.revisionId?.name !== 'revision_id' || !columns.revisionId.primary)
                 throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', `Regenerate the schema for Model "${name}".`)
             for (const [key, field] of Object.entries(model.fields)) {
                 const column = columns[key],
@@ -81,34 +80,86 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
     ]
     for (const table of tables) {
         const expected = getTableConfig(table)
+        const model = Object.entries(config.models).find(([name]) => contentTableName(name) === expected.name)?.[1]
+        // Removed fields may stay in the application schema and physical history table.
+        // Reads and inserts use only these active columns; retained columns are checked for write compatibility below.
+        const required = model
+            ? expected.columns.filter(
+                  (column) =>
+                      column.name === 'revision_id' ||
+                      Object.keys(model.fields).some((key) => column.name === `field_${key}`),
+              )
+            : expected.columns
         const supplied = database.tables.get(expected.name)
         if (
             !supplied ||
-            JSON.stringify(getTableConfig(supplied).columns.map((c) => [c.name, c.getSQLType(), c.notNull])) !==
-                JSON.stringify(expected.columns.map((c) => [c.name, c.getSQLType(), c.notNull]))
+            required.some((column) => {
+                const actual = getTableConfig(supplied).columns.find((item) => item.name === column.name)
+                return (
+                    !actual ||
+                    actual.getSQLType() !== column.getSQLType() ||
+                    actual.notNull !== column.notNull ||
+                    actual.primary !== column.primary
+                )
+            })
         )
             throw new SiteAdminError(
                 'SITE_ADMIN_SCHEMA_INCOMPATIBLE',
                 `Missing or incompatible generated schema table "${expected.name}".`,
             )
-        const columns = await queryRows<{ name: string; type: string; notnull: number; pk: number }>(
-            database,
-            `PRAGMA table_info(${JSON.stringify(expected.name)})`,
-        )
+        const columns = await queryRows<{
+            name: string
+            type: string
+            notnull: number
+            pk: number
+            dflt_value: string | null
+        }>(database, `PRAGMA table_info(${JSON.stringify(expected.name)})`)
         if (
-            columns.length !== expected.columns.length ||
-            expected.columns.some((column) => {
+            required.some((column) => {
                 const actual = columns.find((item) => item.name === column.name)
                 return (
                     !actual ||
                     actual.type.toLowerCase() !== column.getSQLType().toLowerCase() ||
-                    (column.notNull && !actual.notnull && !actual.pk)
+                    (column.notNull && !actual.notnull && !actual.pk) ||
+                    (!column.notNull && !column.primary && Boolean(actual.notnull)) ||
+                    (column.primary && !actual.pk)
                 )
-            })
+            }) ||
+            columns.some(
+                (column) =>
+                    !required.some((item) => item.name === column.name) &&
+                    (column.pk || (column.notnull && nullDefault(column.dflt_value))),
+            )
         )
             throw new SiteAdminError(
                 'SITE_ADMIN_MIGRATION_REQUIRED',
                 `Database table "${expected.name}" does not match the generated schema. Generate and apply its Drizzle migrations explicitly.`,
             )
+        // A retained UNIQUE key must be safe for every active-column insert.
+        // Do not infer safety from partial predicates or nonconstant default expressions.
+        const indexes = await queryRows<{ name: string; unique: number; partial: number }>(
+            database,
+            `PRAGMA index_list(${JSON.stringify(expected.name)})`,
+        )
+        for (const index of indexes) {
+            if (!index.unique) continue
+            const indexed = await queryRows<{ name: string | null }>(
+                database,
+                `PRAGMA index_info(${JSON.stringify(index.name)})`,
+            )
+            const retained = indexed.flatMap(({ name }) => {
+                const column = columns.find((item) => item.name === name)
+                return column && !required.some((item) => item.name === name) ? [column] : []
+            })
+            const uniqueRevision = indexed.some(({ name }) =>
+                required.some((column) => column.name === name && column.primary),
+            )
+            const omittedNull = retained.some((column) => !column.notnull && nullDefault(column.dflt_value))
+            if (retained.length && !uniqueRevision && !omittedNull)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_MIGRATION_REQUIRED',
+                    `Retained UNIQUE columns in "${expected.name}" prevent active-column inserts. Generate and apply its Drizzle migrations explicitly.`,
+                )
+        }
     }
 }

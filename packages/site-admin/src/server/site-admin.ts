@@ -31,6 +31,7 @@ import {
     applyFieldDefaults,
     collectReferences,
     fieldAtPath,
+    projectStoredFields,
     validateModelData,
     type IndexedReference,
 } from '../validation'
@@ -837,7 +838,7 @@ export class SiteAdmin<Context = unknown> {
         definition: ModelDefinition,
         revision: RevisionRow,
     ): Promise<{ assets: IndexedReference[]; data: Record<string, unknown>; relations: IndexedReference[] }> {
-        const stored = parseObject(revision.data)
+        const stored = projectStoredFields(definition.fields, parseObject(revision.data))
         const prepared = await this.#prepareData(definition, stored, false)
         if (stableJson(prepared.data) !== stableJson(stored)) {
             throw new SiteAdminError(
@@ -1886,7 +1887,7 @@ export class SiteAdmin<Context = unknown> {
                 } catch {
                     continue
                 }
-                const stored = parseObject(row.data)
+                const stored = projectStoredFields(definition.fields, parseObject(row.data))
                 const validated = await validateModelData(definition, stored)
                 if (!validated.data || stableJson(validated.data) !== stableJson(stored)) continue
                 const found = collectReferences(definition.fields, stored)

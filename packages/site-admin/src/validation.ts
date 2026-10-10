@@ -11,6 +11,8 @@ export interface IndexedReference {
     position: number
 }
 
+export { projectStoredFields } from './stored-data'
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
 
