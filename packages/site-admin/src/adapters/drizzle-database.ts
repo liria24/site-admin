@@ -63,9 +63,10 @@ const runD1Batch = async (instance: D1Database, statements: AtomicStatement[]): 
 const runTransaction = (
     database: Awaited<ReturnType<Database['getInstance']>>,
     statements: AtomicStatement[],
+    mode: 'read' | 'write',
 ): AtomicResult[] => {
     // Native SQLite is synchronous: do not yield inside the transaction, since the app also uses this connection.
-    database.exec!('BEGIN IMMEDIATE')
+    database.exec!(mode === 'read' ? 'BEGIN' : 'BEGIN IMMEDIATE')
     try {
         const results: AtomicResult[] = []
         for (const statement of statements) {
@@ -92,7 +93,11 @@ const runTransaction = (
     }
 }
 
-export const runAtomic = async (database: Database, statements: AtomicStatement[]): Promise<AtomicResult[]> => {
+export const runAtomic = async (
+    database: Database,
+    statements: AtomicStatement[],
+    mode: 'read' | 'write' = 'write',
+): Promise<AtomicResult[]> => {
     if (statements.length === 0) return []
     // ponytail: one lock per native connection favors correctness; split reader connections if measured contention demands it.
     return withLock(database.lockKey, async () => {
@@ -104,7 +109,7 @@ export const runAtomic = async (database: Database, statements: AtomicStatement[
                 'Site Admin requires SQLite transactions or the native Cloudflare D1 batch API.',
             )
         }
-        return runTransaction(instance, statements)
+        return runTransaction(instance, statements, mode)
     })
 }
 
