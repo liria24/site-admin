@@ -379,20 +379,19 @@ export class SiteAdmin<Context = unknown> {
         const definition = this.#model(entry.model)
         const revision = await this.#revision(revisionId, entryId)
         const prepared = await this.#prepareRevision(definition, revision)
-        await this.#assertPublishableRelations(definition, prepared.relations, entryId)
         const restoredRevisionId = this.#id()
         const time = this.#now()
         await this.#commit({
             conditions: [
                 this.#guard(entryId, input.expectedVersion),
-                ...this.#referenceGuard(definition, prepared, true),
+                ...this.#referenceGuard(definition, prepared, false),
             ],
             revisions: [
                 this.#revisionCandidate({
                     ...(input.actorId ? { actorId: input.actorId } : {}),
                     ...prepared,
                     entryId,
-                    model: definition,
+                    model: entry.model,
                     revisionId: restoredRevisionId,
                     slug: revision.slug,
                     time,
@@ -552,14 +551,12 @@ export class SiteAdmin<Context = unknown> {
         assets: IndexedReference[]
         data: Record<string, unknown>
         entryId: string
-        model: ModelDefinition
+        model: string
         revisionId: string
         slug: string
         time: string
         relations: IndexedReference[]
     }): StorageRevisionCandidate {
-        const modelName = Object.entries(this.config.models).find(([, definition]) => definition === input.model)?.[0]
-        if (!modelName) throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Unknown content Model.')
         return {
             id: input.revisionId,
             entryId: input.entryId,
@@ -567,10 +564,10 @@ export class SiteAdmin<Context = unknown> {
             createdAt: input.time,
             data: input.data,
             slug: input.slug,
-            model: modelName,
+            model: input.model,
             assets: input.assets,
             relations: input.relations.map((reference) => {
-                const field = fieldAtPath(input.model.fields, reference.path)
+                const field = fieldAtPath(this.#model(input.model).fields, reference.path)
                 return { ...reference, required: field?.kind === 'relation' && field.required === true }
             }),
         }
@@ -637,66 +634,80 @@ export class SiteAdmin<Context = unknown> {
     }
 
     async #reconcileRoutes(): Promise<void> {
-        const routes = await this.#storage.routes()
-        const rows = await this.#publishedRows()
-        const graph = await this.#publicSnapshot(rows)
-        const routesByEntry = new Map<string, RouteRow[]>()
-        for (const route of routes) {
-            const list = routesByEntry.get(route.entryId) ?? []
-            list.push(route)
-            routesByEntry.set(route.entryId, list)
-        }
-        const statements: StorageRouteChange[] = []
-        for (const entryId of routesByEntry.keys()) {
-            const row = graph.get(entryId)
-            const definition = row && this.#publicModel(row.model)
-            if (!row || !definition?.route || this.#options.routing?.enabled === false) {
-                statements.push({ kind: 'remove', entryId })
-                routesByEntry.delete(entryId)
+        for (let attempt = 0; ; attempt++) {
+            const generation = await this.#storage.publicGeneration()
+            const routes = await this.#storage.routes()
+            const rows = await this.#publishedRows()
+            const graph = await this.#publicSnapshot(rows)
+            const routesByEntry = new Map<string, RouteRow[]>()
+            for (const route of routes) {
+                const list = routesByEntry.get(route.entryId) ?? []
+                list.push(route)
+                routesByEntry.set(route.entryId, list)
             }
-        }
-        const time = this.#now()
-        for (const row of rows) {
-            if (!graph.has(row.id)) continue
-            const definition = this.#publicModel(row.model)
-            if (!definition?.route || this.#options.routing?.enabled === false) continue
-            const data = row.data
-            const redirect = routeRedirect(definition, data)
-            if (redirect && this.#options.routing?.redirects === false) {
-                if (routesByEntry.has(row.id)) {
-                    statements.push({ kind: 'remove', entryId: row.id })
+            const statements: StorageRouteChange[] = []
+            for (const entryId of routesByEntry.keys()) {
+                const row = graph.get(entryId)
+                const definition = row && this.#publicModel(row.model)
+                if (!row || !definition?.route || this.#options.routing?.enabled === false) {
+                    statements.push({ kind: 'remove', entryId })
+                    routesByEntry.delete(entryId)
                 }
-                continue
             }
-            const basePath = entryPath(row.model, definition, row.slug, this.#apiBases())
-            if (!basePath) continue
-            const path = this.#localizedPath(definition, basePath, row.locale)
-            const current = routesByEntry
-                .get(row.id)
-                ?.find((route) => route.kind === 'page' || route.kind === 'redirect')
-            if (
-                current?.path === path &&
-                current.locale === row.locale &&
-                current.revisionId === row.revisionId &&
-                current.kind === (redirect ? 'redirect' : 'page') &&
-                current.targetPath === (redirect?.target ?? null) &&
-                current.status === (redirect?.status ?? null)
-            )
-                continue
-            statements.push(
-                ...(await this.#routeChanges({
-                    data,
-                    definition,
-                    entryId: row.id,
-                    locale: row.locale,
-                    modelName: row.model,
-                    revisionId: row.revisionId,
-                    slug: row.slug,
-                    time,
-                })),
-            )
+            const time = this.#now()
+            for (const row of rows) {
+                if (!graph.has(row.id)) continue
+                const definition = this.#publicModel(row.model)
+                if (!definition?.route || this.#options.routing?.enabled === false) continue
+                const data = row.data
+                const redirect = routeRedirect(definition, data)
+                if (redirect && this.#options.routing?.redirects === false) {
+                    if (routesByEntry.has(row.id)) {
+                        statements.push({ kind: 'remove', entryId: row.id })
+                    }
+                    continue
+                }
+                const basePath = entryPath(row.model, definition, row.slug, this.#apiBases())
+                if (!basePath) continue
+                const path = this.#localizedPath(definition, basePath, row.locale)
+                const current = routesByEntry
+                    .get(row.id)
+                    ?.find((route) => route.kind === 'page' || route.kind === 'redirect')
+                if (
+                    current?.path === path &&
+                    current.locale === row.locale &&
+                    current.revisionId === row.revisionId &&
+                    current.kind === (redirect ? 'redirect' : 'page') &&
+                    current.targetPath === (redirect?.target ?? null) &&
+                    current.status === (redirect?.status ?? null)
+                )
+                    continue
+                statements.push(
+                    ...(await this.#routeChanges({
+                        data,
+                        definition,
+                        entryId: row.id,
+                        locale: row.locale,
+                        modelName: row.model,
+                        revisionId: row.revisionId,
+                        slug: row.slug,
+                        time,
+                    })),
+                )
+            }
+            if (statements.length === 0) return
+            try {
+                await this.#commit({
+                    conditions: [{ kind: 'publicGeneration', generation }],
+                    routes: statements,
+                    publicGeneration: true,
+                })
+                return
+            } catch (error) {
+                if (!(error instanceof SiteAdminError) || error.code !== 'SITE_ADMIN_CONFLICT' || attempt >= 2)
+                    throw error
+            }
         }
-        if (statements.length > 0) await this.#commit({ routes: statements, publicGeneration: true })
     }
 
     #commit(input: StorageContentCommit): Promise<void> {
@@ -760,7 +771,7 @@ export class SiteAdmin<Context = unknown> {
                     ...(input.actorId ? { actorId: input.actorId } : {}),
                     ...prepared,
                     entryId: id,
-                    model: definition,
+                    model: modelName,
                     revisionId,
                     slug,
                     time,
@@ -815,7 +826,7 @@ export class SiteAdmin<Context = unknown> {
                     ...(input.actorId ? { actorId: input.actorId } : {}),
                     ...prepared,
                     entryId,
-                    model: definition,
+                    model: entry.model,
                     revisionId,
                     slug,
                     time,
@@ -938,7 +949,7 @@ export class SiteAdmin<Context = unknown> {
                               ...(input.actorId ? { actorId: input.actorId } : {}),
                               ...prepared,
                               entryId: entry.id,
-                              model: definition,
+                              model: entry.model,
                               revisionId,
                               slug,
                               time,

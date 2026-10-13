@@ -109,6 +109,12 @@ export const sqliteStorage = (
             switch (value.kind) {
                 case 'entryVersion':
                     break
+                case 'publicGeneration':
+                    clauses.push(
+                        "CAST(COALESCE((SELECT value FROM site_admin_meta WHERE key='public_generation'),'0') AS INTEGER)=?",
+                    )
+                    params.push(value.generation)
+                    break
                 case 'assetsReady':
                     if (value.ids.length) {
                         clauses.push(
