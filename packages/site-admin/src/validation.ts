@@ -179,8 +179,7 @@ export const fieldAtPath = (fields: FieldRecord, path: string): AnyField | undef
     let current = fields
     for (const part of path.split('.')) {
         if (part === '$markdown') continue
-        if (/^\d+$/u.test(part)) {
-            if (field?.kind !== 'array') return undefined
+        if (field?.kind === 'array' && /^\d+$/u.test(part)) {
             field = field.item
             if (field.kind === 'object') current = field.fields
             continue

@@ -103,6 +103,8 @@ export function createMemoryDatabase() {
         [...state.revisions.values()].some((revision) => revision.assets.some((ref) => ref.id === id))
     const condition = (value: StorageCondition) => {
         switch (value.kind) {
+            case 'publicGeneration':
+                return state.generation === value.generation
             case 'entryVersion': {
                 const entry = state.entries.get(value.id)
                 return entry?.version === value.version && (value.model === undefined || entry.model === value.model)

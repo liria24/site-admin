@@ -8,7 +8,7 @@ import type { SiteAdminConfig } from '../packages/site-admin/src/config'
 import { Files } from 'files-sdk'
 import { memory } from 'files-sdk/memory'
 import { createSiteAdmin, handleManagementRequest } from '../packages/site-admin/src/server'
-import { defineSiteAdminConfig, text, file, relation, array } from '../packages/site-admin/src'
+import { defineSiteAdminConfig, text, file, relation, array, object } from '../packages/site-admin/src'
 import { migrateTestDatabase, testAdapter } from './migrate'
 import { createMemoryDatabase } from './memory-storage'
 import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
@@ -159,6 +159,168 @@ async function graph(storage: SiteAdminStorage) {
 }
 for (const kind of ['memory', 'sqlite', 'd1'] as const)
     describe(`${kind} domain storage conformance`, () => {
+        it('guards all commit effects with the public generation, including the initial generation', async () => {
+            const { core, storage } = await setup(kind)
+            await storage.commit({ conditions: [{ kind: 'publicGeneration', generation: 0 }], publicGeneration: true })
+            let entry = await core.createEntry('posts', { data: { title: 'Keep' } })
+            entry = await core.publishEntry(entry.id, { expectedVersion: entry.version })
+            const before = await graph(storage)
+            await expect(
+                storage.commit({
+                    conditions: [{ kind: 'publicGeneration', generation: 0 }],
+                    routes: [{ kind: 'remove', entryId: entry.id }],
+                    updates: [{ id: entry.id, patch: { publishedRevisionId: null } }],
+                    publicGeneration: true,
+                }),
+            ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
+            expect(await graph(storage)).toEqual(before)
+        })
+        it('audit: retries route reconciliation after two interleaved publications', async () => {
+            const { core, storage } = await setup(kind)
+            let entry = await core.createEntry('posts', { slug: 'original', data: { title: 'Original' } })
+            entry = await core.publishEntry(entry.id, { expectedVersion: entry.version })
+            const routes = storage.routes.bind(storage),
+                published = storage.published.bind(storage)
+            let readRoutes = false,
+                readPublished = false
+            storage.routes = async (filter) => {
+                const result = await routes(filter)
+                if (!filter && !readRoutes) {
+                    readRoutes = true
+                    entry = await core.publishEntry(entry.id, {
+                        expectedVersion: entry.version,
+                        draft: { slug: 'middle', data: { title: 'Middle' } },
+                    })
+                }
+                return result
+            }
+            storage.published = async (filter) => {
+                const result = await published(filter)
+                if (!readPublished) {
+                    readPublished = true
+                    entry = await core.publishEntry(entry.id, {
+                        expectedVersion: entry.version,
+                        draft: { slug: 'latest', data: { title: 'Latest' } },
+                    })
+                }
+                return result
+            }
+            const restarted = createSiteAdmin({ config, database: { bind: () => storage } })
+            await restarted.initialize()
+            expect(await routes({ entryId: entry.id, kinds: ['page'] })).toMatchObject([
+                { path: '/posts/latest', revisionId: entry.publishedRevisionId },
+            ])
+            expect(await routes({ entryId: entry.id, kinds: ['historical'] })).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({ path: '/posts/original', targetPath: '/posts/latest' }),
+                    expect.objectContaining({ path: '/posts/middle', targetPath: '/posts/latest' }),
+                ]),
+            )
+            expect((await restarted.getPublicEntry('posts', entry.id, 'en'))?.data.title).toBe('Latest')
+        })
+        it('audit: stores revisions under the requested model when definitions are shared', async () => {
+            const shared = { fields: { title: text({ required: true }) } }
+            const definition = defineSiteAdminConfig({ models: { a: shared, b: shared } })
+            const storage = (await backend(kind, definition)).bind(definition)
+            const core = createSiteAdmin({ config: definition, database: { bind: () => storage } })
+            const models: string[] = [],
+                commit = storage.commit.bind(storage)
+            storage.commit = async (input) => {
+                models.push(...(input.revisions ?? []).map((revision) => revision.model))
+                return commit(input)
+            }
+            let entry = await core.createEntry('b', { data: { title: 'Original' } })
+            const original = entry.revisionId
+            entry = await core.updateEntry(entry.id, { expectedVersion: entry.version, data: { title: 'Edited' } })
+            entry = await core.publishEntry(entry.id, {
+                expectedVersion: entry.version,
+                draft: { data: { title: 'Published' } },
+            })
+            entry = await core.restoreRevision(entry.id, original, { expectedVersion: entry.version })
+            expect(entry.data).toEqual({ title: 'Original' })
+            expect((await core.getPublicEntry('b', entry.id))?.data.title).toBe('Published')
+            entry = await core.schedulePublish(entry.id, {
+                expectedVersion: entry.version,
+                at: '2099-01-01T00:00:00Z',
+                draft: { data: { title: 'Scheduled' } },
+            })
+            expect(entry.data).toEqual({ title: 'Scheduled' })
+            expect(models).toEqual(['b', 'b', 'b', 'b', 'b'])
+        })
+        it('audit: restores a draft with an unpublished required relation while preserving CAS and publication', async () => {
+            const { core, storage } = await setup(kind)
+            const parent = await core.createEntry('parents', { data: { title: 'Draft parent' } })
+            let publicParent = await core.createEntry('parents', { data: { title: 'Public parent' } })
+            publicParent = await core.publishEntry(publicParent.id, { expectedVersion: publicParent.version })
+            let entry = await core.createEntry('dependencies', { data: { requiredParent: parent.id } })
+            const original = entry.revisionId
+            entry = await core.updateEntry(entry.id, {
+                expectedVersion: entry.version,
+                data: { requiredParent: publicParent.id },
+            })
+            entry = await core.publishEntry(entry.id, { expectedVersion: entry.version })
+            const generation = await storage.publicGeneration()
+            const restored = await core.restoreRevision(entry.id, original, { expectedVersion: entry.version })
+            expect(restored.data).toEqual({ requiredParent: parent.id })
+            expect(restored.currentRevisionId).not.toBe(original)
+            expect(restored.publishedRevisionId).toBe(entry.publishedRevisionId)
+            expect((await core.getPublicEntry('dependencies', entry.id))?.data.requiredParent).toMatchObject({
+                id: publicParent.id,
+            })
+            expect(await storage.publicGeneration()).toBe(generation)
+            await expect(
+                core.restoreRevision(entry.id, original, { expectedVersion: entry.version }),
+            ).rejects.toMatchObject({
+                code: 'SITE_ADMIN_CONFLICT',
+            })
+            expect(await core.listRevisions(entry.id)).toHaveLength(3)
+            await expect(core.publishEntry(entry.id, { expectedVersion: restored.version })).rejects.toMatchObject({
+                code: 'SITE_ADMIN_RELATION_BLOCKED',
+            })
+        })
+        for (const [path, fields, data] of [
+            ['1', { '1': relation('parents', { required: true }) }, (id: string) => ({ '1': id })],
+            [
+                'nested.1',
+                { nested: object({ '1': relation('parents', { required: true }) }) },
+                (id: string) => ({ nested: { '1': id } }),
+            ],
+            [
+                'items.0.1',
+                { items: array(object({ '1': relation('parents', { required: true }) })) },
+                (id: string) => ({ items: [{ '1': id }] }),
+            ],
+        ] as const) {
+            it(`audit: checks the target model of numeric relation field ${path}`, async () => {
+                const definition = defineSiteAdminConfig({
+                    models: { posts: { fields }, parents: { fields: {} }, other: { fields: {} } },
+                })
+                const core = createSiteAdmin({ config: definition, database: await backend(kind, definition) })
+                const wrong = await core.createEntry('other', { data: {} })
+                await expect(core.createEntry('posts', { data: data(wrong.id) })).rejects.toMatchObject({
+                    code: 'SITE_ADMIN_INVALID_INPUT',
+                    issues: [{ path, message: 'Expected a parents entry.' }],
+                })
+                expect(await core.listEntries('posts')).toEqual([])
+            })
+            it(`audit: requires publication of numeric relation field ${path}`, async () => {
+                const definition = defineSiteAdminConfig({ models: { posts: { fields }, parents: { fields: {} } } })
+                const core = createSiteAdmin({ config: definition, database: await backend(kind, definition) })
+                let parent = await core.createEntry('parents', { data: {} })
+                const entry = await core.createEntry('posts', { data: data(parent.id) })
+                await expect(core.publishEntry(entry.id, { expectedVersion: entry.version })).rejects.toMatchObject({
+                    code: 'SITE_ADMIN_RELATION_BLOCKED',
+                    issues: [{ path }],
+                })
+                parent = await core.publishEntry(parent.id, { expectedVersion: parent.version })
+                await core.publishEntry(entry.id, { expectedVersion: entry.version })
+                await expect(core.unpublishEntry(parent.id, { expectedVersion: parent.version })).rejects.toMatchObject(
+                    {
+                        code: 'SITE_ADMIN_RELATION_BLOCKED',
+                    },
+                )
+            })
+        }
         it('accepts 512 code points and rejects raw or lowercase-expanded queries before preparation', async () => {
             const { core, storage, database } = await setup(kind)
             await core.createEntry('posts', { data: { title: 'a'.repeat(512) + '😀'.repeat(512) + 'İ'.repeat(256) } })

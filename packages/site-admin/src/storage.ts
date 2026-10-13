@@ -57,6 +57,7 @@ export interface StorageRoute {
 }
 export type StorageCondition =
     | { kind: 'entryVersion'; id: string; version: number; model?: string }
+    | { kind: 'publicGeneration'; generation: number }
     | { kind: 'assetsReady'; ids: readonly string[] }
     | { kind: 'relations'; targets: readonly { id: string; model: string; published: boolean }[] }
     | { kind: 'noRequiredPublicReferences'; id: string; models: readonly string[] }
