@@ -321,10 +321,10 @@ export const verifyPublicDataConsumer = async (tarball, { browser = true } = {})
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolvePath(tarball)}`,
-                    nuxt: '4.6.0',
+                    nuxt: '4.6.1',
                     typescript: '7.0.2',
-                    vue: '3.6.0-rc.9',
-                    '@types/node': '26.6.4',
+                    vue: '3.6.0-rc.11',
+                    '@types/node': '26.6.5',
                 },
                 overrides: { vue: '$vue' },
             }),

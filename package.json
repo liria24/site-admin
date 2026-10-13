@@ -29,26 +29,26 @@
         "@better-auth/drizzle-adapter": "^1.7.7",
         "@liria24/site-admin": "workspace:*",
         "@nuxt/test-utils": "4.3.3",
-        "@nuxtjs/better-auth": "^0.3.7",
+        "@nuxtjs/better-auth": "^0.3.9",
         "@nuxtjs/i18n": "^10.6.0",
-        "@takumi-rs/core": "^2.14.0",
+        "@takumi-rs/core": "^2.15.2",
         "@tanstack/vue-form": "2.0.0-alpha.2",
-        "@types/node": "^26.6.4",
-        "@vue/compiler-sfc": "3.6.0-rc.9",
-        "ai": "^7.0.128",
+        "@types/node": "^26.6.5",
+        "@vue/compiler-sfc": "3.6.0-rc.11",
+        "ai": "^7.0.138",
         "better-auth": "^1.7.7",
-        "cf": "1.0.0-beta.12",
+        "cf": "1.0.0-beta.16",
         "comark": "^0.7.0",
         "db0": "^0.4.1",
         "drizzle-kit": "1.0.0-rc.4",
         "drizzle-orm": "1.0.0-rc.4",
-        "files-sdk": "^2.6.2",
+        "files-sdk": "^3.1.0",
         "h3": "^1.15.11",
         "jiti": "^2.7.0",
-        "knip": "6.39.0",
+        "knip": "6.41.0",
         "nitropack": "2.13.4",
-        "nuxt": "4.6.0",
-        "nuxt-files-sdk": "^0.2.0",
+        "nuxt": "4.6.1",
+        "nuxt-files-sdk": "^0.3.0",
         "pathe": "^2.0.3",
         "pkg-pr-new": "0.0.90",
         "publint": "^0.3.25",
@@ -59,9 +59,9 @@
         "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
         "vite-plus": "1.1.0",
         "vitest": "5.0.3",
-        "vue": "3.6.0-rc.9",
-        "wrangler": "^4.147.0",
-        "zod": "^4.6.5"
+        "vue": "3.6.0-rc.11",
+        "wrangler": "^4.150.0",
+        "zod": "^4.6.7"
     },
     "overrides": {
         "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
@@ -70,8 +70,8 @@
     "engines": {
         "node": "^24.11.0 || >=26.0.0"
     },
-    "packageManager": "bun@1.4.2",
+    "packageManager": "bun@1.4.3",
     "patchedDependencies": {
-        "nuxt@4.6.0": "patches/nuxt@4.6.0.patch"
+        "nuxt@4.6.1": "patches/nuxt@4.6.1.patch"
     }
 }

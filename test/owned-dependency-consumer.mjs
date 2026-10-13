@@ -38,10 +38,10 @@ export const verifyOwnedDependencies = async (tarball) => {
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolve(tarball).replaceAll('\\', '/')}`,
-                    '@types/node': '26.6.4',
-                    nuxt: '4.6.0',
+                    '@types/node': '26.6.5',
+                    nuxt: '4.6.1',
                     typescript: '7.0.2',
-                    vue: '3.6.0-rc.9',
+                    vue: '3.6.0-rc.11',
                 },
                 overrides: { vue: '$vue' },
             }),

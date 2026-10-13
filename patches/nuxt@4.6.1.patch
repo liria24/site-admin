@@ -1,8 +1,8 @@
 diff --git a/dist/app/composables/asyncData.js b/dist/app/composables/asyncData.js
-index b22b0f4cbf3842c23090c308ea7de982e6f8c8a5..344d661bfc966c0ffef45e8e8b1b0a74cf9d026e 100644
+index cda82b5ad30d734fc54ffe0411059d9743da8b69..620d9fa10a99fed6a64cd5193671090aa9c008d1 100644
 --- a/dist/app/composables/asyncData.js
 +++ b/dist/app/composables/asyncData.js
-@@ -93,8 +93,16 @@ function _createUseAsyncData(options = {}) {
+@@ -94,8 +94,16 @@
  				const existing = nuxtApp._asyncData[key.value];
  				if (!existing?._init) {
  					initialFetchOptions.cachedData = opts.getCachedData(key.value, nuxtApp, { cause: "initial" });
@@ -21,7 +21,7 @@ index b22b0f4cbf3842c23090c308ea7de982e6f8c8a5..344d661bfc966c0ffef45e8e8b1b0a74
  				} else if (nuxtApp._asyncDataPromises[key.value]) initialFetchOptions.cachedData = existing._initialCachedData;
  				return () => nuxtApp._asyncData[key.value].execute(initialFetchOptions);
  			}
-@@ -163,8 +171,15 @@ function _createUseAsyncData(options = {}) {
+@@ -164,8 +172,15 @@
  							const cachedData = opts.getCachedData(newKey, nuxtApp, { cause: "initial" });
  							initialFetchOptions.cachedData = cachedData;
  							const initialValue = oldKey && hadData && cachedData === void 0 ? nuxtApp._asyncData[oldKey].data.value : cachedData;

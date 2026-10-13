@@ -93,7 +93,7 @@ describe('verification-only Nuxt 4.6 compatibility patch', () => {
         await withPackage(unknown, async ({ directory, target, unrelated, manifest }) => {
             const manifestBefore = await readFile(manifest)
             await expect(applyNuxt46VerificationPatch(directory)).rejects.toThrow(
-                'Unknown Nuxt 4.6.0 asyncData source.',
+                'Unknown Nuxt 4.6.1 asyncData source.',
             )
             expect(await readFile(target)).toEqual(Buffer.from(unknown))
             expect(await readFile(unrelated)).toEqual(Buffer.from(variants.original))
@@ -101,13 +101,13 @@ describe('verification-only Nuxt 4.6 compatibility patch', () => {
         })
     })
 
-    it.each(['4.6.1', '4.6.0-rc.1'])('rejects Nuxt %s before changing package bytes', async (version) => {
+    it.each(['4.6.0', '4.6.2'])('rejects Nuxt %s before changing package bytes', async (version) => {
         await withPackage(
             variants.original,
             async ({ directory, target, unrelated, manifest }) => {
                 const manifestBefore = await readFile(manifest)
                 await expect(applyNuxt46VerificationPatch(directory)).rejects.toThrow(
-                    'Nuxt compatibility patch requires exactly Nuxt 4.6.0.',
+                    'Nuxt compatibility patch requires exactly Nuxt 4.6.1.',
                 )
                 expect(await readFile(target)).toEqual(Buffer.from(variants.original))
                 expect(await readFile(unrelated)).toEqual(Buffer.from(variants.original))
