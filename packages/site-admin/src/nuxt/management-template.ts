@@ -19,7 +19,6 @@ import type { SiteAdminEntry, SiteAdminEntryPage, SiteAdminFormModels, SiteAdmin
 import { presentSiteAdminData } from '@liria24/site-admin/client'
 import type { ModelDescriptor, SiteAdminDescriptor } from '@liria24/site-admin'
 import { clearNuxtData, refreshNuxtData, useNuxtApp${options.auth ? ', useUserSession' : ''} } from '#imports'
-import { watch } from 'vue'
 
 type ManagementModelName = Extract<keyof SiteAdminFormModels, string>
 type FormData<Name extends ManagementModelName> = Extract<SiteAdminFormModels[Name], Record<string, unknown>>
@@ -116,7 +115,7 @@ export const createNuxtSiteAdminManagementClient = <Models extends { [Name in ke
 export const useSiteAdminModels = (connection: SiteAdminManagementClientOptions, auth: MaybeRefOrGetter<string>, immediate = true) => {
   const client = createNuxtSiteAdminManagementClient(connection, auth)
   const key = computed(() => siteAdminManagementKey(connection, toValue(auth), 'models', null, null))
-  return siteAdminAsyncData(() => key.value, (_app, { signal }) => client.models({ signal }), { dedupe: 'defer', immediate })
+  return siteAdminAttachAsyncData(() => key.value, (_app, { signal }) => client.models({ signal }), { dedupe: 'defer', immediate })
 }
 
 export const siteAdminReadModels = async (source: ReturnType<typeof useSiteAdminModels>, auth: MaybeRefOrGetter<string>, signal: AbortSignal): Promise<SiteAdminDescriptor> => {
@@ -148,7 +147,7 @@ export function useSiteAdminManagementEntry(model: ManagementModelName, id: Mayb
   const modelsSource = useSiteAdminModels(connection, auth, false)
   const key = computed(() => siteAdminManagementKey(connection, auth.value, 'entry', model, toValue(id), locale.value))
   const { authScope: _auth, locale: _locale, limit: _limit, offset: _offset, q: _q, ...asyncOptions } = options
-  return siteAdminAsyncData(() => key.value, async (_app, { signal }) => {
+  return siteAdminAttachAsyncData(() => key.value, async (_app, { signal }) => {
     const requestedId = toValue(id)
     const requestedLocale = locale.value
     const [models, entry] = await Promise.all([siteAdminReadModels(modelsSource, auth, signal), client.getEntry(requestedId, { signal })])
@@ -168,7 +167,7 @@ export function useSiteAdminManagementList(model: ManagementModelName, options: 
   const query = computed(() => ({ ...(locale.value === undefined ? {} : { locale: locale.value }), ...(toValue(options.limit) === undefined ? {} : { limit: toValue(options.limit)! }), ...(toValue(options.offset) === undefined ? {} : { offset: toValue(options.offset)! }), ...(toValue(options.q) === undefined ? {} : { q: toValue(options.q)! }) }))
   const key = computed(() => siteAdminManagementKey(connection, auth.value, 'list', model, query.value, locale.value))
   const { authScope: _auth, locale: _locale, limit: _limit, offset: _offset, q: _q, ...asyncOptions } = options
-  return siteAdminAsyncData(() => key.value, async (_app, { signal }) => {
+  return siteAdminAttachAsyncData(() => key.value, async (_app, { signal }) => {
     const [models, page] = await Promise.all([siteAdminReadModels(modelsSource, auth, signal), client.listEntries(model, { ...query.value, signal })])
     signal.throwIfAborted()
     const descriptor = siteAdminModelDescriptor(models, model)

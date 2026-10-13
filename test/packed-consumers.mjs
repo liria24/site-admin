@@ -8,9 +8,8 @@ import { fileURLToPath } from 'node:url'
 
 import { verifyStandalone } from './standalone-consumer.mjs'
 import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
-import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
+import { assertStockNuxtAsyncData, verifyPublicDataConsumer } from './public-data-consumer.mjs'
 import { assertAiOmitted } from './assert-ai-omitted.mjs'
-import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
@@ -49,7 +48,6 @@ const install = async (cwd = temporary, production = false) => {
         ],
         cwd,
     )
-    if (!production) await applyNuxt46VerificationPatch(cwd)
     return result
 }
 const exec = (args, cwd = temporary) =>
@@ -223,6 +221,7 @@ export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], siteAdm
     )
 
     await install()
+    await assertStockNuxtAsyncData(temporary)
     exec(['tsc', '--noEmit'])
     run(process.execPath, ['core.ts'])
     run(process.execPath, [

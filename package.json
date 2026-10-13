@@ -70,8 +70,5 @@
     "engines": {
         "node": "^24.11.0 || >=26.0.0"
     },
-    "packageManager": "bun@1.4.3",
-    "patchedDependencies": {
-        "nuxt@4.6.1": "patches/nuxt@4.6.1.patch"
-    }
+    "packageManager": "bun@1.4.3"
 }

@@ -157,7 +157,7 @@ const nativeEnvironment = async (
     }
     const helpers = new Function(
         ...Object.keys(dependencies),
-        `${generated}; return { ${aiActions ? 'useAiAction,' : ''} useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminReadModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
+        `${generated}; return { ${aiActions ? 'useAiAction,' : ''} siteAdminAttachAsyncData, useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminReadModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
     )(...Object.values(dependencies)) as Helpers
     const states = new Map<string, Vue.Ref<unknown>>()
     const formDependencies = {

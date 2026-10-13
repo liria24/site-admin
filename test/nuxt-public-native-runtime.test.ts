@@ -112,9 +112,10 @@ it.each(['completed', 'during', 'transition'] as const)(
                 isHydrating: true,
             }
             const environment = await nativeNuxtDependencies(app, { purgeCachedData: true })
-            const nativeAsyncData = new Function(...Object.keys(environment), `${nativeSource}; return useAsyncData`)(
-                ...Object.values(environment),
-            ) as unknown
+            const nativeRuntime = new Function(
+                ...Object.keys(environment),
+                `${nativeSource}; return { useAsyncData, clearNuxtData }`,
+            )(...Object.values(environment)) as { useAsyncData: unknown; clearNuxtData: (key: string) => void }
             const generated = generatedRuntimeSource(
                 siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/api/_admin', origin }),
                 { asyncData: true },
@@ -126,15 +127,25 @@ it.each(['completed', 'during', 'transition'] as const)(
                 'SiteAdminClientError',
                 'computed',
                 'toValue',
+                'useNuxtApp',
+                'watch',
+                'onScopeDispose',
+                'queuePostFlushCb',
+                'clearNuxtData',
                 `${generated}; return { entry: useSiteAdminEntry, list: useSiteAdminList }`,
             ) as (...dependencies: unknown[]) => Helpers
             const helpers = initialize(
-                nativeAsyncData,
+                nativeRuntime.useAsyncData,
                 createSiteAdminClient,
                 createSiteAdminManagementClient,
                 SiteAdminClientError,
                 Vue.computed,
                 Vue.toValue,
+                () => app,
+                Vue.watch,
+                Vue.onScopeDispose,
+                Vue.queuePostFlushCb,
+                nativeRuntime.clearNuxtData,
             )
             const slug = Vue.ref('ssr')
             const locale = Vue.ref('ja')
