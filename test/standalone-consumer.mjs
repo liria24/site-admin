@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { consumerDependencies } from './consumer-dependencies.mjs'
 
 export const verifyStandalone = async (tarball) => {
     const cwd = await mkdtemp(join(tmpdir(), 'site-admin-core-only-'))
@@ -10,7 +11,10 @@ export const verifyStandalone = async (tarball) => {
         JSON.stringify({
             private: true,
             type: 'module',
-            dependencies: { '@liria24/site-admin': 'file:' + tarball.replaceAll('\\', '/'), typescript: '7.0.2' },
+            dependencies: {
+                '@liria24/site-admin': 'file:' + tarball.replaceAll('\\', '/'),
+                ...consumerDependencies(['typescript']),
+            },
         }),
     )
     const run = (command, args) => {

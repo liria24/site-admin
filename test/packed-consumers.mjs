@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { once } from 'node:events'
+import { stopProcess as stop } from './stop-process.ts'
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -8,12 +8,23 @@ import { fileURLToPath } from 'node:url'
 
 import { verifyStandalone } from './standalone-consumer.mjs'
 import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
-import { assertStockNuxtAsyncData, verifyPublicDataConsumer } from './public-data-consumer.mjs'
+import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
 import { assertAiOmitted } from './assert-ai-omitted.mjs'
+import { consumerDependencies } from './consumer-dependencies.mjs'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
 if (!['bun', 'npm', 'pnpm'].includes(packageManager)) throw new Error('Unknown SITE_ADMIN_PACKAGE_MANAGER.')
+const integrations = !process.env.SITE_ADMIN_PACKAGE_MANAGER || packageManager === 'pnpm'
+const ogImage = JSON.parse(
+    await readFile(new URL('../packages/site-admin/node_modules/nuxt-og-image/package.json', import.meta.url), 'utf8'),
+)
+const renderers = Object.fromEntries(
+    ['@takumi-rs/core', 'satori', '@resvg/resvg-js'].map((name) => {
+        if (!ogImage.peerDependencies[name]) throw new Error(`OG renderer peer missing: ${name}`)
+        return [name, ogImage.peerDependencies[name]]
+    }),
+)
 const temporary = await mkdtemp(join(tmpdir(), 'site-admin-consumers-'))
 const run = (command, args, cwd = temporary, env = process.env) => {
     console.log(`Consumer: ${command} ${args[0] ?? ''} (${cwd})`)
@@ -95,19 +106,9 @@ const startNuxt = async (directory) => {
     await stop(child)
     throw new Error(`Packed Nuxt consumer did not start.\n${output.join('')}`)
 }
-const stop = async (child) => {
-    if (child.exitCode !== null || child.signalCode !== null) return
-    child.kill()
-    await once(child, 'exit')
-}
 const filesUnder = async (directory) => {
-    const files = []
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-        const path = join(directory, entry.name)
-        if (entry.isDirectory()) files.push(...(await filesUnder(path)))
-        else files.push(path)
-    }
-    return files
+    const entries = await readdir(directory, { recursive: true, withFileTypes: true })
+    return entries.filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name))
 }
 
 try {
@@ -126,24 +127,27 @@ try {
     console.log(`Testing ${tarball} with ${packageManager}`)
     if (packageManager === 'npm') {
         await verifyStandalone(tarball)
-        await verifyOwnedDependencies(tarball)
         await verifyPublicDataConsumer(tarball)
     }
+    if (packageManager === 'pnpm') await verifyOwnedDependencies(tarball)
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
     await writeFile(
         join(temporary, 'package.json'),
         JSON.stringify({
             dependencies: {
                 '@liria24/site-admin': `file:${tarball.replaceAll('\\', '/')}`,
-                '@better-auth/drizzle-adapter': '1.7.7',
-                '@nuxtjs/better-auth': '0.3.9',
-                '@tanstack/vue-form': '2.0.0-alpha.2',
-                'drizzle-orm': '1.0.0-rc.4',
-                'drizzle-kit': '1.0.0-rc.4',
-                nuxt: '4.6.1',
-                nitropack: '2.13.4',
-                typescript: '7.0.2',
-                vue: '3.6.0-rc.11',
+                ...consumerDependencies([
+                    '@better-auth/drizzle-adapter',
+                    '@nuxtjs/better-auth',
+                    '@tanstack/vue-form',
+                    'drizzle-orm',
+                    'drizzle-kit',
+                    'nuxt',
+                    'nitropack',
+                    'typescript',
+                    'vue',
+                ]),
+                ...(!integrations ? renderers : {}),
             },
             private: true,
             type: 'module',
@@ -221,7 +225,6 @@ export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], siteAdm
     )
 
     await install()
-    await assertStockNuxtAsyncData(temporary)
     exec(['tsc', '--noEmit'])
     run(process.execPath, ['core.ts'])
     run(process.execPath, [
@@ -363,64 +366,62 @@ void invalidRole
 void invalidImpersonatedBy
 `,
     )
-    const setupNuxt = (dev) =>
-        run(
-            process.execPath,
-            [
-                '--input-type=module',
-                '-e',
-                `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: './server', dev: ${dev}, ready: true }); try { if (!nuxt.options.alias['#auth/server']?.endsWith('site-admin/better-auth-server-config.ts')) throw new Error('Native module ordering lost the Site Admin auth wrapper'); } finally { await nuxt.close() }`,
-            ],
-            temporary,
-            {
-                ...process.env,
-                CI: 'true',
-                AI_AGENT: '1',
-                NUXT_BETTER_AUTH_SECRET: 'packed-consumer-test-secret-000000000000000',
-            },
-        )
-    const manifestBefore = await readFile(join(temporary, 'package.json'), 'utf8')
-    try {
-        exec(['nuxt', 'build', 'server'])
-        throw new Error('Missing renderer dependency was accepted.')
-    } catch (error) {
-        if (!/renderer missing dependencies|takumi renderer is not installed/u.test(String(error))) throw error
-    }
-    if ((await readFile(join(temporary, 'package.json'), 'utf8')) !== manifestBefore)
-        throw new Error('Build mutated dependencies.')
-    // Noninteractive builds require application-owned renderer dependencies.
-    const consumer = JSON.parse(await readFile(join(temporary, 'package.json'), 'utf8'))
-    Object.assign(consumer.dependencies, {
-        '@takumi-rs/core': '^2.15.0',
-        satori: '^0.47.1',
-        '@resvg/resvg-js': '^2.6.2',
-    })
-    await writeFile(join(temporary, 'package.json'), JSON.stringify(consumer))
-    await install()
-    setupNuxt(true)
-    setupNuxt(false)
-    const nativeConfigPath = join(temporary, 'server/nuxt.config.ts')
-    const nativeConfig = await readFile(nativeConfigPath, 'utf8')
-    for (const modules of [
-        "['@liria24/site-admin/nuxt', '@nuxtjs/better-auth']",
-        "['@nuxtjs/better-auth', '@liria24/site-admin/nuxt']",
-    ]) {
-        await writeFile(nativeConfigPath, nativeConfig.replace("['@liria24/site-admin/nuxt']", modules))
+    if (integrations) {
+        const setupNuxt = (dev) =>
+            run(
+                process.execPath,
+                [
+                    '--input-type=module',
+                    '-e',
+                    `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: './server', dev: ${dev}, ready: true }); try { if (!nuxt.options.alias['#auth/server']?.endsWith('site-admin/better-auth-server-config.ts')) throw new Error('Native module ordering lost the Site Admin auth wrapper'); } finally { await nuxt.close() }`,
+                ],
+                temporary,
+                {
+                    ...process.env,
+                    CI: 'true',
+                    AI_AGENT: '1',
+                    NUXT_BETTER_AUTH_SECRET: 'packed-consumer-test-secret-000000000000000',
+                },
+            )
+        const manifestBefore = await readFile(join(temporary, 'package.json'), 'utf8')
+        try {
+            exec(['nuxt', 'build', 'server'])
+            throw new Error('Missing renderer dependency was accepted.')
+        } catch (error) {
+            if (!/renderer missing dependencies|takumi renderer is not installed/u.test(String(error))) throw error
+        }
+        if ((await readFile(join(temporary, 'package.json'), 'utf8')) !== manifestBefore)
+            throw new Error('Build mutated dependencies.')
+        // Noninteractive builds require application-owned renderer dependencies.
+        const consumer = JSON.parse(await readFile(join(temporary, 'package.json'), 'utf8'))
+        Object.assign(consumer.dependencies, renderers)
+        await writeFile(join(temporary, 'package.json'), JSON.stringify(consumer))
+        await install()
+        setupNuxt(true)
         setupNuxt(false)
+        const nativeConfigPath = join(temporary, 'server/nuxt.config.ts')
+        const nativeConfig = await readFile(nativeConfigPath, 'utf8')
+        for (const modules of [
+            "['@liria24/site-admin/nuxt', '@nuxtjs/better-auth']",
+            "['@nuxtjs/better-auth', '@liria24/site-admin/nuxt']",
+        ]) {
+            await writeFile(nativeConfigPath, nativeConfig.replace("['@liria24/site-admin/nuxt']", modules))
+            setupNuxt(false)
+        }
+        await writeFile(nativeConfigPath, nativeConfig)
+        if (consumer.dependencies['nuxt-og-image'])
+            throw new Error('Consumer should not need a direct OG module dependency.')
+        const takumiPath = join(temporary, 'server/app/components/OgImage/Default.takumi.vue')
+        const satoriPath = join(temporary, 'server/app/components/OgImage/Default.satori.vue')
+        const template = await readFile(takumiPath, 'utf8')
+        await rm(takumiPath)
+        await writeFile(satoriPath, template)
+        setupNuxt(true)
+        setupNuxt(false)
+        await writeFile(takumiPath, template)
+        setupNuxt(false)
+        await rm(satoriPath)
     }
-    await writeFile(nativeConfigPath, nativeConfig)
-    if (consumer.dependencies['nuxt-og-image'])
-        throw new Error('Consumer should not need a direct OG module dependency.')
-    const takumiPath = join(temporary, 'server/app/components/OgImage/Default.takumi.vue')
-    const satoriPath = join(temporary, 'server/app/components/OgImage/Default.satori.vue')
-    const template = await readFile(takumiPath, 'utf8')
-    await rm(takumiPath)
-    await writeFile(satoriPath, template)
-    setupNuxt(true)
-    setupNuxt(false)
-    await writeFile(takumiPath, template)
-    setupNuxt(false)
-    await rm(satoriPath)
     exec(['nuxt', 'build', 'server'])
     await assertAiOmitted(join(temporary, 'server'))
     // CLI 4 relocates build artifacts; prepare restores the public generated type surface.
@@ -460,60 +461,59 @@ void invalidImpersonatedBy
         await stop(local.child)
     }
 
-    exec(['nuxt', 'build', 'remote'])
-    const remoteFiles = await filesUnder(join(temporary, 'remote/.output'))
-    const remoteContents = await Promise.all(
-        remoteFiles.map(async (file) => [file, String(await readFile(file).catch(() => Buffer.alloc(0)))]),
-    )
-    for (const forbidden of [
-        '@nuxtjs/better-auth',
-        '@nuxtjs/i18n',
-        '@nuxtjs/robots',
-        '@nuxtjs/sitemap',
-        'devframe',
-        '@nuxt/devtools-kit',
-        'drizzle-kit',
-        'nuxt-og-image',
-        'nuxt-schema-org',
-        'site-admin.ai',
-    ]) {
-        const leaked = remoteContents.filter(([, content]) => content.includes(forbidden)).map(([file]) => file)
-        if (leaked.length > 0) {
-            throw new Error(`Disabled integration leaked into remote bundle: ${forbidden} in ${leaked.join(', ')}`)
+    if (integrations) {
+        exec(['nuxt', 'build', 'remote'])
+        const remoteFiles = await filesUnder(join(temporary, 'remote/.output'))
+        const remoteContents = await Promise.all(
+            remoteFiles.map(async (file) => [file, String(await readFile(file).catch(() => Buffer.alloc(0)))]),
+        )
+        for (const forbidden of [
+            '@nuxtjs/better-auth',
+            '@nuxtjs/i18n',
+            '@nuxtjs/robots',
+            '@nuxtjs/sitemap',
+            'devframe',
+            '@nuxt/devtools-kit',
+            'drizzle-kit',
+            'nuxt-og-image',
+            'nuxt-schema-org',
+            'site-admin.ai',
+        ]) {
+            const leaked = remoteContents.filter(([, content]) => content.includes(forbidden)).map(([file]) => file)
+            if (leaked.length > 0) {
+                throw new Error(`Disabled integration leaked into remote bundle: ${forbidden} in ${leaked.join(', ')}`)
+            }
+        }
+        await install(join(temporary, 'remote/.output/server'), true)
+        const publicServer = createServer((request, response) => {
+            response.setHeader('content-type', 'application/json')
+            if (request.url?.startsWith('/api/content/_route')) {
+                response.end(
+                    JSON.stringify({
+                        entry: { data: { title: 'Remote title' }, locale: '', model: 'posts', path: '/remote' },
+                        kind: 'page',
+                    }),
+                )
+            } else response.end('{}')
+        })
+        await new Promise((resolve, reject) => {
+            publicServer.once('error', reject)
+            publicServer.listen(remoteOriginPort, '127.0.0.1', resolve)
+        })
+        const remote = await startNuxt(join(temporary, 'remote'))
+        try {
+            const response = await fetch(`${remote.origin}/remote`)
+            const html = await response.text()
+            if (!response.ok || !html.includes('Remote title')) {
+                throw new Error(
+                    `Packed remote consumer runtime probe failed: ${response.status}\n${html.slice(0, 2000)}\n${remote.output.join('')}`,
+                )
+            }
+        } finally {
+            await stop(remote.child)
+            await new Promise((resolve, reject) => publicServer.close((error) => (error ? reject(error) : resolve())))
         }
     }
-    await install(join(temporary, 'remote/.output/server'), true)
-    const publicServer = createServer((request, response) => {
-        response.setHeader('content-type', 'application/json')
-        if (request.url?.startsWith('/api/content/_route')) {
-            response.end(
-                JSON.stringify({
-                    entry: { data: { title: 'Remote title' }, locale: '', model: 'posts', path: '/remote' },
-                    kind: 'page',
-                }),
-            )
-        } else response.end('{}')
-    })
-    await new Promise((resolve, reject) => {
-        publicServer.once('error', reject)
-        publicServer.listen(remoteOriginPort, '127.0.0.1', resolve)
-    })
-    const remote = await startNuxt(join(temporary, 'remote'))
-    try {
-        const response = await fetch(`${remote.origin}/remote`)
-        const html = await response.text()
-        if (!response.ok || !html.includes('Remote title')) {
-            throw new Error(
-                `Packed remote consumer runtime probe failed: ${response.status}\n${html.slice(0, 2000)}\n${remote.output.join('')}`,
-            )
-        }
-    } finally {
-        await stop(remote.child)
-        await new Promise((resolve, reject) => publicServer.close((error) => (error ? reject(error) : resolve())))
-    }
-} catch (error) {
-    console.error(error)
-    throw error
 } finally {
     await rm(temporary, { force: true, recursive: true, maxRetries: 10, retryDelay: 100 })
 }

@@ -9,10 +9,18 @@ runs:
     steps:
         - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
           with:
-              node-version: 24
+              node-version: 24.21.0
         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
           with:
               bun-version-file: package.json
+        - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+          with:
+              path: |
+                  ~/.bun/install/cache
+                  ~/.npm
+                  ~/.local/share/pnpm/store
+              key: downloads-${{ runner.os }}-${{ hashFiles('bun.lock', '.github/actions/setup/action.yml') }}
+              restore-keys: downloads-${{ runner.os }}-
         - shell: bash
           env:
               IGNORE_SCRIPTS: ${{ inputs.ignore-scripts }}

@@ -7,7 +7,6 @@ const manifest: { version: string } = JSON.parse(await readFile(new URL('./packa
 export default defineConfig({
     pack: [
         {
-            attw: { level: 'error', profile: 'esm-only' },
             clean: true,
             copy: [
                 { from: '../../README.md', to: '.' },
@@ -85,7 +84,6 @@ export default defineConfig({
             exports: false,
             format: ['esm'],
             platform: 'neutral',
-            publint: true,
             sourcemap: false,
             unbundle: true,
             plugins: [

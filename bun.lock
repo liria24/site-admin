@@ -29,6 +29,7 @@
         "nitropack": "2.13.4",
         "nuxt": "4.6.1",
         "nuxt-files-sdk": "^0.3.0",
+        "nuxt-og-image": "^7.0.6",
         "pathe": "^2.0.3",
         "pkg-pr-new": "0.0.91",
         "publint": "^0.3.25",

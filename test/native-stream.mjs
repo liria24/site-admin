@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { once } from 'node:events'
+import { stopProcess } from './stop-process.ts'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
@@ -214,11 +214,5 @@ try {
     console.error(output.join(''))
     throw error
 } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-        const exited = once(child, 'exit')
-        const force = setTimeout(() => child.kill('SIGKILL'), 5000)
-        child.kill()
-        await exited
-        clearTimeout(force)
-    }
+    await stopProcess(child)
 }
