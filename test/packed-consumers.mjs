@@ -8,9 +8,8 @@ import { fileURLToPath } from 'node:url'
 
 import { verifyStandalone } from './standalone-consumer.mjs'
 import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
-import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
+import { assertStockNuxtAsyncData, verifyPublicDataConsumer } from './public-data-consumer.mjs'
 import { assertAiOmitted } from './assert-ai-omitted.mjs'
-import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
 
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
@@ -49,7 +48,6 @@ const install = async (cwd = temporary, production = false) => {
         ],
         cwd,
     )
-    if (!production) await applyNuxt46VerificationPatch(cwd)
     return result
 }
 const exec = (args, cwd = temporary) =>
@@ -138,14 +136,14 @@ try {
             dependencies: {
                 '@liria24/site-admin': `file:${tarball.replaceAll('\\', '/')}`,
                 '@better-auth/drizzle-adapter': '1.7.7',
-                '@nuxtjs/better-auth': '0.3.7',
+                '@nuxtjs/better-auth': '0.3.9',
                 '@tanstack/vue-form': '2.0.0-alpha.2',
                 'drizzle-orm': '1.0.0-rc.4',
                 'drizzle-kit': '1.0.0-rc.4',
-                nuxt: '4.6.0',
+                nuxt: '4.6.1',
                 nitropack: '2.13.4',
                 typescript: '7.0.2',
-                vue: '3.6.0-rc.9',
+                vue: '3.6.0-rc.11',
             },
             private: true,
             type: 'module',
@@ -223,6 +221,7 @@ export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], siteAdm
     )
 
     await install()
+    await assertStockNuxtAsyncData(temporary)
     exec(['tsc', '--noEmit'])
     run(process.execPath, ['core.ts'])
     run(process.execPath, [

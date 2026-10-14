@@ -5,9 +5,17 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
-
 const wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
+/** Bun patchedDependencies never rewrite a consumer's peer Nuxt. The packed install must stay stock 4.6.1. */
+export const assertStockNuxtAsyncData = async (directory) => {
+    const source = await readFile(join(directory, 'node_modules/nuxt/dist/app/composables/asyncData.js'), 'utf8')
+    assert.equal(
+        source.includes('const candidate = buildAsyncData'),
+        false,
+        'A packed consumer must not receive the site-admin Nuxt patch.',
+    )
+    assert.match(source, /nuxtApp\._asyncData\[key\.value\] = buildAsyncData\(/)
+}
 const listen = (server) =>
     new Promise((resolve, reject) => {
         server.once('error', reject)
@@ -321,17 +329,17 @@ export const verifyPublicDataConsumer = async (tarball, { browser = true } = {})
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolvePath(tarball)}`,
-                    nuxt: '4.6.0',
+                    nuxt: '4.6.1',
                     typescript: '7.0.2',
-                    vue: '3.6.0-rc.9',
-                    '@types/node': '26.6.4',
+                    vue: '3.6.0-rc.11',
+                    '@types/node': '26.6.5',
                 },
                 overrides: { vue: '$vue' },
             }),
         )
         console.log('Public data consumer: isolated packed installation')
         run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'])
-        await applyNuxt46VerificationPatch(directory)
+        await assertStockNuxtAsyncData(directory)
         await put(
             'nuxt.config.ts',
             `import { defineNuxtConfig } from 'nuxt/config'

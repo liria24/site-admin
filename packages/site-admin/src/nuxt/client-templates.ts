@@ -87,7 +87,7 @@ const publicDataOverloads = (kind: 'Entry' | 'List', summary = false): string =>
         .join('\n')
 }
 
-/** Native factory options and return values are forwarded without a second cache or watch layer. */
+/** One native AsyncData owns each key. Callers share that subscription instead of constructing it again. */
 const siteAdminNuxtPublicDataTemplate = (
     options: SiteAdminClientTemplateOptions,
 ): string => `import { createUseAsyncData } from '#app/composables/asyncData'
@@ -95,7 +95,7 @@ import type { AsyncData, AsyncDataOptions, AsyncDataOptionsWithTransform, KeysOf
 import type { NuxtError } from '#app'
 import type { SiteAdminPublicModels, SiteAdminPublicSummaryModels } from '@liria24/site-admin/client'
 import type { SiteAdminIssue } from '@liria24/site-admin'
-import { computed, nextTick, toValue, type MaybeRefOrGetter } from 'vue'
+import { computed, nextTick, onScopeDispose, queuePostFlushCb, toValue, watch, type MaybeRefOrGetter } from 'vue'
 
 type PublicModelName = Extract<keyof SiteAdminPublicModels, string>
 type SiteAdminAsyncDataError<ErrorData> = ErrorData extends Error | NuxtError ? ErrorData : NuxtError<ErrorData>
@@ -105,6 +105,120 @@ export interface SiteAdminLocaleOptions {
 
 // Nuxt's factory macro must remain an exported top-level declaration.
 export const siteAdminAsyncData = createUseAsyncData()
+
+type SiteAdminSharedAsyncEntry = {
+  data: { value: unknown }
+  pending: { value: boolean }
+  error: { value: unknown }
+  status: { value: string }
+  execute: (opts?: { cause?: string; dedupe?: 'cancel' | 'defer' | undefined }) => Promise<unknown>
+  _deps: number
+  _init: boolean
+  _off: () => void
+  _execute?: (opts?: { cause?: string; dedupe?: 'cancel' | 'defer' }) => Promise<unknown>
+  _abortController?: AbortController | undefined
+}
+type SiteAdminSharedNuxtApp = ReturnType<typeof useNuxtApp> & {
+  _asyncData: Record<string, SiteAdminSharedAsyncEntry | undefined>
+  _asyncDataPromises: Record<string, Promise<unknown> | undefined>
+}
+
+/** One native subscription per key. Further callers only attach, so Nuxt never builds the same key twice. */
+export const siteAdminAttachAsyncData = (keySource: MaybeRefOrGetter<string>, handler: (nuxtApp: unknown, context: { signal: AbortSignal }) => Promise<unknown>, options: Record<string, unknown> = {}) => {
+  const nuxtApp = useNuxtApp() as SiteAdminSharedNuxtApp
+  const key = computed(() => toValue(keySource))
+  const { watch: watchSources, ...asyncOptions } = options
+  const dedupe = asyncOptions.dedupe === 'cancel' || asyncOptions.dedupe === 'defer' ? asyncOptions.dedupe : undefined
+  let attached = key.value
+  let manual = false
+  const release = (name: string) => {
+    const data = nuxtApp._asyncData[name]
+    if (!data?._deps) return
+    data._deps--
+    if (data._deps === 0) data._off()
+  }
+  const existing = nuxtApp._asyncData[attached]
+  const created = existing?._init ? undefined : (siteAdminAsyncData(() => key.value, handler as never, asyncOptions as never) as AsyncData<any, any>)
+  if (existing?._init) {
+    existing._deps++
+    manual = true
+    onScopeDispose(() => { if (manual) release(attached) })
+    if (options.immediate !== false && existing.status.value !== 'success' && !nuxtApp._asyncDataPromises[attached]) {
+      existing.execute(dedupe ? { cause: 'initial', dedupe } : { cause: 'initial' })
+    }
+  }
+  const follow = (newKey: string, oldKey?: string) => {
+    if (!manual || !newKey || newKey === attached) return true
+    const next = nuxtApp._asyncData[newKey]
+    if (!next?._init) return false
+    next._deps++
+    const previous = oldKey ? nuxtApp._asyncData[oldKey] : undefined
+    const hadData = previous?.data.value !== undefined
+    const wasRunning = oldKey ? nuxtApp._asyncDataPromises[oldKey] !== undefined : false
+    release(attached)
+    attached = newKey
+    if (!nuxtApp._asyncDataPromises[newKey] && next.status.value !== 'pending' && (options.immediate !== false || hadData || wasRunning)) {
+      next.execute(dedupe ? { cause: 'initial', dedupe } : { cause: 'initial' })
+    }
+    return true
+  }
+  let keyChanging = false
+  if (!import.meta.server && (manual || watchSources)) watch(key, (newKey, oldKey) => {
+    keyChanging = true
+    queuePostFlushCb(() => { keyChanging = false })
+    if (!manual || !newKey || newKey === oldKey) return
+    if (follow(newKey, oldKey)) return
+    queuePostFlushCb(() => {
+      if (!manual) return
+      const current = key.value
+      if (!current || follow(current, oldKey)) return
+      manual = false
+      release(attached)
+      attached = current
+      siteAdminAsyncData(() => key.value, handler as never, asyncOptions as never)
+    })
+  }, { flush: 'sync' })
+  if (!import.meta.server && watchSources) watch(watchSources as object, () => {
+    if (keyChanging) return
+    nuxtApp._asyncData[key.value]?._execute?.(dedupe ? { cause: 'watch', dedupe } : { cause: 'watch' })
+  })
+  const enabled = options.enabled
+  if (!import.meta.server && manual && (typeof enabled === 'function' || (typeof enabled === 'object' && enabled))) watch(() => typeof enabled === 'function' ? enabled() : (enabled as { value: boolean }).value, (isEnabled) => {
+    const entry = nuxtApp._asyncData[key.value]
+    if (isEnabled || !entry || !nuxtApp._asyncDataPromises[key.value]) return
+    entry._abortController?.abort(new DOMException("AsyncData request cancelled by \`enabled: false\`", "AbortError"))
+    entry._abortController = undefined
+    delete nuxtApp._asyncDataPromises[key.value]
+    entry.status.value = 'idle'
+  })
+  if (created) return created
+  const readRef = (pick: 'data' | 'pending' | 'status' | 'error') => computed({
+    get: () => nuxtApp._asyncData[key.value]?.[pick]?.value,
+    set: (value) => {
+      const target = nuxtApp._asyncData[key.value]?.[pick]
+      if (target) target.value = value
+    },
+  })
+  const asyncReturn = {
+    data: readRef('data'),
+    pending: readRef('pending'),
+    status: readRef('status'),
+    error: readRef('error'),
+    refresh: (...args: [{ cause?: string; dedupe?: 'cancel' | 'defer'; signal?: AbortSignal; cachedData?: unknown; timeout?: number }?]) => nuxtApp._asyncData[key.value]?.execute(...args) ?? Promise.resolve(),
+    execute: (...args: [{ cause?: string; dedupe?: 'cancel' | 'defer'; signal?: AbortSignal; cachedData?: unknown; timeout?: number }?]) => asyncReturn.refresh(...args),
+    clear: () => {
+      const current = key.value
+      const entry = nuxtApp._asyncData[current]
+      if (entry?._abortController) {
+        try { entry._abortController.abort(new DOMException('AsyncData aborted by user.', 'AbortError')) }
+        finally { entry._abortController = undefined }
+      }
+      clearNuxtData(current)
+    },
+  }
+  const asyncDataPromise = Promise.resolve(nuxtApp._asyncDataPromises[key.value]).then(() => asyncReturn)
+  return Object.assign(asyncDataPromise, asyncReturn) as unknown as AsyncData<any, any>
+}
 
 const useSiteAdminLocale = (provided: SiteAdminLocaleOptions['locale']) => {
   ${options.i18n ? 'const i18n = useNuxtApp().$i18n' : ''}
@@ -121,7 +235,7 @@ export function useSiteAdminEntry(model: PublicModelName, slugOrId: MaybeRefOrGe
   const locale = useSiteAdminLocale(options.locale)
   const key = computed(() => siteAdminDataKey(clientOptions, 'entry', model, toValue(slugOrId), locale.value))
   const { locale: _locale, ...asyncOptions } = options
-  return siteAdminAsyncData(() => key.value, (_app, { signal }) => {
+  return siteAdminAttachAsyncData(() => key.value, (_app, { signal }) => {
     const effectiveLocale = locale.value
     return client.get(model, toValue(slugOrId), { signal, ...(effectiveLocale === undefined ? {} : { locale: effectiveLocale }) })
   }, asyncOptions)
@@ -135,7 +249,7 @@ export function useSiteAdminList(model: PublicModelName, options: AsyncDataOptio
   const locale = useSiteAdminLocale(options.locale)
   const key = computed(() => siteAdminDataKey(clientOptions, 'list', model, null, locale.value, options.markdown))
   const { locale: _locale, markdown: _markdown, ...asyncOptions } = options
-  return siteAdminAsyncData(() => key.value, (_app, { signal }): Promise<SiteAdminPublicModels[PublicModelName][] | SiteAdminPublicSummaryModels[keyof SiteAdminPublicSummaryModels][]> => {
+  return siteAdminAttachAsyncData(() => key.value, (_app, { signal }): Promise<SiteAdminPublicModels[PublicModelName][] | SiteAdminPublicSummaryModels[keyof SiteAdminPublicSummaryModels][]> => {
     const effectiveLocale = locale.value
     const request = { signal, ...(effectiveLocale === undefined ? {} : { locale: effectiveLocale }) }
     if (options.markdown === 'summary') return client.list<PublicModelName & keyof SiteAdminPublicSummaryModels>(model, { ...request, markdown: 'summary' })
@@ -153,7 +267,7 @@ export function useSiteAdminBatch(requests: MaybeRefOrGetter<Record<string, Site
   const snapshot = computed(() => siteAdminSnapshotBatchRequests(toValue(requests)))
   const key = computed(() => siteAdminBatchDataKey(clientOptions, snapshot.value, locale.value))
   const { locale: _locale, ...asyncOptions } = options
-  return siteAdminAsyncData(() => key.value, (_app, { signal }) =>
+  return siteAdminAttachAsyncData(() => key.value, (_app, { signal }) =>
     siteAdminResolveBatch(client, snapshot.value, locale.value, signal), asyncOptions)
 }
 `
@@ -241,7 +355,7 @@ export const siteAdminNuxtFormTemplate =
 import type { UseSiteAdminFormOptions, SiteAdminFormActionNames } from '@liria24/site-admin/form'
 import type { SiteAdminFormModels, SiteAdminManagementModels, SiteAdminEntry } from '@liria24/site-admin/client'
 import { SiteAdminClientError } from '@liria24/site-admin/client'
-import { siteAdminManagementClientOptions, createNuxtSiteAdminManagementClient, useSiteAdminAuthScope, useSiteAdminModels, siteAdminReadModels, siteAdminAsyncData, siteAdminManagementKey } from '#build/site-admin/client'
+import { siteAdminManagementClientOptions, createNuxtSiteAdminManagementClient, useSiteAdminAuthScope, useSiteAdminModels, siteAdminReadModels, siteAdminAttachAsyncData, siteAdminManagementKey } from '#build/site-admin/client'
 import { useNuxtApp, useState } from '#imports'
 import * as Vue from 'vue'
 
@@ -275,7 +389,7 @@ export function useSiteAdminForm(modelOrOptions: string | UseSiteAdminFormOption
   Vue.watch(id, (value) => { readId.value = value }, { flush: 'sync' })
   const key = Vue.computed(() => siteAdminManagementKey(requestOptions, auth.value, 'form-entry', modelOrOptions, readId.value, Vue.toValue(options.locale)))
   // Dedicated raw source: transform/pick/default options cannot alter form initialization.
-  const entrySource = options.entry ? undefined : siteAdminAsyncData(() => key.value, async (_app, { signal }) => ({ entry: readId.value === null ? null : await management.getEntry(readId.value, { signal }) }))
+  const entrySource = options.entry ? undefined : siteAdminAttachAsyncData(() => key.value, async (_app, { signal }) => ({ entry: readId.value === null ? null : await management.getEntry(readId.value, { signal }) }))
   // Vue's native async-setup helper is exported at runtime but omitted from its public declarations.
   const withAsyncContext = (Vue as typeof Vue & {
     withAsyncContext?: <Value>(callback: () => Promise<Value>) => [Promise<Value>, () => void]

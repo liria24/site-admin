@@ -5,8 +5,6 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { applyNuxt46VerificationPatch } from './nuxt-compatibility.ts'
-
 /** Strict packed consumer: only Site Admin owns the seven public dependency namespaces. */
 export const verifyOwnedDependencies = async (tarball) => {
     const directory = await mkdtemp(join(tmpdir(), 'site-admin-owned-consumer-'))
@@ -38,17 +36,16 @@ export const verifyOwnedDependencies = async (tarball) => {
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolve(tarball).replaceAll('\\', '/')}`,
-                    '@types/node': '26.6.4',
-                    nuxt: '4.6.0',
+                    '@types/node': '26.6.5',
+                    nuxt: '4.6.1',
                     typescript: '7.0.2',
-                    vue: '3.6.0-rc.9',
+                    vue: '3.6.0-rc.11',
                 },
                 overrides: { vue: '$vue' },
             }),
         )
         console.log('Owned consumer: isolated nested npm installation')
         run('npm', ['install', '--ignore-scripts', '--install-strategy=nested', '--no-audit', '--no-fund'])
-        await applyNuxt46VerificationPatch(directory)
         await put(
             'check-owned.mjs',
             `

@@ -14,7 +14,7 @@
     "updateNotScheduled": true,
     "ignoreScripts": true,
     "constraints": {
-        "bun": "1.4.2"
+        "bun": "1.4.3"
     },
     "lockFileMaintenance": {
         "enabled": false
@@ -111,14 +111,14 @@
         {
             "description": "Preserve the existing prerelease series",
             "matchDepNames": ["@vue/compiler-sfc"],
-            "matchCurrentValue": "3.6.0-rc.9",
+            "matchCurrentValue": "3.6.0-rc.11",
             "allowedVersions": "/^3\\.6\\.\\d+-rc(?:[.\\d-]|$)/",
             "dependencyDashboardApproval": true
         },
         {
             "description": "Preserve the existing prerelease series",
             "matchDepNames": ["cf"],
-            "matchCurrentValue": "1.0.0-beta.12",
+            "matchCurrentValue": "1.0.0-beta.16",
             "allowedVersions": "/^1\\.0\\.\\d+-beta(?:[.\\d-]|$)/",
             "dependencyDashboardApproval": true
         },
@@ -139,14 +139,14 @@
         {
             "description": "Preserve the existing prerelease series",
             "matchDepNames": ["vue"],
-            "matchCurrentValue": "3.6.0-rc.9",
+            "matchCurrentValue": "3.6.0-rc.11",
             "allowedVersions": "/^3\\.6\\.\\d+-rc(?:[.\\d-]|$)/",
             "dependencyDashboardApproval": true
         },
         {
             "description": "Preserve the existing prerelease series",
             "matchDepNames": ["@nuxt/devtools-kit"],
-            "matchCurrentValue": "4.0.0-beta.3",
+            "matchCurrentValue": "4.0.0-beta.5",
             "allowedVersions": "/^4\\.0\\.\\d+-beta(?:[.\\d-]|$)/",
             "dependencyDashboardApproval": true
         },

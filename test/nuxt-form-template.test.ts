@@ -55,7 +55,7 @@ const generatedForm = (
             if (modelsState.error.value) throw modelsState.error.value
             return modelsState.data.value!
         },
-        siteAdminAsyncData: (
+        siteAdminAttachAsyncData: (
             _key: unknown,
             handler: (_app: unknown, context: { signal: AbortSignal }) => Promise<unknown>,
         ) => asyncData(() => handler({}, { signal: new AbortController().signal })),

@@ -35,6 +35,11 @@ export const nativeNuxtDependencies = async (app: object, { purgeCachedData = fa
         useNuxtApp: () => app,
         createError,
         debounceTick,
+        // Nuxt 4.6.1 calls its client prefetch stub, separate from Vue's onServerPrefetch.
+        onServerPrefetch$1: (target?: object) => {
+            const instance = (target ?? Vue.getCurrentInstance()) as { sp?: unknown[] } | null
+            if (instance && !instance.sp) instance.sp = []
+        },
         asyncDataDefaults: { deep: false },
         granularCachedData: true,
         pendingWhenIdle: false,

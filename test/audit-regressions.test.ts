@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
-import { Files, type Body, type StoredFile, type UploadOptions } from 'files-sdk'
+import { Files, type Body, type FileInfo, type UploadOptions } from 'files-sdk'
 import { memory } from 'files-sdk/memory'
 import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
 import { createSiteAdmin, handleManagementRequest, handlePublicRequest } from '../packages/site-admin/src/server'
@@ -10,7 +10,7 @@ import { prepareUpload } from '../packages/site-admin/src/server/upload'
 import { createMigratedTestAdmin, migrateTestDatabase, testAdapter } from './migrate'
 
 const databases: Database[] = []
-type SingleUpload = { upload: (key: string, body: Body, options?: UploadOptions) => Promise<StoredFile> }
+type SingleUpload = { upload: (key: string, body: Body, options?: UploadOptions) => Promise<FileInfo> }
 afterEach(async () => {
     vi.restoreAllMocks()
     await Promise.all(databases.splice(0).map((db) => db.dispose()))
@@ -148,7 +148,7 @@ it('streams beyond 10 MB with backpressure and incremental checksums', async () 
             expect(produced * chunk.length - consumed).toBeLessThanOrEqual(chunk.length * 2)
             await new Promise((resolve) => setTimeout(resolve, 1))
         }
-        return { size: consumed } as StoredFile
+        return { key: 'large.bin', size: consumed, contentType: 'application/octet-stream' } satisfies FileInfo
     })
     const body = new ReadableStream<Uint8Array>(
         {
