@@ -9,9 +9,7 @@ export default defineConfig({
     includeLocked: true,
     ignorePaths: ['**/node_modules/**'],
     ignoreOtherWorkspaces: true,
-    // The internal Nitro 2 session/stream and development-server adapters require h3 v1.
-    // Upgrade these together with the target Vite+ migrator.
-    exclude: ['h3@>=2', 'vite', 'vite-plus', 'vitest'],
+    exclude: ['h3@>=2', 'vite', 'vite-plus'],
     depFields: {
         overrides: false,
         'bun-workspace': true,
