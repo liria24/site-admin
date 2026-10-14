@@ -391,8 +391,8 @@ void invalidImpersonatedBy
     // Noninteractive builds require application-owned renderer dependencies.
     const consumer = JSON.parse(await readFile(join(temporary, 'package.json'), 'utf8'))
     Object.assign(consumer.dependencies, {
-        '@takumi-rs/core': '^2.14.0',
-        satori: '^0.33.5',
+        '@takumi-rs/core': '^2.15.0',
+        satori: '^0.47.1',
         '@resvg/resvg-js': '^2.6.2',
     })
     await writeFile(join(temporary, 'package.json'), JSON.stringify(consumer))

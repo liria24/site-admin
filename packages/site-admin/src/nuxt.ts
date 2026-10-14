@@ -153,6 +153,10 @@ const installOnce = async (name: string, nuxt: Nuxt, options: Record<string, unk
         const modulesDir = resolve(dirname(manifest), 'node_modules')
         if (!nuxt.options.modulesDir.includes(modulesDir)) nuxt.options.modulesDir.push(modulesDir)
     }
+    // Dynamically installed SEO modules do not pass through Nuxt's moduleDependencies graph.
+    if (['nuxt-schema-org', 'nuxt-seo-utils', '@nuxtjs/sitemap', '@nuxtjs/robots', 'nuxt-og-image'].includes(name)) {
+        await installOnce('nuxt-site-config', nuxt)
+    }
     await installModule(path, options, nuxt)
 }
 
