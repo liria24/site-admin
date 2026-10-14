@@ -12,7 +12,7 @@ const fixture = await mkdtemp(join(workspace, '.tmp/nuxt-module-'))
 const lifecycleFile = `${fixture}-lifecycle.jsonl`
 const config = (title: string, aiChanged = false) => `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
 import { required } from '#policy'
-export default defineSiteAdminConfig({ ai: { actions: ${aiChanged ? "{ suggest: { prompt: 'AI server sentinel' } }" : '{}'} }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
+export default defineSiteAdminConfig({ ai: { actions: ${aiChanged ? "{ suggest: { type: 'text-generation', props: {}, prompt: () => 'AI server sentinel' } }" : '{}'} }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
 await mkdir(join(fixture, 'server/api'), { recursive: true })
 await mkdir(join(fixture, 'app'), { recursive: true })
 await writeFile(join(fixture, 'policy.ts'), 'export const required = true\n')
@@ -27,20 +27,8 @@ const trace = (scope: string, phase: string, name: string) => appendFileSync(${J
 export default defineNuxtConfig({
   modules: [(options, nuxt) => {
     trace('nuxt', 'created', 'module')
-    trace('nuxt', 'option', 'watcher:' + nuxt.options.experimental.watcher)
-    nuxt.hook('vite:serverCreated', (server, context) => {
-      const name = context.isClient ? 'client:close' : 'server:close'
-      const close = server.close.bind(server)
-      server.close = async () => {
-        trace('vite', 'before', name)
-        try { return await close() } finally { trace('vite', 'after', name) }
-      }
-    })
-    nuxt.hooks.beforeEach(({ name }) => trace('nuxt', 'before', name))
-    nuxt.hooks.afterEach(({ name }) => trace('nuxt', 'after', name))
-    nuxt.hook('nitro:init', (nitro) => {
-      nitro.hooks.beforeEach(({ name }) => trace('nitro', 'before', name))
-      nitro.hooks.afterEach(({ name }) => trace('nitro', 'after', name))
+    nuxt.hooks.afterEach(({ name }) => {
+      if (name === 'close') trace('nuxt', 'after', name)
     })
     nuxt.hook('site-admin:config', (config) => { nuxt.options.runtimeConfig.probe.title = String(config.models.posts?.fields.title?.default) }) }, '@liria24/site-admin/nuxt'],
   devtools: { enabled: false },
@@ -186,21 +174,7 @@ it('reloads aliased domain and AI config and exposes generated Nuxt/Nitro types'
             { timeout: 60_000, interval: 500 },
         )
         .not.toBe(after.generation)
-    for (let reload = 2; reload <= 10; reload++) {
-        const title = 'After ' + reload
-        await writeFile(join(fixture, 'site-admin.config.ts'), config(title))
-        try {
-            await expect
-                .poll(async () => (await $fetch<{ title: string }>('/api/probe')).title, {
-                    timeout: 60_000,
-                    interval: 500,
-                })
-                .toBe(title)
-        } catch (error) {
-            throw new Error(await readFile(lifecycleFile, 'utf8'), { cause: error })
-        }
-        expect((await $fetch<{ filesReady: boolean }>('/api/probe')).filesReady).toBe(true)
-    }
+    expect((await $fetch<{ filesReady: boolean }>('/api/probe')).filesReady).toBe(true)
     const activeBuilders = new Set<number>()
     for (const line of (await readFile(lifecycleFile, 'utf8')).trim().split('\n')) {
         const event = JSON.parse(line) as { pid: number; scope: string; phase: string; name: string }

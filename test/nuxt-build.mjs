@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { once } from 'node:events'
+import { stopProcess } from './stop-process.ts'
 import { access, rm, readdir, readFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
@@ -317,9 +317,5 @@ try {
         throw new Error('Nuxt llms.txt probe failed.')
     }
 } finally {
-    // A startup failure may have emitted exit before cleanup. Preserve its diagnostic.
-    if (server.exitCode === null && server.signalCode === null) {
-        server.kill()
-        await once(server, 'exit')
-    }
+    await stopProcess(server)
 }

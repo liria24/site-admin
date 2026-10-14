@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { once } from 'node:events'
+import { stopProcess } from './stop-process.ts'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { consumerDependencies } from './consumer-dependencies.mjs'
 /** Strict packed consumer: only Site Admin owns the seven public dependency namespaces. */
 export const verifyOwnedDependencies = async (tarball) => {
     const directory = await mkdtemp(join(tmpdir(), 'site-admin-owned-consumer-'))
@@ -13,7 +14,7 @@ export const verifyOwnedDependencies = async (tarball) => {
             cwd: directory,
             encoding: 'utf8',
             env,
-            shell: process.platform === 'win32' && command === 'npm',
+            shell: process.platform === 'win32' && command === 'pnpm',
             maxBuffer: 16 * 1024 * 1024,
         })
         if (result.status !== 0)
@@ -36,16 +37,12 @@ export const verifyOwnedDependencies = async (tarball) => {
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolve(tarball).replaceAll('\\', '/')}`,
-                    '@types/node': '26.6.5',
-                    nuxt: '4.6.1',
-                    typescript: '7.0.2',
-                    vue: '3.6.0-rc.11',
+                    ...consumerDependencies(['@types/node', 'nuxt', 'typescript', 'vue']),
                 },
-                overrides: { vue: '$vue' },
             }),
         )
-        console.log('Owned consumer: isolated nested npm installation')
-        run('npm', ['install', '--ignore-scripts', '--install-strategy=nested', '--no-audit', '--no-fund'])
+        console.log('Owned consumer: isolated pnpm installation')
+        run('pnpm', ['install', '--ignore-scripts', '--no-frozen-lockfile'])
         await put(
             'check-owned.mjs',
             `
@@ -279,13 +276,10 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
             throw new Error('Owned client imports did not render the SSR page.')
         }
         console.log(
-            'Owned dependency packed consumer passed: nested install, CLI, native types, Nuxt app/server/node, browser/server build and empty core-adapter runtime (auth sessions and database writes excluded).',
+            'Owned dependency packed consumer passed: strict pnpm install, CLI, native types, Nuxt app/server/node, browser/server build and empty core-adapter runtime (auth sessions and database writes excluded).',
         )
     } finally {
-        if (server && server.exitCode === null && server.signalCode === null) {
-            server.kill()
-            await once(server, 'exit')
-        }
+        await stopProcess(server)
         await rm(directory, { recursive: true, force: true })
     }
 }

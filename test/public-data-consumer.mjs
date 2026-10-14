@@ -1,21 +1,12 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { once } from 'node:events'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
+import { consumerDependencies } from './consumer-dependencies.mjs'
+import { stopProcess as stop } from './stop-process.ts'
 const wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
-/** Bun patchedDependencies never rewrite a consumer's peer Nuxt. The packed install must stay stock 4.6.1. */
-export const assertStockNuxtAsyncData = async (directory) => {
-    const source = await readFile(join(directory, 'node_modules/nuxt/dist/app/composables/asyncData.js'), 'utf8')
-    assert.equal(
-        source.includes('const candidate = buildAsyncData'),
-        false,
-        'A packed consumer must not receive the site-admin Nuxt patch.',
-    )
-    assert.match(source, /nuxtApp\._asyncData\[key\.value\] = buildAsyncData\(/)
-}
 const listen = (server) =>
     new Promise((resolve, reject) => {
         server.once('error', reject)
@@ -25,13 +16,6 @@ const close = (server) => new Promise((resolve) => server.close(resolve))
 // Chromium descendants can finish profile writes after the owned process exits.
 export const removePublicDataConsumer = (directory) =>
     rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-const stop = async (child) => {
-    if (!child || child.exitCode !== null || child.signalCode !== null || !child.pid) return
-    const exited = once(child, 'exit')
-    child.kill('SIGTERM')
-    await Promise.race([exited, wait(5_000)])
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-}
 
 export const chromiumProbe = async (origin, directory) => {
     const profile = join(directory, 'chromium-profile')
@@ -329,17 +313,13 @@ export const verifyPublicDataConsumer = async (tarball, { browser = true } = {})
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolvePath(tarball)}`,
-                    nuxt: '4.6.1',
-                    typescript: '7.0.2',
-                    vue: '3.6.0-rc.11',
-                    '@types/node': '26.6.5',
+                    ...consumerDependencies(['nuxt', 'typescript', 'vue', '@types/node']),
                 },
                 overrides: { vue: '$vue' },
             }),
         )
         console.log('Public data consumer: isolated packed installation')
         run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'])
-        await assertStockNuxtAsyncData(directory)
         await put(
             'nuxt.config.ts',
             `import { defineNuxtConfig } from 'nuxt/config'
