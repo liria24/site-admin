@@ -27,7 +27,9 @@ const trace = (scope: string, phase: string, name: string) => appendFileSync(${J
 export default defineNuxtConfig({
   modules: [(options, nuxt) => {
     trace('nuxt', 'created', 'module')
-    nuxt.hook('close', () => trace('nuxt', 'after', 'close'))
+    nuxt.hooks.afterEach(({ name }) => {
+      if (name === 'close') trace('nuxt', 'after', name)
+    })
     nuxt.hook('site-admin:config', (config) => { nuxt.options.runtimeConfig.probe.title = String(config.models.posts?.fields.title?.default) }) }, '@liria24/site-admin/nuxt'],
   devtools: { enabled: false },
   alias: { '#policy': fileURLToPath(new URL('./policy.ts', import.meta.url)) },
