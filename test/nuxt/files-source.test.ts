@@ -11,7 +11,6 @@ import { afterEach, expect, test } from 'vite-plus/test'
 
 import {
     resolveSiteAdminFilesSource,
-    resolveSiteAdminFilesModulePath,
     siteAdminFilesModuleDependencies,
 } from '../../packages/site-admin/src/nuxt/files-source'
 
@@ -127,9 +126,6 @@ test.each(['function', 'package', 'path'] as const)(
             ]) {
                 const { nuxt, source } = await start(root, order, kind, options)
                 expect(source).toBe(resolve(root, options.expected))
-                expect((await resolveSiteAdminFilesModulePath(nuxt)).replaceAll('\\', '/')).toBe(
-                    fileURLToPath(import.meta.resolve('nuxt-files-sdk')).replaceAll('\\', '/'),
-                )
                 const selected = nuxt.options.build.templates.find(
                     (template) => template.filename === 'nuxt-files-sdk/selected.ts',
                 )
@@ -200,7 +196,7 @@ test.each(['inline', 'top-level'] as const)(
 )
 
 test.each(['disabled', 'inactive'] as const)(
-    'full Site Admin retains curated Files types when native Files is %s',
+    'full Site Admin leaves Files types to the peer package when native Files is %s',
     async (mode) => {
         const root = await fixture()
         await writeFile(resolve(root, 'site-admin.config.ts'), 'export default { models: {} }')
@@ -235,7 +231,10 @@ test.each(['disabled', 'inactive'] as const)(
         const config = JSON.parse(await readFile(resolve(nuxt.options.buildDir, 'tsconfig.server.json'), 'utf8')) as {
             compilerOptions: { paths: Record<string, string[]> }
         }
-        expect(config.compilerOptions.paths['#files-sdk/memory']?.[0]).toMatch(/index\.d\.ts$/u)
+        // Files owns its native aliases. Site Admin no longer rewrites their declaration paths.
+        if (mode === 'disabled') expect(config.compilerOptions.paths['#files-sdk/memory']).toBeUndefined()
+        else expect(config.compilerOptions.paths['#files-sdk/memory']?.[0]).toMatch(/\/dist\/memory\/index$/u)
+        expect(config.compilerOptions.paths['#ai']).toBeUndefined()
     },
 )
 

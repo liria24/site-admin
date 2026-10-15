@@ -51,7 +51,7 @@ export const createMarkdownContent = (
 ) => {
     const items = new Map(
         entries.map((entry) => [
-            `${definition.route ? entry.slug : entry.id}.json`,
+            `${entry.id}.json`,
             {
                 ...entry.data,
                 _siteAdmin: {
@@ -63,7 +63,6 @@ export const createMarkdownContent = (
                     publishedAt: entry.publishedAt,
                     revisionId: entry.revisionId,
                     ...(entry.seo ? { seo: entry.seo } : {}),
-                    slug: entry.slug,
                 },
             },
         ]),

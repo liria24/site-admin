@@ -7,7 +7,7 @@ export default defineConfig({
     interactive: true,
     recursive: true,
     includeLocked: true,
-    ignorePaths: ['**/node_modules/**'],
+    ignorePaths: ['**/node_modules/**', '**/.tmp/**', '**/.data/**'],
     ignoreOtherWorkspaces: true,
     exclude: ['h3@>=2', 'vite', 'vite-plus'],
     depFields: {

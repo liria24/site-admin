@@ -1,8 +1,8 @@
+import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import { describe, expect, it } from 'vitest'
 import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
 import { resolveSiteAdminConfig } from '../packages/site-admin/src/config-resolution'
 import { resolveSiteAdminAssets } from '../packages/site-admin/src/assets-config'
-import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import { Output } from 'ai'
 import { z } from 'zod'
 import { MockLanguageModelV4, Experimental_DecisionMockModelV4 } from 'ai/test'
@@ -12,7 +12,7 @@ describe('common Site Admin configuration', () => {
         const model = new MockLanguageModelV4()
         const decisionModel = new Experimental_DecisionMockModelV4()
         const output = Output.object({ schema: z.object({ content: z.string() }) })
-        const schema = z.string().min(3)
+        const schema = z.object({ content: z.string().min(3) })
         const config = defineSiteAdminConfig({
             models: {},
             ai: {
@@ -21,33 +21,33 @@ describe('common Site Admin configuration', () => {
                 actions: {
                     proofread: {
                         type: 'text-generation',
-                        props: { content: z.string() },
+                        input: z.object({ content: z.string() }).strict(),
                         prompt: ({ content }) => content,
                         output: Output.text(),
                     },
                 },
             },
             $production: {
-                ai: { model, decisionModel, actions: { proofread: { output, props: { content: schema } } } },
+                ai: { model, decisionModel, actions: { proofread: { output, input: schema } } },
             },
         })
         const resolved = resolveSiteAdminConfig(config, ['production'])
         expect(resolved.ai.model).toBe(model)
         expect(resolved.ai.decisionModel).toBe(decisionModel)
         expect(resolved.ai.actions.proofread.output).toBe(output)
-        expect(resolved.ai.actions.proofread.props.content).toBe(schema)
+        expect(resolved.ai.actions.proofread.input).toBe(schema)
         expect(resolved.ai.actions.proofread.prompt({ content: 'Typed' })).toBe('Typed')
     })
     const action = () => 'server-only suggestion'
     const config = defineSiteAdminConfig({
         storage: { content: { adapter: 'fs', config: { root: './.data/files' } } },
         assets: { maxUploadSize: 100 },
-        ai: { actions: { suggest: { type: 'text-generation', props: {}, prompt: action } } },
-        models: { posts: { fields: { title: text({ required: true, default: 'base' }) } } },
+        ai: { actions: { suggest: { type: 'text-generation', input: z.object({}).strict(), prompt: action } } },
+        models: { posts: { fields: { slug: text(), title: text({ required: true, default: 'base' }) } } },
         $development: { assets: { maxUploadSize: 200 } },
         $production: {
             assets: { maxUploadSize: 300 },
-            models: { posts: { fields: { title: { default: 'production' } } } },
+            models: { posts: { fields: { slug: text(), title: { default: 'production' } } } },
         },
         $test: { assets: { maxUploadSize: 400 } },
         $prerender: { assets: { maxUploadSize: 500 } },
@@ -93,7 +93,7 @@ describe('common Site Admin configuration', () => {
         const replacement = { component: 'Production', props: { fresh: true } }
         const resolved = resolveSiteAdminConfig(
             defineSiteAdminConfig({
-                models: { posts: { fields: {}, seo: { image: base } } },
+                models: { posts: { fields: { slug: text() }, seo: { image: base } } },
                 seo: { image: base },
                 routeRules: { '/posts/**': { seo: { image: base } } },
                 $production: {

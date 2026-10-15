@@ -59,7 +59,7 @@ describe('native admin configuration preservation', () => {
                 },
             })
             const other = username()
-            const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+            const config = defineSiteAdminConfig({ models: { posts: { fields: { slug: text(), title: text() } } } })
             const schemaSource = await generateCombinedSchema(config, {
                 database: drizzleAdapter({}, { provider: 'sqlite' }),
                 plugins: [native, other],

@@ -31,14 +31,18 @@ const setup = (generate: MockLanguageModelV4['doGenerate'] = async () => result(
             actions: {
                 proofread: {
                     type: 'text-generation',
-                    props: { content: z.string(), count: z.string().transform(Number).optional() },
+                    input: z.object({ content: z.string(), count: z.string().transform(Number).optional() }).strict(),
                     prompt: ({ content, count }) => content + (count ?? ''),
                     output: Output.object({ schema: z.object({ content: z.string() }) }),
                 },
-                plain: { type: 'text-generation', props: { content: z.string() }, prompt: ({ content }) => content },
+                plain: {
+                    type: 'text-generation',
+                    input: z.object({ content: z.string() }).strict(),
+                    prompt: ({ content }) => content,
+                },
                 safe: {
                     type: 'text-generation',
-                    props: { content: z.string(), version: z.number() },
+                    input: z.object({ content: z.string(), version: z.number() }).strict(),
                     prompt: ({ content, version }) => {
                         if (version !== 3) throw new SiteAdminError('SITE_ADMIN_CONFLICT', 'Version changed.')
                         return content
@@ -59,39 +63,39 @@ const setup = (generate: MockLanguageModelV4['doGenerate'] = async () => result(
 }
 
 describe('authenticated named native AI actions', () => {
-    it('validates and transforms props before resolving the native model, returns native output or text', async () => {
+    it('validates and transforms input before resolving the native model, returns native output or text', async () => {
         const { config, run } = setup()
         expect(
-            await executeSiteAdminAiAction(config, 'proofread', { props: { content: 'Input', count: '2' } }, context),
+            await executeSiteAdminAiAction(config, 'proofread', { input: { content: 'Input', count: '2' } }, context),
         ).toEqual({ content: 'Corrected' })
         expect(run.mock.calls[0]?.[0].prompt).toContainEqual({
             role: 'user',
             content: [{ type: 'text', text: 'Input2' }],
         })
-        expect(await executeSiteAdminAiAction(config, 'plain', { props: { content: 'Text' } }, context)).toBe(
+        expect(await executeSiteAdminAiAction(config, 'plain', { input: { content: 'Text' } }, context)).toBe(
             '{"content":"Corrected"}',
         )
     })
     it.each([
-        { actor: null, name: 'proofread', props: { content: 'x' }, code: 'SITE_ADMIN_AUTH_REQUIRED' },
+        { actor: null, name: 'proofread', input: { content: 'x' }, code: 'SITE_ADMIN_AUTH_REQUIRED' },
         {
             actor: { id: 'user', roles: ['user'] },
             name: 'proofread',
-            props: { content: 'x' },
+            input: { content: 'x' },
             code: 'SITE_ADMIN_FORBIDDEN',
         },
-        { actor: context.actor, name: 'proofread', props: {}, code: 'SITE_ADMIN_INVALID_INPUT' },
-        { actor: context.actor, name: 'proofread', props: { content: 4 }, code: 'SITE_ADMIN_INVALID_INPUT' },
+        { actor: context.actor, name: 'proofread', input: {}, code: 'SITE_ADMIN_INVALID_INPUT' },
+        { actor: context.actor, name: 'proofread', input: { content: 4 }, code: 'SITE_ADMIN_INVALID_INPUT' },
         {
             actor: context.actor,
             name: 'proofread',
-            props: { content: 'x', model: 'injected' },
+            input: { content: 'x', model: 'injected' },
             code: 'SITE_ADMIN_INVALID_INPUT',
         },
-        { actor: { id: 'admin', roles: ['admin'] }, name: '__proto__', props: {}, code: 'SITE_ADMIN_ENTRY_NOT_FOUND' },
-    ])('rejects $code before inference', async ({ actor, name, props, code }) => {
+        { actor: { id: 'admin', roles: ['admin'] }, name: '__proto__', input: {}, code: 'SITE_ADMIN_ENTRY_NOT_FOUND' },
+    ])('rejects $code before inference', async ({ actor, name, input, code }) => {
         const { config, run } = setup()
-        await expect(executeSiteAdminAiAction(config, name, { props }, { ...context, actor })).rejects.toMatchObject({
+        await expect(executeSiteAdminAiAction(config, name, { input }, { ...context, actor })).rejects.toMatchObject({
             code,
         })
         expect(run).not.toHaveBeenCalled()
@@ -102,7 +106,7 @@ describe('authenticated named native AI actions', () => {
             executeSiteAdminAiAction(
                 config,
                 'safe',
-                { props: { content: 'https://original.test', version: 2 } },
+                { input: { content: 'https://original.test', version: 2 } },
                 context,
             ),
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
@@ -111,7 +115,7 @@ describe('authenticated named native AI actions', () => {
             executeSiteAdminAiAction(
                 config,
                 'safe',
-                { props: { content: 'https://original.test', version: 3 } },
+                { input: { content: 'https://original.test', version: 3 } },
                 context,
             ),
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_AI_FAILED' })
@@ -132,25 +136,27 @@ describe('authenticated named native AI actions', () => {
                 actions: {
                     action: {
                         type: 'text-generation',
-                        props: {
-                            content: z.string().refine(async () => {
-                                await wait
-                                return true
-                            }),
-                        },
+                        input: z
+                            .object({
+                                content: z.string().refine(async () => {
+                                    await wait
+                                    return true
+                                }),
+                            })
+                            .strict(),
                         prompt,
                     },
                 },
             },
         })
-        const input = { props: { content: 'Original' } }
+        const input = { input: { content: 'Original' } }
         const platformContext = { binding: 'App-owned' }
         const pending = executeSiteAdminAiAction(config, 'action', input, {
             ...context,
             actor: { id: 'admin', roles: ['admin'] },
             platformContext,
         })
-        input.props.content = 'Changed while validating'
+        input.input.content = 'Changed while validating'
         release()
         expect(await pending).toBe('Text')
         expect(prompt.mock.calls[0]?.[0]).toEqual({ content: 'Original' })
@@ -166,7 +172,7 @@ describe('authenticated named native AI actions', () => {
             })
         })
         await expect(
-            executeSiteAdminAiAction(config, 'plain', { props: { content: 'x' } }, context),
+            executeSiteAdminAiAction(config, 'plain', { input: { content: 'x' } }, context),
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_AI_FAILED', message: 'AI action failed.' })
         expect(run).toHaveBeenCalledTimes(1)
     })
@@ -181,7 +187,7 @@ describe('authenticated named native AI actions', () => {
         const pending = executeSiteAdminAiAction(
             config,
             'plain',
-            { props: { content: 'x' } },
+            { input: { content: 'x' } },
             { ...context, request: new Request(context.request, { signal: controller.signal }) },
         )
         await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1))
@@ -202,7 +208,7 @@ describe('authenticated named native AI actions', () => {
                 actions: {
                     classify: {
                         type: 'decision',
-                        props: { content: z.string() },
+                        input: z.object({ content: z.string() }).strict(),
                         state: ({ content }) => ({ content }),
                         questions: {
                             category: {
@@ -219,7 +225,7 @@ describe('authenticated named native AI actions', () => {
             await executeSiteAdminAiAction(
                 config,
                 'classify',
-                { props: { content: 'SDK types' } },
+                { input: { content: 'SDK types' } },
                 { ...context, actor: { id: 'admin', roles: ['admin'] } },
             ),
         ).toEqual({ category: { type: 'choice', choice: 'technology' } })
@@ -228,7 +234,7 @@ describe('authenticated named native AI actions', () => {
     it('protects the HTTP boundary with POST, same origin, private responses and sanitized errors', async () => {
         const { config } = setup()
         const execute = vi.fn((name: string, input: unknown) => executeSiteAdminAiAction(config, name, input, context))
-        const req = (headers: Record<string, string> = {}, method = 'POST', body = '{"props":{"content":"x"}}') =>
+        const req = (headers: Record<string, string> = {}, method = 'POST', body = '{"input":{"content":"x"}}') =>
             new Request('https://site.test/manage/ai/actions/proofread', {
                 method,
                 headers: { 'content-type': 'application/json', ...headers },

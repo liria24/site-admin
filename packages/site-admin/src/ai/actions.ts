@@ -9,17 +9,9 @@ import type {
 } from 'ai'
 import type { SiteAdminAIModel, SiteAdminAIModelContext } from '../ai'
 
-export type SiteAdminAiProps = Record<string, StandardSchemaV1>
-type SchemaInput<Schema> = Schema extends StandardSchemaV1 ? StandardSchemaV1.InferInput<Schema> : never
-type SchemaOutput<Schema> = Schema extends StandardSchemaV1 ? StandardSchemaV1.InferOutput<Schema> : never
-type PropsFrom<Fields extends SiteAdminAiProps, Mode extends 'input' | 'output'> = {
-    [Key in keyof Fields]: Mode extends 'input' ? SchemaInput<Fields[Key]> : SchemaOutput<Fields[Key]>
-}
-type OptionalProps<Props> = { [Key in keyof Props as undefined extends Props[Key] ? never : Key]: Props[Key] } & {
-    [Key in keyof Props as undefined extends Props[Key] ? Key : never]?: Props[Key]
-}
-export type SiteAdminAiActionProps<Fields extends SiteAdminAiProps> = OptionalProps<PropsFrom<Fields, 'input'>>
-export type SiteAdminAiValidatedProps<Fields extends SiteAdminAiProps> = OptionalProps<PropsFrom<Fields, 'output'>>
+export type SiteAdminAiInput = StandardSchemaV1
+export type SiteAdminAiActionInput<Schema extends StandardSchemaV1> = StandardSchemaV1.InferInput<Schema>
+type ValidatedInput<Schema extends StandardSchemaV1> = StandardSchemaV1.InferOutput<Schema>
 export type SiteAdminDecisionModel =
     | Exclude<Experimental_DecisionModel, string>
     | ((
@@ -30,19 +22,19 @@ type TextOptions = Omit<Parameters<typeof generateText>[0], 'model' | 'prompt' |
 type DecisionOptions = Omit<Parameters<typeof experimental_decide>[0], 'model' | 'state' | 'questions'>
 type DecisionState = Parameters<typeof experimental_decide>[0]['state']
 
-export type SiteAdminNamedAiAction<Props extends SiteAdminAiProps = SiteAdminAiProps> =
+export type SiteAdminNamedAiAction<Input extends SiteAdminAiInput = SiteAdminAiInput> =
     | {
           type: 'text-generation'
           model?: SiteAdminAIModel
-          props: Props
+          input: Input
           prompt: {
-              run(props: SiteAdminAiValidatedProps<Props>, context: SiteAdminAIModelContext): string | Promise<string>
+              run(input: ValidatedInput<Input>, context: SiteAdminAIModelContext): string | Promise<string>
           }['run']
           output?:
               | Output.Output
               | {
                     run(
-                        props: SiteAdminAiValidatedProps<Props>,
+                        input: ValidatedInput<Input>,
                         context: SiteAdminAIModelContext,
                     ): Output.Output | Promise<Output.Output>
                 }['run']
@@ -51,10 +43,10 @@ export type SiteAdminNamedAiAction<Props extends SiteAdminAiProps = SiteAdminAiP
     | {
           type: 'decision'
           model?: SiteAdminDecisionModel
-          props: Props
+          input: Input
           state: {
               run(
-                  props: SiteAdminAiValidatedProps<Props>,
+                  input: ValidatedInput<Input>,
                   context: SiteAdminAIModelContext,
               ): DecisionState | Promise<DecisionState>
           }['run']
@@ -62,8 +54,8 @@ export type SiteAdminNamedAiAction<Props extends SiteAdminAiProps = SiteAdminAiP
           options?: DecisionOptions
       }
 
-export type SiteAdminAiActionsFromProps<Props extends Record<string, SiteAdminAiProps>> = {
-    [Name in keyof Props]: SiteAdminNamedAiAction<Props[Name]>
+export type SiteAdminAiActionsFromInput<Input extends Record<string, SiteAdminAiInput>> = {
+    [Name in keyof Input]: SiteAdminNamedAiAction<Input[Name]>
 }
 export type SiteAdminAiActionData<Action> = Action extends { type: 'text-generation' }
     ? Action extends { output: infer Spec }
@@ -79,8 +71,8 @@ export type SiteAdminAiActionData<Action> = Action extends { type: 'text-generat
 export type InferSiteAdminNamedAiActions<Config> = Config extends { ai: { actions: infer Actions } }
     ? {
           [Name in keyof Actions]: {
-              props: Actions[Name] extends { props: infer Props extends SiteAdminAiProps }
-                  ? SiteAdminAiActionProps<Props>
+              input: Actions[Name] extends { input: infer Input extends SiteAdminAiInput }
+                  ? SiteAdminAiActionInput<Input>
                   : never
               data: SiteAdminAiActionData<Actions[Name]>
           }

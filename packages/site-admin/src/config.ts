@@ -19,9 +19,10 @@ import type {
 import type { PublicEntry, PublicEntrySeo } from './server/types'
 import type { SiteAdminRouteRules } from './seo'
 import type { SiteAdminAsset } from './management-assets'
+import { SiteAdminError } from './errors'
 import type {
-    SiteAdminAiActionsFromProps,
-    SiteAdminAiProps,
+    SiteAdminAiActionsFromInput,
+    SiteAdminAiInput,
     SiteAdminDecisionModel,
     SiteAdminNamedAiAction,
 } from './ai/actions'
@@ -42,7 +43,7 @@ export type ModelSeoOptions<Fields extends FieldRecord = FieldRecord> =
       }['resolve']
 
 export interface ModelRouteOptions {
-    /** Concrete paths are produced by replacing `:slug`. Defaults to `/<model>/:slug`. */
+    /** Parameters reference model fields; `:id` references entry identity. Defaults to `/<model>/:id`. */
     path?: string
     /** Redirect to the URL stored in this field instead of serving a page. */
     redirect?: string
@@ -64,8 +65,10 @@ export interface ModelOptions<Fields extends FieldRecord = FieldRecord> {
     /** Store one revision stream per locale. Nuxt i18n remains the locale source of truth. */
     localized?: boolean
     displayFields?: ModelDisplayFields
-    /** `false` publishes each revision immediately while still retaining history. */
+    /** `false` makes saves immediately public. */
     publishing?: boolean
+    scheduling?: boolean
+    revisions?: boolean
     /** Public projection is independent from whether the model owns routes. */
     public?: boolean
     route?: boolean | ModelRouteOptions | string
@@ -119,13 +122,6 @@ export interface SiteAdminAuthorization {
     roles: Readonly<Record<string, SiteAdminRoleDefinition>>
 }
 
-export const defineSiteAdminAuthorization = <const Roles extends Readonly<Record<string, SiteAdminRoleDefinition>>>(
-    roles: Roles,
-): SiteAdminAuthorization & { roles: Roles } => {
-    if (Object.hasOwn(roles, 'admin')) throw new Error('The built-in "admin" role cannot be overridden.')
-    return { roles }
-}
-
 export interface SiteAdminConfig<
     Models extends Record<string, ModelDefinition> = Record<string, ModelDefinition>,
 > extends FilesEnvironmentConfig {
@@ -142,9 +138,6 @@ export interface SiteAdminConfig<
     authorization?: SiteAdminAuthorization
     /** Application-owned adapter or resolver. Site Admin never owns the connection or migrations. */
     database?: SiteAdminDatabaseConfig
-    hooks?: {
-        afterCommit?: (event: SiteAdminLifecycleEvent) => Promise<void> | void
-    }
     markdown?: {
         plugins?: ParserOptions['plugins']
         summary?: {
@@ -154,7 +147,6 @@ export interface SiteAdminConfig<
     }
     modelDefaults?: {
         historicalRedirectStatus?: 301 | 302 | 307 | 308
-        slug?: { maxLength?: number }
     }
     models: Models
     /** Published route options matched against actual localized paths, from broad to specific. */
@@ -171,7 +163,7 @@ type OpaqueConfigPath =
     | readonly ['ai', 'decisionModel']
     | readonly ['ai', 'actions', PropertyKey, 'model']
     | readonly ['ai', 'actions', PropertyKey, 'output']
-    | readonly ['ai', 'actions', PropertyKey, 'props', PropertyKey]
+    | readonly ['ai', 'actions', PropertyKey, 'input']
     | readonly ['seo', 'image']
     | readonly ['models', PropertyKey, 'seo', 'image']
     | readonly ['routeRules', PropertyKey, 'seo', 'image']
@@ -224,15 +216,19 @@ type ConfigModels<Fields extends Record<string, FieldRecord>> = {
 
 export const defineSiteAdminConfig = <
     const Fields extends Record<string, FieldRecord>,
-    const ActionProps extends Record<string, SiteAdminAiProps>,
+    const ActionInput extends Record<string, SiteAdminAiInput>,
     const Config extends object,
 >(
     config: Config &
         Omit<SiteAdminConfigInput, 'models' | 'ai'> & {
             models: ConfigModels<Fields>
-            ai?: Omit<SiteAdminAIConfig, 'actions'> & { actions?: SiteAdminAiActionsFromProps<ActionProps> }
+            ai?: Omit<SiteAdminAIConfig, 'actions'> & { actions?: SiteAdminAiActionsFromInput<ActionInput> }
         } & (Config extends FilesInputCheck<NoInfer<Config>> ? unknown : FilesInputCheck<NoInfer<Config>>),
-): Config & { models: ConfigModels<Fields> } => config
+): Config & { models: ConfigModels<Fields> } => {
+    if (Object.hasOwn(config.authorization?.roles ?? {}, 'admin'))
+        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'The built-in admin role cannot be overridden.')
+    return config
+}
 
 type MergeEnvironment<Base, Override, Path extends readonly PropertyKey[] = []> = Path extends OpaqueConfigPath
     ? Override

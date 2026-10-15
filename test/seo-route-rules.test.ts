@@ -106,14 +106,19 @@ describe('shared route rules', () => {
         const admin = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
                 models: {
-                    posts: { fields: { title: text() }, route: '/posts/:slug' },
+                    posts: { fields: { slug: text(), title: text() }, route: '/posts/:slug' },
                     excluded: {
-                        fields: { title: text() },
+                        fields: { slug: text(), title: text() },
                         route: { path: '/excluded/:slug', sitemap: false, llms: false },
                     },
-                    localized: { fields: { title: text() }, route: '/localized/:slug', localized: true },
-                    routeLess: { fields: { title: text() }, publishing: false },
-                    private: { fields: { title: text() }, public: false, publishing: false, route: true },
+                    localized: { fields: { slug: text(), title: text() }, route: '/localized/:slug', localized: true },
+                    routeLess: { fields: { slug: text(), title: text() }, publishing: false },
+                    private: {
+                        fields: { slug: text(), title: text() },
+                        public: false,
+                        publishing: false,
+                        route: '/private/:slug',
+                    },
                 },
                 routeRules: {
                     '/**': { seo: { titleTemplate: '%s | Site' }, sitemap: true, llms: true },
@@ -137,15 +142,14 @@ describe('shared route rules', () => {
             ['localized', 'japanese', 'ja'],
         ]) {
             const entry = await admin.createEntry(model!, {
-                slug: slug!,
-                data: { title: slug },
                 ...(locale ? { locale } : {}),
+                data: { slug: slug!, title: slug },
             })
             await admin.publishEntry(entry.id, { expectedVersion: entry.version })
         }
-        await admin.createEntry('posts', { slug: 'draft', data: { title: 'Draft' } })
-        await admin.createEntry('routeLess', { data: { title: 'No page' } })
-        await admin.createEntry('private', { data: { title: 'Private page' } })
+        await admin.createEntry('posts', { data: { slug: 'draft', title: 'Draft' } })
+        await admin.createEntry('routeLess', { data: { slug: 'no-page', title: 'No page' } })
+        await admin.createEntry('private', { data: { slug: 'private-page', title: 'Private page' } })
         expect((await admin.sitemap()).map((entry) => entry.loc).sort()).toEqual([
             '/excluded/rule-included',
             '/localized/english',
@@ -156,7 +160,7 @@ describe('shared route rules', () => {
             '/localized/english',
             '/posts/included',
         ])
-        const entry = await admin.getPublicEntry('posts', 'included')
+        const entry = (await admin.listPublicEntries('posts')).find((item) => item.data.slug === 'included')
         // Route SEO remains page-owned. No global or route configuration is baked into entry metadata.
         expect(entry?.seo).toEqual({ title: 'included', canonical: '/posts/included' })
     })

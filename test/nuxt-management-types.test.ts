@@ -27,9 +27,9 @@ export default defineSiteAdminConfig({ models: {
   posts: { fields: { title: text({ required: true }), copy: markdown({ required: true }), image: image(), gallery: images(), sections: array(object({ attachment: file() })) } },
   authors: { fields: { name: text({ required: true }) } },
 }, ai: { actions: {
-  publication: { type: 'text-generation', props: { mode: z.enum(['automatic', 'manual']) }, prompt: ({ mode }) => mode, output: Output.object({ schema: z.object({ data: z.object({ title: z.string().optional(), copy: z.string().optional() }), slug: z.string().optional() }) }) },
-  correct: { type: 'text-generation', props: { content: z.string(), fields: z.array(z.enum(['copy'])) }, prompt: ({ content }) => content, output: Output.object({ schema: z.object({ data: z.object({ copy: z.string() }) }) }) },
-  plain: { type: 'text-generation', props: {}, prompt: () => 'Plain' },
+  publication: { type: 'text-generation', input: z.object({ mode: z.enum(['automatic', 'manual']) }), prompt: ({ mode }) => mode, output: Output.object({ schema: z.object({ data: z.object({ title: z.string().optional(), copy: z.string().optional() }), slug: z.string().optional() }) }) },
+  correct: { type: 'text-generation', input: z.object({ content: z.string(), fields: z.array(z.enum(['copy'])) }), prompt: ({ content }) => content, output: Output.object({ schema: z.object({ data: z.object({ copy: z.string() }) }) }) },
+  plain: { type: 'text-generation', input: z.object({}), prompt: () => 'Plain' },
 } } })
 `,
     )
@@ -37,11 +37,12 @@ export default defineSiteAdminConfig({ models: {
         join(directory, 'imports.d.ts'),
         `interface ImportMeta { server: boolean }
 declare module '#imports' {
+  export const useRoute: () => { path: string }
   export const useRequestURL: () => URL
   export const useRequestFetch: () => (url: string, options: { [name: string]: unknown; onResponse?: (context: { response: Response }) => void }) => Promise<unknown>
   export const useState: <Value>(key: string, value: () => Value) => import('vue').Ref<Value>
   export const useUserSession: () => { user: import('vue').Ref<{ id: string; role?: string } | null>; session: import('vue').Ref<{ id: string } | null> }
-  export const useNuxtApp: () => { payload: { data: Record<string, unknown> }; runWithContext: <Value>(callback: () => Value) => Value; hook: (event: string, callback: (keys?: string[]) => Promise<void>) => () => void }
+  export const useNuxtApp: () => { payload: { data: Record<string, unknown> }; callHook: (...args: unknown[]) => Promise<void>; runWithContext: <Value>(callback: () => Value) => Value; hook: (event: string, callback: (keys?: string[]) => Promise<void>) => () => void }
   export { clearNuxtData, refreshNuxtData, useNuxtData } from '#app/composables/asyncData'
 }
 `,
@@ -49,82 +50,43 @@ declare module '#imports' {
     await writeFile(
         join(directory, 'consumer.ts'),
         `import { ref } from 'vue'
-import { useSiteAdminForm } from './form'
-import { useSiteAdminManagementEntry, useSiteAdminManagementList } from './client'
-import type { SiteAdminEntry } from '@liria24/site-admin/client'
-import type { InferSiteAdminModels } from '@liria24/site-admin'
-import config from './config'
+import { useEntryForm } from './form'
+import { useAdminEntries, useAdminEntry } from './client'
 const id = ref<string | null>('post')
-const create = await useSiteAdminForm('posts', {})
-const editor = await useSiteAdminForm('posts', { id: () => id.value, onSuccess: (saved) => {
-  const version: number = saved.version
-  if ('data' in saved) { const title: string = saved.data.title; const url: string | undefined = saved.data.image?.url; void [title, url] }
-  void version
+const post = await useAdminEntry('posts', id)
+const { form } = useEntryForm(post, { onSuccess: (saved) => {
+    const version: number = saved.version
+    if ('data' in saved) { const title: string = saved.data.title; const url: string | undefined = saved.data.image?.url; void [title, url] }
+    void version
 } })
-const title: string = editor.form.state.values.title
-const copy: string = editor.form.state.values.copy
-const assetUrl: string | undefined = editor.form.state.values.image?.url
-const nestedUrl: string | undefined = editor.form.state.values.sections?.[0]?.attachment?.url
-editor.form.setFieldValue('title', 'Typed')
-editor.form.setFieldValue('image', { id: 'asset', url: '/manage/assets/asset/content' })
-editor.ai.run('correct', { content: editor.form.state.values.copy, fields: ['copy'] })
-editor.ai.run('publication', { mode: 'automatic' })
-const slug: string = editor.metadata.slug.value
-// @ts-expect-error Generation choices now belong to native action props.
-editor.metadata.modes
-// @ts-expect-error The legacy metadata mode setter is removed.
-editor.metadata.setMode('slug', 'auto')
-editor.ai.apply({ fields: ['title'], slug: false })
-const snapshot = editor.draft.serialize()
-const snapshotTitle: string = snapshot.data.title
-const published = await editor.publish()
-const scheduled = await editor.schedule('2099-01-01T00:00:00Z')
-if (published && 'data' in published) { const title: string = published.data.title; void title }
-// @ts-expect-error Configured action names are inferred for this model.
-editor.ai.run('unconfigured', {})
-// @ts-expect-error Native form props preserve required input types.
-editor.ai.run('publication', { mode: 1 })
-// @ts-expect-error Plain text output cannot be applied as a data proposal.
-editor.ai.run('plain', {})
-// @ts-expect-error The app selects descriptor-backed fields to apply.
-editor.ai.apply({ fields: ['missing'] })
-// @ts-expect-error Draft serialization returns raw asset references, without presentation URLs.
-snapshot.data.image?.url
-void [snapshotTitle, scheduled, slug]
-const uploadUrl: string = (await editor.upload(new File(['image'], 'image.png'))).url
-const list = useSiteAdminManagementList('posts', { q: ref('search'), locale: ref('ja'), limit: 25 })
-const listUrl: string | undefined = list.data.value?.items[0]?.data.image?.url
-const transformed = useSiteAdminManagementList('posts', { transform: (page) => page.items.map((item) => item.data.title), default: () => [] })
-const titles: string[] = transformed.data.value
-const picked = useSiteAdminManagementEntry('posts', 'post', { pick: ['data'] })
-const pickedTitle: string | undefined = picked.data.value?.data.title
-// @ts-expect-error Native pick removes id.
-picked.data.value?.id
-declare const raw: SiteAdminEntry<InferSiteAdminModels<typeof config>['posts']>
-await useSiteAdminForm('posts', { entry: raw })
-// @ts-expect-error entry and id are mutually exclusive.
-await useSiteAdminForm('posts', { entry: raw, id })
-// @ts-expect-error Unknown model names do not fall back to a string map.
-await useSiteAdminForm('missing', {})
-// @ts-expect-error Fields are inferred from the model.
-editor.form.setFieldValue('title', 123)
-// @ts-expect-error Unknown fields fail.
-editor.form.setFieldValue('missing', 'x')
-// @ts-expect-error AI field selection follows this model.
-editor.ai.run('correct', { content: copy, fields: ['name'] })
-// @ts-expect-error Raw initialization must not accept transform.
-await useSiteAdminForm('posts', { transform: () => ({}) })
-// @ts-expect-error Raw initialization must not accept pick.
-await useSiteAdminForm('posts', { pick: ['data'] })
-// @ts-expect-error Management lists reject unknown models.
-useSiteAdminManagementList('missing')
-// @ts-expect-error Asset presentation remains an object.
-const rawAsset: string = editor.form.state.values.image
-const author = await useSiteAdminForm('authors', {})
-const authorName: string = author.form.state.values.name
-// @ts-expect-error Other model fields are unavailable.
-author.form.setFieldValue('title', 'x')
-void [create, title, copy, assetUrl, nestedUrl, uploadUrl, listUrl, titles, pickedTitle, rawAsset, authorName]
+const title: string = form.state.values.title
+const copy: string = form.state.values.copy
+const assetUrl: string | undefined = form.state.values.image?.url
+form.setFieldValue('title', 'Typed')
+form.setFieldValue('image', { id: 'asset', url: '/manage/assets/asset/content' })
+// @ts-expect-error Unknown model.
+useAdminEntries('missing')
+// @ts-expect-error Admin response shapes are fixed.
+useAdminEntries('posts', { transform: () => ({}) })
+// @ts-expect-error Admin response shapes are fixed.
+useAdminEntries('posts', { pick: ['data'] })
+// @ts-expect-error Fields retain their schema types.
+form.setFieldValue('title', 12)
+// @ts-expect-error Unknown field.
+form.setFieldValue('missing', '')
+// @ts-expect-error Optional assets require presentation URLs.
+form.setFieldValue('image', { id: 'asset' })
+// @ts-expect-error No second AI execution engine lives in a form.
+form.ai.run('correct', {})
+const page = ref(2)
+const list = await useAdminEntries('posts', { page })
+const first: string | undefined = list.data.value?.items[0]?.data.title
+const total: number | undefined = list.data.value?.total
+const one: string | undefined = post.data.value?.data.title
+const { form: author } = useEntryForm(await useAdminEntry('authors', null))
+const name: string = author.state.values.name
+void [title, copy, assetUrl, first, total, one, name]
+
 `,
     )
     await writeFile(
@@ -134,8 +96,10 @@ void [create, title, copy, assetUrl, nestedUrl, uploadUrl, listUrl, titles, pick
             compilerOptions: {
                 paths: {
                     '@liria24/site-admin': [resolve('packages/site-admin/src/index.ts')],
-                    '@liria24/site-admin/client': [resolve('packages/site-admin/src/client.ts')],
-                    '@liria24/site-admin/form': [resolve('packages/site-admin/src/form.ts')],
+                    '@liria24/site-admin/internal/*': [resolve('packages/site-admin/src/*')],
+                    '@liria24/site-admin/internal/client': [resolve('packages/site-admin/src/client.ts')],
+                    '@liria24/site-admin/internal/form': [resolve('packages/site-admin/src/form.ts')],
+                    '@liria24/site-admin/internal/model': [resolve('packages/site-admin/src/model.ts')],
                     '#build/site-admin/client': [join(directory, 'client.ts')],
                     '#app': [resolve('node_modules/nuxt/dist/app/index.d.ts')],
                     '#app/composables/asyncData': [resolve('node_modules/nuxt/dist/app/composables/asyncData.d.ts')],

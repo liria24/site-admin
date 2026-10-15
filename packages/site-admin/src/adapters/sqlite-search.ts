@@ -6,9 +6,8 @@ export const searchKey = (id: string, scope: string, kind: string) => {
         .toUpperCase()
     return `${searchPrefix}${encoded}:${scope}:${kind}`
 }
-export const searchText = (data: Record<string, unknown>, slug: string) => ({
+export const searchText = (data: Record<string, unknown>) => ({
     data: JSON.stringify(data).toLocaleLowerCase(),
-    slug: slug.toLocaleLowerCase(),
 })
 
 /** Separate physical projections and locale/engine case mappings without table changes or per-process keys. */
@@ -24,10 +23,10 @@ export const searchScope = async (source: string): Promise<string> => {
     return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 const chunkCharacters = 131_072
-const partKey = (kind: 'data' | 'slug', index: number) => (index ? `${kind}:${String(index).padStart(6, '0')}` : kind)
-export const searchParts = (text: { data: string; slug: string }) =>
+const partKey = (kind: 'data', index: number) => (index ? `${kind}:${String(index).padStart(6, '0')}` : kind)
+export const searchParts = (text: { data: string }) =>
     Object.entries(text).flatMap(([kind, value]) => {
-        const field = kind as 'data' | 'slug'
+        const field = kind as 'data'
         if (new TextEncoder().encode(value).byteLength <= 1_048_576) return [{ part: field, value }]
         const points = Array.from(value)
         const parts: Array<{ part: string; value: string }> = []
@@ -39,7 +38,7 @@ export const searchParts = (text: { data: string; slug: string }) =>
         return parts
     })
 
-export const searchPredicate = (root: 'search_data' | 'search_slug', q: string) => {
+export const searchPredicate = (root: 'search_data', q: string) => {
     let length = 0
     for (const codePoint of q) {
         void codePoint

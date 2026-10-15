@@ -26,7 +26,7 @@ interface BatchHelpers {
         requests: Record<
             string,
             | { list: string; markdown?: 'full' | 'summary' }
-            | { entry: string; slugOrId: string | ReturnType<typeof ref<string>> | (() => string) }
+            | { entry: string; id: string | ReturnType<typeof ref<string>> | (() => string) }
         >,
     ): ResolvedRequest[]
     key(
@@ -65,10 +65,10 @@ describe('generated public batch transport', () => {
                 )
             },
         })
-        const full = helpers.snapshot({ posts: { list: 'posts' }, featured: { entry: 'posts', slugOrId: 'entry' } })
+        const full = helpers.snapshot({ posts: { list: 'posts' }, featured: { entry: 'posts', id: 'entry' } })
         const summary = helpers.snapshot({
             posts: { list: 'posts', markdown: 'summary' },
-            featured: { entry: 'posts', slugOrId: 'entry' },
+            featured: { entry: 'posts', id: 'entry' },
         })
         expect(helpers.key({}, full)).not.toBe(helpers.key({}, summary))
         expect(helpers.key({}, full)).toBe(
@@ -76,7 +76,7 @@ describe('generated public batch transport', () => {
                 {},
                 helpers.snapshot({
                     posts: { list: 'posts', markdown: 'full' },
-                    featured: { entry: 'posts', slugOrId: 'entry' },
+                    featured: { entry: 'posts', id: 'entry' },
                 }),
             ),
         )
@@ -113,9 +113,9 @@ describe('generated public batch transport', () => {
             helpers.snapshot({
                 arts: { list: 'arts' },
                 posts: { list: 'posts' },
-                featured: { entry: 'posts', slugOrId: 'good' },
-                missing: { entry: 'posts', slugOrId: 'missing' },
-                failedEntry: { entry: 'posts', slugOrId: 'failed' },
+                featured: { entry: 'posts', id: 'good' },
+                missing: { entry: 'posts', id: 'missing' },
+                failedEntry: { entry: 'posts', id: 'failed' },
             }),
             'ja',
             signal,
@@ -173,8 +173,8 @@ describe('generated public batch transport', () => {
 
     it('uses canonical named tuples and tracks reactive slugs, locale and connection isolation', () => {
         const slug = ref('first')
-        const first = helpers.snapshot({ z: { entry: 'posts', slugOrId: slug }, a: { list: 'arts' } })
-        const reversed = helpers.snapshot({ a: { list: 'arts' }, z: { entry: 'posts', slugOrId: () => slug.value } })
+        const first = helpers.snapshot({ z: { entry: 'posts', id: slug }, a: { list: 'arts' } })
+        const reversed = helpers.snapshot({ a: { list: 'arts' }, z: { entry: 'posts', id: () => slug.value } })
         expect(first).toEqual(reversed)
         const connection = { origin: 'https://a.example', basePath: '/content' }
         const key = helpers.key(connection, first, 'ja')
@@ -184,11 +184,7 @@ describe('generated public batch transport', () => {
         expect(key).not.toBe(helpers.key({ ...connection, basePath: '/other' }, first, 'ja'))
         slug.value = 'second'
         expect(key).not.toBe(
-            helpers.key(
-                connection,
-                helpers.snapshot({ z: { entry: 'posts', slugOrId: slug }, a: { list: 'arts' } }),
-                'ja',
-            ),
+            helpers.key(connection, helpers.snapshot({ z: { entry: 'posts', id: slug }, a: { list: 'arts' } }), 'ja'),
         )
     })
 

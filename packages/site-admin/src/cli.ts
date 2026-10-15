@@ -2,13 +2,10 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
-import { fileURLToPath } from 'node:url'
 import { createJiti } from 'jiti'
 import type { SiteAdminConfig } from './config'
 import { generateSiteAdminSchema, generateCombinedSchema } from './generate'
 import { resolveSiteAdminConfig } from './config-resolution'
-import { createSiteAdminDependencyAliases } from './dependency-aliases'
-import { nativeFilesConfigAliases } from './nuxt/files-aliases'
 import type { BetterAuthOptions } from 'better-auth'
 
 type NativeAuthConfig =
@@ -30,10 +27,6 @@ if (positionals.length !== 1 || positionals[0] !== 'generate')
         'Usage: site-admin generate [--config site-admin.config.ts] [--env production] [--prerender] [--auth server/auth.config.ts] [--out schema.ts]',
     )
 const jiti = createJiti(import.meta.url, {
-    alias: {
-        ...createSiteAdminDependencyAliases({ rootDir: process.cwd() }),
-        ...nativeFilesConfigAliases(fileURLToPath(import.meta.resolve('nuxt-files-sdk'))),
-    },
     fsCache: false,
 })
 const loaded = await jiti.import<SiteAdminConfig>(resolve(values.config), {

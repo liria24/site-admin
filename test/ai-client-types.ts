@@ -4,7 +4,12 @@ import { createSiteAdminManagementClient } from '../packages/site-admin/src/clie
 const config = defineSiteAdminConfig({
     models: {
         articles: {
-            fields: { body: markdown(), excerpt: textarea({ required: true }), title: text({ required: true }) },
+            fields: {
+                slug: text(),
+                body: markdown(),
+                excerpt: textarea({ required: true }),
+                title: text({ required: true }),
+            },
         },
     },
 })
@@ -12,7 +17,10 @@ const config = defineSiteAdminConfig({
 const checkAIClientTypes = async (): Promise<void> => {
     const client = createSiteAdminManagementClient<InferSiteAdminModels<typeof config>>()
     const candidate = { title: 'Typed publication', excerpt: 'Manual excerpt' }
-    const published = await client.publishEntry('id', { expectedVersion: 1, draft: { data: candidate, slug: 'typed' } })
+    const published = await client.publishEntry('id', {
+        expectedVersion: 1,
+        draft: { data: { ...candidate, slug: 'typed' } },
+    })
     if ('data' in published) {
         const title: string = published.data.title
         void title

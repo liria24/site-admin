@@ -185,7 +185,6 @@ const handleManagementRequestInner = async <Context>(
                     data: data as Record<string, unknown>,
                     ...(typeof body.id === 'string' ? { id: body.id } : {}),
                     ...(typeof body.locale === 'string' ? { locale: body.locale } : {}),
-                    ...(typeof body.slug === 'string' ? { slug: body.slug } : {}),
                     ...(typeof body.sortOrder === 'number' || body.sortOrder === null
                         ? { sortOrder: body.sortOrder }
                         : {}),
@@ -237,7 +236,6 @@ const handleManagementRequestInner = async <Context>(
                         actorId: actor.id,
                         data: body.data as Record<string, unknown>,
                         expectedVersion: expectedVersion(body.expectedVersion),
-                        ...(typeof body.slug === 'string' ? { slug: body.slug } : {}),
                     }),
                 )
             }
@@ -262,15 +260,10 @@ const handleManagementRequestInner = async <Context>(
                 const body = await bodyObject(request)
                 if (body.draft !== undefined) {
                     await entryFor(id, 'update')
-                    if (
-                        !isObject(body.draft) ||
-                        !isObject(body.draft.data) ||
-                        (body.draft.slug !== undefined && typeof body.draft.slug !== 'string') ||
-                        body.revisionId !== undefined
-                    )
+                    if (!isObject(body.draft) || !isObject(body.draft.data) || body.revisionId !== undefined)
                         throw new SiteAdminError(
                             'SITE_ADMIN_INVALID_INPUT',
-                            'Publish draft requires data and an optional slug, without revisionId.',
+                            'Publish draft requires data, without revisionId.',
                         )
                 }
                 return json(
@@ -278,7 +271,7 @@ const handleManagementRequestInner = async <Context>(
                         actorId: actor.id,
                         expectedVersion: expectedVersion(body.expectedVersion),
                         ...(body.draft !== undefined
-                            ? { draft: body.draft as { data: Record<string, unknown>; slug?: string } }
+                            ? { draft: body.draft as { data: Record<string, unknown> } }
                             : typeof body.revisionId === 'string'
                               ? { revisionId: body.revisionId }
                               : {}),
@@ -300,15 +293,10 @@ const handleManagementRequestInner = async <Context>(
                 const body = await bodyObject(request)
                 if (body.draft !== undefined) {
                     await entryFor(id, 'update')
-                    if (
-                        !isObject(body.draft) ||
-                        !isObject(body.draft.data) ||
-                        (body.draft.slug !== undefined && typeof body.draft.slug !== 'string') ||
-                        body.revisionId !== undefined
-                    )
+                    if (!isObject(body.draft) || !isObject(body.draft.data) || body.revisionId !== undefined)
                         throw new SiteAdminError(
                             'SITE_ADMIN_INVALID_INPUT',
-                            'Publish draft requires data and an optional slug, without revisionId.',
+                            'Publish draft requires data, without revisionId.',
                         )
                 }
                 return json(
@@ -317,7 +305,7 @@ const handleManagementRequestInner = async <Context>(
                         at: requiredString(body.at, 'at'),
                         expectedVersion: expectedVersion(body.expectedVersion),
                         ...(body.draft !== undefined
-                            ? { draft: body.draft as { data: Record<string, unknown>; slug?: string } }
+                            ? { draft: body.draft as { data: Record<string, unknown> } }
                             : typeof body.revisionId === 'string'
                               ? { revisionId: body.revisionId }
                               : {}),
@@ -509,8 +497,8 @@ export const handlePublicRequest = async <Context>(
                     } else {
                         const key = path.slice(1).join('/')
                         const item = (await content.list()).find((document) => {
-                            const metadata = document.data['_siteAdmin'] as { id?: string; slug?: string } | undefined
-                            return metadata?.id === key || metadata?.slug === key
+                            const metadata = document.data['_siteAdmin'] as { id?: string } | undefined
+                            return metadata?.id === key
                         })
                         response = item ? jsonResponse(item) : jsonResponse(null, { status: 404 })
                     }

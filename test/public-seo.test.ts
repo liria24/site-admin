@@ -1,3 +1,4 @@
+import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
@@ -8,7 +9,6 @@ import { defineSiteAdminConfig, image, images, markdown, text, textarea } from '
 import type { PublicEntry, PublicEntrySeo } from '../packages/site-admin/src/server'
 import { createSiteAdmin, handlePublicRequest } from '../packages/site-admin/src/server'
 import { createSiteAdminClient } from '../packages/site-admin/src/client'
-import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import { createMigratedTestAdmin, migrateTestDatabase, testAdapter } from './migrate'
 
 const databases: Database[] = []
@@ -32,7 +32,7 @@ describe('public entry SEO payload', () => {
                 markdown: { plugins: [{ name: 'detail-list-count', post: plugin }] },
                 models: {
                     posts: {
-                        fields: { title: text(), body: markdown() },
+                        fields: { slug: text(), title: text(), body: markdown() },
                         displayFields: { description: 'body' },
                         route: '/posts/:slug',
                     },
@@ -46,20 +46,25 @@ describe('public entry SEO payload', () => {
         })
         for (const slug of ['one', 'two']) {
             const entry = await admin.createEntry('posts', {
-                slug,
-                data: { title: slug, body: `${slug} intro\n\n<!-- more -->\n\n${slug} full body` },
+                data: { title: slug, body: `${slug} intro\n\n<!-- more -->\n\n${slug} full body`, slug: slug },
             })
             await admin.publishEntry(entry.id, { expectedVersion: entry.version })
-            expect(await admin.resolvePath(`/posts/${slug}`)).toMatchObject({ entry: { slug } })
-            expect(await client.get('posts', slug)).toMatchObject({ slug })
+            expect(await admin.resolvePath(`/posts/${slug}`)).toMatchObject({ entry: { data: { slug } } })
+            expect(await client.get('posts', entry.id)).toMatchObject({ data: { slug } })
         }
-        expect((await client.list('posts')).map(({ slug }) => slug).sort()).toEqual(['one', 'two'])
+        expect(
+            (await client.list('posts'))
+                .map(({ data: { slug } }) => slug)
+                .sort((a, b) => String(a).localeCompare(String(b))),
+        ).toEqual(['one', 'two'])
         const parsed = plugin.mock.calls.length
         expect((await (await admin.content('posts')).list()).map(({ data }) => String(data.title)).sort()).toEqual([
             'one',
             'two',
         ])
-        expect(await client.get('posts', 'one')).toMatchObject({ seo: { description: 'one intro' } })
+        expect((await client.list('posts')).find((entry) => entry.data.slug === 'one')).toMatchObject({
+            seo: { description: 'one intro' },
+        })
         expect(plugin).toHaveBeenCalledTimes(parsed)
     })
     it.each(['route-first', 'content-first'])(
@@ -72,7 +77,7 @@ describe('public entry SEO payload', () => {
                     models: {
                         posts: {
                             displayFields: { description: 'body' },
-                            fields: { title: text(), body: markdown() },
+                            fields: { slug: text(), title: text(), body: markdown() },
                             route: '/posts/:slug',
                         },
                     },
@@ -80,8 +85,7 @@ describe('public entry SEO payload', () => {
                 database: database(),
             })
             const draft = await admin.createEntry('posts', {
-                slug: 'hello',
-                data: { title: 'Post', body: 'Intro **summary**.\n\n<!-- more -->\n\nFull body' },
+                data: { slug: 'hello', title: 'Post', body: 'Intro **summary**.\n\n<!-- more -->\n\nFull body' },
             })
             await admin.publishEntry(draft.id, { expectedVersion: draft.version })
             if (order === 'content-first') await (await admin.content('posts')).list()
@@ -119,7 +123,14 @@ describe('public entry SEO payload', () => {
             models: {
                 posts: {
                     displayFields: { description: 'excerpt', image: 'cover', title: 'heading' },
-                    fields: { body: markdown(), cover: image(), excerpt: textarea(), heading: text(), title: text() },
+                    fields: {
+                        slug: text(),
+                        body: markdown(),
+                        cover: image(),
+                        excerpt: textarea(),
+                        heading: text(),
+                        title: text(),
+                    },
                     route: '/writing/:slug',
                     seo: resolver,
                 },
@@ -133,8 +144,8 @@ describe('public entry SEO payload', () => {
         })
         const asset = await admin.uploadAsset({ body: png, filename: 'cover.png' })
         const draft = await admin.createEntry('posts', {
-            slug: 'published',
             data: {
+                slug: 'published',
                 body: 'Published **Markdown**',
                 cover: { alt: 'Public cover', id: asset.id },
                 excerpt: '  Published\n description  ',
@@ -144,7 +155,7 @@ describe('public entry SEO payload', () => {
         })
         const published = await admin.publishEntry(draft.id, { expectedVersion: draft.version })
         await admin.updateEntry(draft.id, {
-            data: { ...published.data, heading: 'Private draft heading' },
+            data: { slug: draft.data.slug, ...published.data, heading: 'Private draft heading' },
             expectedVersion: published.version,
         })
         const requests: string[] = []
@@ -186,13 +197,21 @@ describe('public entry SEO payload', () => {
                 seo: { title: 'Global', titleTemplate: '%s | Global' },
                 models: {
                     settings: {
-                        fields: { title: text(), description: textarea() },
+                        fields: { slug: text(), title: text(), description: textarea() },
                         publishing: false,
                         seo: { title: 'Configured', description: 'Configured description', canonical: '/settings' },
                     },
-                    disabled: { fields: { cover: image() }, publishing: false, seo: { image: false } },
-                    generated: { fields: { cover: image() }, publishing: false, seo: { image: component } },
-                    gallery: { fields: { pictures: images() }, publishing: false, seo: { image: '/default.png' } },
+                    disabled: { fields: { slug: text(), cover: image() }, publishing: false, seo: { image: false } },
+                    generated: {
+                        fields: { slug: text(), cover: image() },
+                        publishing: false,
+                        seo: { image: component },
+                    },
+                    gallery: {
+                        fields: { slug: text(), pictures: images() },
+                        publishing: false,
+                        seo: { image: '/default.png' },
+                    },
                 },
             }),
             database: database(),
@@ -200,7 +219,7 @@ describe('public entry SEO payload', () => {
             site: { url: 'https://example.com' },
         })
         const asset = await admin.uploadAsset({ body: png, filename: 'cover.png' })
-        const settings = await admin.createEntry('settings', { data: { title: '', description: null } })
+        const settings = await admin.createEntry('settings', { data: { slug: '', title: '', description: null } })
         const disabled = await admin.createEntry('disabled', { data: { cover: asset.id } })
         const generated = await admin.createEntry('generated', { data: { cover: asset.id } })
         const gallery = await admin.createEntry('gallery', { data: { pictures: [asset.id] } })
@@ -231,8 +250,12 @@ describe('public entry SEO payload', () => {
                     assets: { storage: 'content' },
                     seo: { image: globalImage },
                     models: {
-                        posts: { fields: { cover: image() }, publishing: false },
-                        overridden: { fields: { cover: image() }, publishing: false, seo: { image: '/model.png' } },
+                        posts: { fields: { slug: text(), cover: image() }, publishing: false },
+                        overridden: {
+                            fields: { slug: text(), cover: image() },
+                            publishing: false,
+                            seo: { image: '/model.png' },
+                        },
                     },
                 }),
                 database: database(),
@@ -259,13 +282,17 @@ describe('public entry SEO payload', () => {
             config: defineSiteAdminConfig({
                 assets: { storage: 'content' },
                 models: {
-                    pages: { fields: { title: text(), cover: image() }, localized: true, route: '/pages/:slug' },
+                    pages: {
+                        fields: { slug: text(), title: text(), cover: image() },
+                        localized: true,
+                        route: '/pages/:slug',
+                    },
                     secrets: {
-                        fields: { title: text() },
+                        fields: { slug: text(), title: text() },
                         localized: true,
                         public: false,
                         publishing: false,
-                        route: true,
+                        route: '/secrets/:slug',
                         seo: privateResolver,
                     },
                 },
@@ -280,34 +307,30 @@ describe('public entry SEO payload', () => {
             site: { url: 'https://example.com' },
         })
         const en = await admin.createEntry('pages', {
-            data: { title: 'English' },
             locale: 'en',
-            slug: 'home',
             translationGroup: 'home',
+            data: { slug: 'home', title: 'English' },
         })
         const ja = await admin.createEntry('pages', {
-            data: { title: '日本語' },
             locale: 'ja',
-            slug: 'ホーム',
             translationGroup: 'home',
+            data: { slug: 'ホーム', title: '日本語' },
         })
         await admin.createEntry('pages', {
-            data: { title: 'French draft' },
             locale: 'fr',
-            slug: 'draft',
             translationGroup: 'home',
+            data: { slug: 'draft', title: 'French draft' },
         })
         await admin.createEntry('secrets', {
-            data: { title: 'Private German' },
+            data: { slug: 'private-german', title: 'Private German' },
             locale: 'de',
             translationGroup: 'home',
         })
         const unavailableAsset = await admin.uploadAsset({ body: png, filename: 'unavailable.png' })
         const de = await admin.createEntry('pages', {
-            data: { title: 'German', cover: unavailableAsset.id },
             locale: 'de',
-            slug: 'unavailable',
             translationGroup: 'home',
+            data: { slug: 'unavailable', title: 'German', cover: unavailableAsset.id },
         })
         for (const draft of [en, ja, de]) await admin.publishEntry(draft.id, { expectedVersion: draft.version })
         await db.prepare("UPDATE site_admin_assets SET state = 'deleting' WHERE id = ?").bind(unavailableAsset.id).run()
@@ -337,8 +360,8 @@ describe('public entry SEO payload', () => {
     it('bounds localized sibling queries to D1 limits across more than 100 translation groups', async () => {
         const config = defineSiteAdminConfig({
             models: {
-                pages: { fields: { title: text() }, localized: true, route: '/pages/:slug' },
-                secrets: { fields: { title: text() }, localized: true, public: false, publishing: false },
+                pages: { fields: { slug: text(), title: text() }, localized: true, route: '/pages/:slug' },
+                secrets: { fields: { slug: text(), title: text() }, localized: true, public: false, publishing: false },
             },
         })
         const db = database()
@@ -357,22 +380,20 @@ describe('public entry SEO payload', () => {
         for (let index = 0; index < 101; index++) {
             for (const locale of ['en', 'ja']) {
                 const entry = await admin.createEntry('pages', {
-                    data: { title: `${locale} ${index}` },
                     locale,
-                    slug: `${locale}-${index}`,
                     translationGroup: `group-${index}`,
+                    data: { slug: `${locale}-${index}`, title: `${locale} ${index}` },
                 })
                 await admin.publishEntry(entry.id, { expectedVersion: entry.version })
             }
         }
         await admin.createEntry('pages', {
-            data: { title: 'French draft' },
             locale: 'fr',
-            slug: 'draft',
             translationGroup: 'group-100',
+            data: { slug: 'draft', title: 'French draft' },
         })
         await admin.createEntry('secrets', {
-            data: { title: 'Private French' },
+            data: { slug: 'private-french', title: 'Private French' },
             locale: 'fr',
             translationGroup: 'group-100',
         })
@@ -393,7 +414,7 @@ describe('public entry SEO payload', () => {
         expect(checked).toBeGreaterThan(0)
         expect(entries).toHaveLength(101)
         for (const entry of entries) {
-            const index = entry.slug.slice(3)
+            const index = String(entry.data.slug).slice(3)
             expect(entry.seo?.alternates).toEqual(
                 expect.arrayContaining([
                     { locale: 'en', path: `https://example.com/pages/en-${index}` },
@@ -416,7 +437,7 @@ describe('public entry SEO payload', () => {
                 markdown: { plugins: [{ name: 'seo-parser-count', post: plugin }] },
                 models: {
                     posts: {
-                        fields: { body: markdown(), description: textarea(), summary: markdown() },
+                        fields: { slug: text(), body: markdown(), description: textarea(), summary: markdown() },
                         displayFields: { description: 'body' },
                         publishing: false,
                         seo: resolver,
@@ -471,7 +492,7 @@ describe('public entry SEO payload', () => {
             }) as unknown as PublicEntrySeo
         const admin = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
-                models: { pages: { fields: { body: markdown() }, publishing: false, seo: resolver } },
+                models: { pages: { fields: { slug: text(), body: markdown() }, publishing: false, seo: resolver } },
             }),
             database: database(),
         })

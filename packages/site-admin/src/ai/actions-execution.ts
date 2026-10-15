@@ -1,7 +1,6 @@
 import type { SiteAdminConfig } from '../config'
 import type { SiteAdminActor } from '../server/types'
 import type { SiteAdminAIModelContext } from '../ai'
-import type { SiteAdminIssue } from '../errors'
 import { SiteAdminError } from '../errors'
 import { generateText, experimental_decide } from 'ai'
 
@@ -28,37 +27,30 @@ export const executeSiteAdminAiAction = async (
     const actions = config.ai?.actions
     const action = actions && Object.hasOwn(actions, name) ? actions[name] : undefined
     if (!action) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', 'AI action does not exist.')
-    if (!isObject(input) || !isObject(input.props))
-        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'AI action requires a props object.')
-    const values = structuredClone(input.props)
-    const issues: SiteAdminIssue[] = []
-    const props: Record<string, unknown> = {}
-    for (const key of Object.keys(values))
-        if (!Object.hasOwn(action.props, key)) issues.push({ path: `props.${key}`, message: 'Unknown property.' })
-    for (const [key, schema] of Object.entries(action.props)) {
-        const result = await schema['~standard'].validate(values[key])
-        if (result.issues) {
-            issues.push(
-                ...result.issues.map((issue) => ({
-                    path: [
-                        'props',
-                        key,
-                        ...(issue.path?.map((part) => String(typeof part === 'object' ? part.key : part)) ?? []),
-                    ].join('.'),
-                    message: issue.message,
-                })),
-            )
-        } else props[key] = result.value
-    }
-    if (issues.length) throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Invalid AI action props.', issues)
+    if (!isObject(input) || !Object.hasOwn(input, 'input'))
+        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'AI action requires input.')
+    const validated = await action.input['~standard'].validate(structuredClone(input.input))
+    if (validated.issues)
+        throw new SiteAdminError(
+            'SITE_ADMIN_INVALID_INPUT',
+            'Invalid AI input.',
+            validated.issues.map((issue) => ({
+                path: [
+                    'input',
+                    ...(issue.path ?? []).map((part) => String(typeof part === 'object' ? part.key : part)),
+                ].join('.'),
+                message: issue.message,
+            })),
+        )
+    const values = validated.value
     context.request?.signal.throwIfAborted()
     try {
         if (action.type === 'text-generation') {
             const source = action.model ?? config.ai?.model
             if (!source) throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'A text generation model is required.')
             const model = typeof source === 'function' ? await source(context) : source
-            const prompt = await action.prompt(props, context)
-            const output = typeof action.output === 'function' ? await action.output(props, context) : action.output
+            const prompt = await action.prompt(values, context)
+            const output = typeof action.output === 'function' ? await action.output(values, context) : action.output
             const signals = [context.request?.signal, action.options?.abortSignal].filter(
                 (signal): signal is AbortSignal => !!signal,
             )
@@ -75,7 +67,7 @@ export const executeSiteAdminAiAction = async (
         const source = action.model ?? config.ai?.decisionModel
         if (!source) throw new SiteAdminError('SITE_ADMIN_AI_UNAVAILABLE', 'A decision model is required.')
         const model = typeof source === 'function' ? await source(context) : source
-        const state = await action.state(props, context)
+        const state = await action.state(values, context)
         const signals = [context.request?.signal, action.options?.abortSignal].filter(
             (signal): signal is AbortSignal => !!signal,
         )

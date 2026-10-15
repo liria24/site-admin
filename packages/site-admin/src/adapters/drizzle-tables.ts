@@ -37,7 +37,6 @@ export const revisions = sqliteTable(
         entry_id: text()
             .notNull()
             .references(() => entries.id, { onDelete: 'cascade' }),
-        slug: text().notNull(),
         actor_id: text(),
         created_at: text().notNull(),
     },

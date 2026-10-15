@@ -124,7 +124,7 @@ describe('Site Admin clients', () => {
             () => client.createEntry('posts', { data: {} }),
             () => client.updateEntry('entry', { data: {}, expectedVersion: 1 }),
             () => client.deleteEntry('entry', { expectedVersion: 1 }),
-            () => client.runAiAction('metadata', { props: {} }),
+            () => client.runAiAction('metadata', { input: {} }),
         ]
         for (const [index, operation] of operations.entries()) {
             await expect(operation()).rejects.toMatchObject({ code: 'SITE_ADMIN_SEARCH_PREPARING', status: 503 })
@@ -141,13 +141,13 @@ describe('Site Admin clients', () => {
                 calls.push({ input: String(input), ...(init?.method ? { method: init.method } : {}) })
                 if (String(input).includes('/missing')) return Response.json(null, { status: 404 })
                 const document = {
-                    data: { _siteAdmin: { id: 'entry', model: 'posts', slug: 'hello' }, title: 'Hello' },
+                    data: { _siteAdmin: { id: 'entry', model: 'posts' }, slug: 'hello', title: 'Hello' },
                 }
                 return Response.json(String(input).includes('/hello') ? document : [document])
             },
         })
         expect(await client.list('posts', { locale: 'ja' })).toEqual([
-            { data: { title: 'Hello' }, id: 'entry', model: 'posts', slug: 'hello' },
+            { id: 'entry', model: 'posts', data: { slug: 'hello', title: 'Hello' } },
         ])
         expect(await client.get('posts', 'hello')).toMatchObject({ data: { title: 'Hello' }, id: 'entry' })
         expect(await client.get('posts', 'missing')).toBeNull()
@@ -220,14 +220,14 @@ describe('Site Admin clients', () => {
             },
         })
         expect(
-            await client.createEntry('posts', { data: { title: 'Created' }, locale: 'ja', slug: 'created' }),
+            await client.createEntry('posts', { locale: 'ja', data: { slug: 'created', title: 'Created' } }),
         ).toEqual({
             id: 'entry',
             model: 'posts',
             sortOrder: null,
             version: 2,
         })
-        await client.updateEntry('entry/1', { data: { title: 'Edited' }, expectedVersion: 2 })
+        await client.updateEntry('entry/1', { data: { slug: 'edited', title: 'Edited' }, expectedVersion: 2 })
         await client.publishEntry('entry/1', { expectedVersion: 3, revisionId: 'revision/1' })
         await client.unpublishEntry('entry/1', { expectedVersion: 4 })
         await client.schedulePublish('entry/1', { at: '2026-12-01T00:00:00.000Z', expectedVersion: 5 })
@@ -240,12 +240,12 @@ describe('Site Admin clients', () => {
         await client.deleteEntry('entry/1', { expectedVersion: 10 })
         expect(calls.map(({ body, method, url }) => ({ body, method, url }))).toEqual([
             {
-                body: { data: { title: 'Created' }, locale: 'ja', slug: 'created' },
+                body: { locale: 'ja', data: { slug: 'created', title: 'Created' } },
                 method: 'POST',
                 url: '/manage/entries/posts',
             },
             {
-                body: { data: { title: 'Edited' }, expectedVersion: 2 },
+                body: { data: { title: 'Edited', slug: 'edited' }, expectedVersion: 2 },
                 method: 'PATCH',
                 url: '/manage/entries/entry%2F1',
             },
@@ -296,7 +296,7 @@ describe('Site Admin clients', () => {
         await client.models()
         await client.inspect()
         await client.routeSnapshot()
-        await client.runAiAction('suggest/title', { props: { instruction: 'Shorten' } })
+        await client.runAiAction('suggest/title', { input: { instruction: 'Shorten' } })
         await client.publishDue()
         await client.runAssetGC()
         expect(urls).toEqual([
@@ -456,9 +456,9 @@ describe('Site Admin clients', () => {
 
     it('generates public/management helpers independently from the optional form peer and server config', () => {
         const source = siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage' })
-        expect(source).not.toContain('@liria24/site-admin/form')
+        expect(source).not.toContain('@liria24/site-admin/internal/form')
         const form = siteAdminNuxtFormTemplate()
-        expect(form).toContain("from '@liria24/site-admin/form'")
+        expect(form).toContain("from '@liria24/site-admin/internal/form'")
         const types = siteAdminNuxtModelTypes('C:\\project\\site-admin.config.ts', ['production', 'preview'])
         expect(types).toContain('C:/project/site-admin.config.ts')
         expect(types).toContain('publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>')

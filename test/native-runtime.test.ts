@@ -49,7 +49,7 @@ it('awaits request initialization and keeps context identity isolated', async ()
 
 it('native HTTP handlers preserve intentional auth statuses, redact errors and return Web responses', async () => {
     const database = createDatabase(nodeSqlite({ name: ':memory:' }))
-    const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+    const config = defineSiteAdminConfig({ models: { posts: { fields: { slug: text(), title: text() } } } })
     try {
         await migrateTestDatabase(database, config)
         const adapter = await testAdapter(database, config)

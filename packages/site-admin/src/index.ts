@@ -1,4 +1,4 @@
-export { defineSiteAdminAuthorization, defineSiteAdminConfig } from './config'
+export { defineSiteAdminConfig } from './config'
 export type {
     InferModelData,
     InferPublicModelData,
@@ -27,14 +27,12 @@ export type { SiteAdminRouteRule, SiteAdminRouteRules } from './seo'
 export type {
     InferSiteAdminNamedAiActions,
     SiteAdminAiActionData,
-    SiteAdminAiActionProps,
+    SiteAdminAiActionInput,
     SiteAdminNamedAiAction,
     SiteAdminDecisionModel,
 } from './ai/actions'
 export { SiteAdminError } from './errors'
 export type { SiteAdminErrorCode, SiteAdminIssue } from './errors'
-export { createSiteAdminDescriptor } from './descriptor'
-export type { FieldDescriptor, ModelDescriptor, SiteAdminDescriptor } from './descriptor'
 export {
     array,
     boolean,
@@ -61,3 +59,8 @@ export type {
     EntryMutationResult,
     EntryPage,
 } from './server/types'
+
+export type { Entry, Revision, Content, Asset } from './public-client'
+export type { EntryFeatures, EntryPrepareContext } from './model'
+export type { SiteAdminLifecycleEvent } from './config'
+export type { SiteAdminDatabaseContext } from './runtime/database'

@@ -12,7 +12,8 @@ const fixture = await mkdtemp(join(workspace, '.tmp/nuxt-module-'))
 const lifecycleFile = `${fixture}-lifecycle.jsonl`
 const config = (title: string, aiChanged = false) => `import { defineSiteAdminConfig, text } from '@liria24/site-admin'
 import { required } from '#policy'
-export default defineSiteAdminConfig({ ai: { actions: ${aiChanged ? "{ suggest: { type: 'text-generation', props: {}, prompt: () => 'AI server sentinel' } }" : '{}'} }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
+import { z } from 'zod'
+export default defineSiteAdminConfig({ ai: { actions: ${aiChanged ? "{ suggest: { type: 'text-generation', input: z.object({}), prompt: () => 'AI server sentinel' } }" : '{}'} }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
 await mkdir(join(fixture, 'server/api'), { recursive: true })
 await mkdir(join(fixture, 'app'), { recursive: true })
 await writeFile(join(fixture, 'policy.ts'), 'export const required = true\n')
@@ -42,7 +43,7 @@ await writeFile(join(fixture, 'app/app.vue'), '<template><div>module integration
 await writeFile(
     join(fixture, 'server/api/probe.get.ts'),
     `import { useServerFiles as nativeFiles } from 'nuxt-files-sdk/runtime'
-import { useServerFiles as bridgedFiles } from '#nuxt-files-sdk/runtime'
+import { useServerFiles as bridgedFiles } from 'nuxt-files-sdk/runtime'
 export default defineEventHandler(() => ({ ...useRuntimeConfig().probe, filesReady: nativeFiles() === bridgedFiles() && nativeFiles() === useServerFiles() }))
 `,
 )
@@ -62,42 +63,40 @@ export default () => {
   // @ts-expect-error Unknown Site Admin hook.
   useServerHooks().hook('site-admin:missing', () => {})
 }
-const admin: ReturnType<typeof import('@liria24/site-admin/nuxt/server').useSiteAdmin> = useSiteAdmin()
+const admin: ReturnType<typeof import('@liria24/site-admin/server').useAdmin> = useAdmin()
 void admin
 `,
 )
 await writeFile(
     join(fixture, 'app/types.ts'),
-    `const client: import('@liria24/site-admin/client').SiteAdminClient = useSiteAdminClient()
-const route = useSiteAdminRoute()
-// @ts-expect-error No such public client method.
+    `const client = useAdminClient()
+// @ts-expect-error No such client method.
 client.missing()
 const checkModels = async () => {
-  const posts = await client.list('posts')
-  const title: string = posts[0]!.data.title
+  const { data } = await useContent('posts')
+  const title: string = data.value![0]!.data.title
   // @ts-expect-error Public model names come from the domain config.
-  await client.list('missing')
+  await useContent('missing')
   // @ts-expect-error The public field type is inferred without consumer generics.
-  const invalidTitle: number = posts[0]!.data.title
-  const management = useSiteAdminManagementClient()
-  await management.createEntry('posts', { data: { title: 'Typed' } })
+  const invalidTitle: number = data.value![0]!.data.title
+  await client.entries.create('posts', { title: 'Typed' })
   // @ts-expect-error Unknown management model.
-  await management.createEntry('missing', { data: {} })
+  await client.entries.create('missing', {})
   // @ts-expect-error Required model field is missing.
-  await management.createEntry('posts', { data: {} })
+  await client.entries.create('posts', {})
   // @ts-expect-error The management field type is inferred.
-  await management.createEntry('posts', { data: { title: 123 } })
-  const entry = (await management.listEntries('posts')).items[0]!
-  const controller = await useSiteAdminForm('posts', { entry })
-  const formTitle: string = controller.form.state.values.title
-  // @ts-expect-error Unknown form model.
-  await useSiteAdminForm('missing', {})
-  // @ts-expect-error Form default values use the configured model field types.
-  await useSiteAdminForm('posts', { defaultValues: { title: 123 } })
+  await client.entries.create('posts', { title: 123 })
+  const entry = (await client.entries.list('posts')).items[0]!
+  const resource = await useAdminEntry('posts', entry.id)
+  const { form } = useEntryForm(resource)
+  const formTitle: string = form.state.values.title
+  // @ts-expect-error Unknown model.
+  await useAdminEntry('missing', null)
+  // @ts-expect-error Default values retain model field types.
+  useEntryForm(resource, { defaultValues: { title: 123 } })
   void [title, invalidTitle, formTitle]
 }
 void checkModels
-void route
 `,
 )
 

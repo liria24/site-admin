@@ -14,14 +14,18 @@ const config = defineSiteAdminConfig({
             proofread: {
                 type: 'text-generation',
                 model,
-                props: { content: z.string(), tone: z.string().optional() },
+                input: z.object({ content: z.string(), tone: z.string().optional() }).strict(),
                 prompt: ({ content, tone }) => content.toUpperCase() + (tone ?? ''),
                 output: Output.object({ schema: z.object({ content: z.string() }) }),
             },
-            text: { type: 'text-generation', props: { content: z.string() }, prompt: ({ content }) => content },
+            text: {
+                type: 'text-generation',
+                input: z.object({ content: z.string() }).strict(),
+                prompt: ({ content }) => content,
+            },
             guarded: {
                 type: 'text-generation',
-                props: { count: z.string().transform(Number) },
+                input: z.object({ count: z.string().transform(Number) }).strict(),
                 prompt: ({ count }) => String(count.toFixed()),
                 output: async ({ count }) =>
                     Output.object({ schema: z.object({ count: z.number().refine((value) => value === count) }) }),
@@ -29,7 +33,7 @@ const config = defineSiteAdminConfig({
             classify: {
                 type: 'decision',
                 model: decisionModel,
-                props: { content: z.string() },
+                input: z.object({ content: z.string() }).strict(),
                 state: ({ content }) => ({ content }),
                 questions: {
                     category: {
@@ -43,22 +47,22 @@ const config = defineSiteAdminConfig({
     },
 })
 type Actions = InferSiteAdminNamedAiActions<typeof config>
-const props: Actions['proofread']['props'] = { content: 'Typed' }
+const input: Actions['proofread']['input'] = { content: 'Typed' }
 const result: Actions['proofread']['data'] = { content: 'Typed' }
 const text: Actions['text']['data'] = 'Typed'
 const guarded: Actions['guarded']['data'] = { count: 1 }
-const guardedProps: Actions['guarded']['props'] = { count: '1' }
+const guardedProps: Actions['guarded']['input'] = { count: '1' }
 // @ts-expect-error schema input differs from validated prompt input
-const wrongGuardedProps: Actions['guarded']['props'] = { count: 1 }
+const wrongGuardedProps: Actions['guarded']['input'] = { count: 1 }
 const decision: Actions['classify']['data'] = { category: { type: 'choice', choice: 'technology' } }
 // @ts-expect-error output remains the native object shape
 const wrongOutput: Actions['proofread']['data'] = 'Typed'
 // @ts-expect-error native decision choices are preserved
 const wrongChoice: Actions['classify']['data'] = { category: { type: 'choice', choice: 'unknown' } }
 // @ts-expect-error schema input requires content
-const missingProp: Actions['proofread']['props'] = {}
-// @ts-expect-error props do not accept an unknown key
-const extraProp: Actions['proofread']['props'] = { content: 'Typed', unknown: true }
+const missingProp: Actions['proofread']['input'] = {}
+// @ts-expect-error input do not accept an unknown key
+const extraProp: Actions['proofread']['input'] = { content: 'Typed', unknown: true }
 defineSiteAdminConfig({
     models: {},
     ai: {
@@ -66,7 +70,7 @@ defineSiteAdminConfig({
             // @ts-expect-error a language model is not a native decision model
             wrong: {
                 type: 'decision',
-                props: { content: z.string() },
+                input: z.object({ content: z.string() }).strict(),
                 state: ({ content }) => ({ content }),
                 questions: {},
                 model,
@@ -81,7 +85,7 @@ defineSiteAdminConfig({
             // @ts-expect-error a decision model cannot generate text
             wrong: {
                 type: 'text-generation',
-                props: { content: z.string() },
+                input: z.object({ content: z.string() }).strict(),
                 prompt: ({ content }) => content,
                 model: decisionModel,
             },
@@ -89,7 +93,7 @@ defineSiteAdminConfig({
     },
 })
 void [
-    props,
+    input,
     result,
     text,
     guarded,

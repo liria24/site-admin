@@ -264,14 +264,13 @@ describe('internal Markdown asset contracts', () => {
     it('preserves content source identity, nested fields, frontmatter and document output shape', async () => {
         const body = '---\ntitle: Frontmatter\n---\nIntro\n\n<!-- more -->\n\n![a](site-admin://asset/a)'
         const entry = {
-            data: { body, sections: [{ body }] },
             id: 'entry',
             locale: '',
             model: 'posts',
             path: '/posts/post',
             publishedAt: '2026-01-01',
             revisionId: 'revision',
-            slug: 'post',
+            data: { slug: 'post', body, sections: [{ body }] },
         }
         const content = createMarkdownContent(
             'posts',
@@ -281,7 +280,7 @@ describe('internal Markdown asset contracts', () => {
             url,
         )
         const [item] = await content.list()
-        expect(item?.path).toBe('/posts/post')
+        expect(item?.path).toBe('/posts/entry')
         expect(item?.data).toMatchObject({
             _siteAdmin: { id: 'entry', revisionId: 'revision', path: '/posts/post' },
             body: { frontmatter: { title: 'Frontmatter' }, meta: { summary: [['p', {}, 'Intro']] } },
@@ -289,6 +288,6 @@ describe('internal Markdown asset contracts', () => {
         const data = item!.data as { body: { nodes: Node[] }; sections: { body: { nodes: Node[] } }[] }
         expect(elements(data.body.nodes, 'img')[0]?.[1].src).toBe(url('a'))
         expect(elements(data.sections[0]!.body.nodes, 'img')[0]?.[1].src).toBe(url('a'))
-        expect(entry.data).toEqual({ body, sections: [{ body }] })
+        expect(entry.data).toEqual({ slug: 'post', body, sections: [{ body }] })
     })
 })

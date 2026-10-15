@@ -26,7 +26,12 @@ await writeFile(
     migrations + '/0001_initial.sql',
     await generateFixtureSQL(
         defineSiteAdminConfig({
-            models: { posts: { fields: { attachment: file(), title: text({ required: true }) }, route: true } },
+            models: {
+                posts: {
+                    fields: { slug: text(), attachment: file(), title: text({ required: true }) },
+                    route: '/posts/:slug',
+                },
+            },
         }),
         fixture + '/.data/schema',
     ),

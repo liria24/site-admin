@@ -7,7 +7,7 @@ import {
 } from '../packages/site-admin/src'
 
 const common = defineSiteAdminConfig({
-    models: { posts: { fields: { title: text({ required: true }) } } },
+    models: { posts: { fields: { slug: text(), title: text({ required: true }) } } },
     storage: { content: { adapter: 'fs', config: { root: './files' } } },
     $production: { routes: [{ path: '/files', storage: 'content' }], assets: { maxUploadSize: 2 } },
     $env: { staging: { assets: { maxUploadSize: 3 } } },
@@ -25,11 +25,11 @@ defineSiteAdminConfig({ models: {}, $production: { storage: { adapter: 'fs', con
 defineSiteAdminConfig({ models: {}, storage: { adapter: 'memory', madeUpOption: true } })
 
 const environmentModels = defineSiteAdminConfig({
-    models: { posts: { fields: { title: text({ required: true }) } } },
+    models: { posts: { fields: { slug: text(), title: text({ required: true }) } } },
     $production: {
         models: {
-            posts: { public: false, fields: { summary: text({ required: true }) } },
-            pages: { fields: { title: text({ required: true }) } },
+            posts: { public: false, fields: { slug: text(), summary: text({ required: true }) } },
+            pages: { fields: { slug: text(), title: text({ required: true }) } },
         },
     },
 })
@@ -49,8 +49,8 @@ void noPrivatePost
 // Application-owned adapters and SDK models replace as opaque values, including inferred types.
 declare const originalDatabase: import('../packages/site-admin/src/adapter').SiteAdminDatabase & { oldMarker: true }
 declare const productionDatabase: import('../packages/site-admin/src/adapter').SiteAdminDatabase & { replacement: true }
-declare const originalModel: import('ai').LanguageModel & { oldMarker: true }
-declare const productionModel: import('ai').LanguageModel & { replacement: true }
+declare const originalModel: import('ai/test').MockLanguageModelV4 & { oldMarker: true }
+declare const productionModel: import('ai/test').MockLanguageModelV4 & { replacement: true }
 const opaqueEnvironment = defineSiteAdminConfig({
     models: {},
     database: originalDatabase,

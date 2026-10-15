@@ -25,13 +25,11 @@ const decodeObject = (value: string): Record<string, unknown> => {
         throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', 'Stored revision data is not an object.')
     return result as Record<string, unknown>
 }
-const decodeSlug = (slug: string) => (slug.startsWith('?site-admin-draft:') ? '' : slug)
-const encodeSlug = (slug: string, entryId: string) => slug || `?site-admin-draft:${entryId}`
 const entryColumns = `e.id, e.model, e.locale, e.translation_group AS translationGroup, e.current_revision_id AS currentRevisionId,
     e.published_revision_id AS publishedRevisionId, e.scheduled_revision_id AS scheduledRevisionId, e.scheduled_at AS scheduledAt,
     e.sort_order AS sortOrder, e.version, e.created_at AS createdAt, e.updated_at AS updatedAt, e.published_at AS publishedAt,
-    r.id AS revisionId, r.data, r.slug`
-const publishedColumns = `e.id, e.model, e.locale, e.published_at AS publishedAt, e.translation_group AS translationGroup, r.id AS revisionId, r.data, r.slug`
+    r.id AS revisionId, r.data`
+const publishedColumns = `e.id, e.model, e.locale, e.published_at AS publishedAt, e.translation_group AS translationGroup, r.id AS revisionId, r.data`
 const assetColumns = `id, storage, key, content_type AS contentType, size, checksum, metadata, state,
     operation_token AS operationToken, lease_expires_at AS leaseExpiresAt, created_at AS createdAt, updated_at AS updatedAt`
 type StoredEntry = Omit<EntryRecord, 'data'> & { data: string }
@@ -41,18 +39,15 @@ type StoredAsset = Omit<AssetRecord, 'metadata'> & { metadata: string }
 const entry = (row: StoredEntry): EntryRecord => ({
     ...row,
     data: decodeObject(row.data),
-    slug: decodeSlug(row.slug),
     version: Number(row.version),
 })
 const revision = (row: StoredRevision): RevisionRecord => ({
     ...row,
     data: decodeObject(row.data),
-    slug: decodeSlug(row.slug),
 })
 const published = (row: StoredPublished): StoragePublishedEntry => ({
     ...row,
     data: decodeObject(row.data),
-    slug: decodeSlug(row.slug),
 })
 const asset = (row: StoredAsset): AssetRecord => ({
     ...row,
@@ -163,23 +158,21 @@ export const sqliteStorage = (
         }
         if (filter.q) {
             const q = filter.q
-            const slug = searchPredicate('search_slug', q),
-                data = searchPredicate('search_data', q)
-            clauses.push(`(${slug.sql} OR ${data.sql})`)
-            params.push(...slug.params, ...data.params)
+            const data = searchPredicate('search_data', q)
+            clauses.push(data.sql)
+            params.push(...data.params)
         }
         return { sql: clauses.join(' AND '), params }
     }
     let scopePromise: Promise<string> | undefined
     const scope = () => (scopePromise ??= searchScope(source))
-    const searchJoins = ` LEFT JOIN site_admin_meta search_data ON search_data.key='${searchPrefix}'||hex(r.id)||':'||?||':data'
-        LEFT JOIN site_admin_meta search_slug ON search_slug.key='${searchPrefix}'||hex(r.id)||':'||?||':slug'`
+    const searchJoins = ` LEFT JOIN site_admin_meta search_data ON search_data.key='${searchPrefix}'||hex(r.id)||':'||?||':data'`
     const contentFrom = `FROM site_admin_entries e JOIN ${source} r ON r.id=e.current_revision_id`
     const missingSearch = (filter: StorageEntryFilter, fingerprint: string) => {
         const where = entryFilter({ ...filter, q: '' })
         return {
-            from: `${contentFrom}${searchJoins} WHERE ${where.sql} AND (search_data.key IS NULL OR search_slug.key IS NULL)`,
-            params: [fingerprint, fingerprint, ...where.params],
+            from: `${contentFrom}${searchJoins} WHERE ${where.sql} AND search_data.key IS NULL`,
+            params: [fingerprint, ...where.params],
         }
     }
     const populateSearch = async (filter: StorageEntryFilter, fingerprint: string, budget: { remaining: number }) => {
@@ -201,34 +194,16 @@ export const sqliteStorage = (
                 bytes += Number(candidate.bytes)
             }
             budget.remaining--
-            const values = await rows<{ id: string; data: string; slug: string }>(
-                `SELECT r.id,r.data,r.slug FROM ${source} r WHERE r.id IN (SELECT value FROM json_each(?))`,
+            const values = await rows<{ id: string; data: string }>(
+                `SELECT r.id,r.data FROM ${source} r WHERE r.id IN (SELECT value FROM json_each(?))`,
                 [JSON.stringify(ids)],
             )
             const prepared = values.map((candidate) => {
-                const text = searchText(decodeObject(candidate.data), decodeSlug(candidate.slug))
+                const text = searchText(decodeObject(candidate.data))
                 return { id: candidate.id, text, parts: searchParts(text) }
             })
             if (!prepared.length) continue
-            if (prepared.every((candidate) => candidate.parts.length === 2)) {
-                budget.remaining--
-                await execute([
-                    {
-                        sql: `WITH candidates(id,data,slug) AS (VALUES ${prepared.map(() => '(?,?,?)').join(',')}) INSERT INTO site_admin_meta(key,value)
-                    SELECT '${searchPrefix}'||hex(c.id)||':'||?||':data',c.data FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1
-                    UNION ALL SELECT '${searchPrefix}'||hex(c.id)||':'||?||':slug',c.slug FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1 ON CONFLICT(key) DO NOTHING`,
-                        params: [
-                            ...prepared.flatMap((candidate) => [
-                                candidate.id,
-                                candidate.text.data,
-                                candidate.text.slug,
-                            ]),
-                            fingerprint,
-                            fingerprint,
-                        ],
-                    },
-                ])
-            } else {
+            {
                 const parts: Array<{ id: string; part: string; value: string }> = []
                 for (const candidate of prepared) {
                     if (Math.ceil((parts.length + candidate.parts.length) / 32) > budget.remaining) break
@@ -262,7 +237,7 @@ export const sqliteStorage = (
         const fingerprint = filter.q ? await scope() : undefined
         const where = entryFilter(filter)
         const from = `${contentFrom}${fingerprint ? searchJoins : ''} WHERE ${where.sql}`
-        const params = [...(fingerprint ? [fingerprint, fingerprint] : []), ...where.params]
+        const params = [...(fingerprint ? [fingerprint] : []), ...where.params]
         const budget = { remaining: 24 }
         for (let attempt = 0; attempt < 3; attempt++) {
             if (fingerprint) await populateSearch(filter, fingerprint, budget)
@@ -340,7 +315,7 @@ export const sqliteStorage = (
         },
         readRevision: async (id, entryId) => {
             const value = await row<StoredRevision>(
-                `SELECT id,entry_id AS entryId,actor_id AS actorId,created_at AS createdAt,data,slug FROM ${source} WHERE id=?${entryId === undefined ? '' : ' AND entry_id=?'}`,
+                `SELECT id,entry_id AS entryId,actor_id AS actorId,created_at AS createdAt,data FROM ${source} WHERE id=?${entryId === undefined ? '' : ' AND entry_id=?'}`,
                 entryId === undefined ? [id] : [id, entryId],
             )
             return value && revision(value)
@@ -348,7 +323,7 @@ export const sqliteStorage = (
         revisions: async (entryId) =>
             (
                 await rows<StoredRevision>(
-                    `SELECT id,entry_id AS entryId,actor_id AS actorId,created_at AS createdAt,data,slug FROM ${source} WHERE entry_id=? ORDER BY created_at DESC`,
+                    `SELECT id,entry_id AS entryId,actor_id AS actorId,created_at AS createdAt,data FROM ${source} WHERE entry_id=? ORDER BY created_at DESC`,
                     [entryId],
                 )
             ).map(revision),
@@ -420,10 +395,6 @@ export const sqliteStorage = (
             if (filter.locale !== undefined) {
                 clauses.push('e.locale=?')
                 params.push(filter.locale)
-            }
-            if (filter.key !== undefined) {
-                clauses.push('(r.slug=? OR e.id=?)')
-                params.push(filter.key, filter.key)
             }
             for (const [column, values] of [
                 ['e.id', filter.ids],
@@ -529,10 +500,9 @@ export const sqliteStorage = (
             }
             for (const value of input.revisions ?? []) {
                 statements.push(
-                    gated('INSERT INTO site_admin_revisions(id,entry_id,slug,actor_id,created_at) SELECT ?,?,?,?,?', [
+                    gated('INSERT INTO site_admin_revisions(id,entry_id,actor_id,created_at) SELECT ?,?,?,?', [
                         value.id,
                         value.entryId,
-                        encodeSlug(value.slug, value.entryId),
                         value.actorId,
                         value.createdAt,
                     ]),
@@ -549,7 +519,7 @@ export const sqliteStorage = (
                         .filter((name) => value.data[name] !== undefined && value.data[name] !== null)
                         .map((name) => [name, value.data[name]]),
                 )
-                const text = searchText(projected, value.slug)
+                const text = searchText(projected)
                 const parts = searchParts(text)
                 for (let offset = 0; offset < parts.length; offset += 48) {
                     const batch = parts.slice(offset, offset + 48)
@@ -659,6 +629,22 @@ export const sqliteStorage = (
                     query: true,
                     expectRow: true,
                 })
+            for (const id of input.prune ?? []) {
+                const unused = `SELECT r.id FROM site_admin_revisions r WHERE r.entry_id=? AND NOT EXISTS (SELECT 1 FROM site_admin_entries e WHERE e.id=r.entry_id AND (e.current_revision_id=r.id OR e.published_revision_id=r.id OR e.scheduled_revision_id=r.id)) AND NOT EXISTS (SELECT 1 FROM site_admin_routes route WHERE route.revision_id=r.id)`
+                for (const table of ['site_admin_asset_refs', 'site_admin_relations'])
+                    statements.push({
+                        sql: `DELETE FROM ${table} WHERE revision_id IN (${unused}) AND ${guard.clause}`,
+                        params: [id, ...guard.params],
+                    })
+                statements.push({
+                    sql: `DELETE FROM site_admin_meta WHERE key IN (SELECT m.key FROM site_admin_revisions r JOIN site_admin_meta m ON m.key>='${searchPrefix}'||hex(r.id)||':' AND m.key<'${searchPrefix}'||hex(r.id)||':~' WHERE r.id IN (${unused})) AND ${guard.clause}`,
+                    params: [id, ...guard.params],
+                })
+                statements.push({
+                    sql: `DELETE FROM site_admin_revisions WHERE id IN (${unused}) AND ${guard.clause}`,
+                    params: [id, ...guard.params],
+                })
+            }
             statements.push({ sql: 'DELETE FROM site_admin_meta WHERE key=?', params: [witness] })
             await execute(statements)
         },

@@ -15,6 +15,7 @@ export interface SiteAdminOptions<Context = unknown> {
     authorize?: (request: Request, context?: Context) => Promise<SiteAdminActor | null> | SiteAdminActor | null
     config: SiteAdminConfig
     database: Database
+    afterCommit?: (event: import('../config').SiteAdminLifecycleEvent) => Promise<void> | void
     getFiles?: FilesResolver
     id?: () => string
     locales?: {
@@ -41,7 +42,6 @@ export interface EntryInput {
     data: Record<string, unknown>
     id?: string
     locale?: string
-    slug?: string
     sortOrder?: number | null
     translationGroup?: string
 }
@@ -50,13 +50,12 @@ export interface EntryInput {
 export type PublishEntryInput<Data = Record<string, unknown>> = {
     actorId?: string
     expectedVersion: number
-} & ({ revisionId?: string; draft?: never } | { draft: { data: Data; slug?: string }; revisionId?: never })
+} & ({ revisionId?: string; draft?: never } | { draft: { data: Data }; revisionId?: never })
 
 export interface UpdateEntryInput {
     actorId?: string
     data: Record<string, unknown>
     expectedVersion: number
-    slug?: string
 }
 
 export interface EntryRecord {
@@ -71,7 +70,6 @@ export interface EntryRecord {
     revisionId: string
     scheduledAt: string | null
     scheduledRevisionId: string | null
-    slug: string
     sortOrder: number | null
     translationGroup: string
     updatedAt: string
@@ -84,7 +82,6 @@ export interface RevisionRecord {
     data: Record<string, unknown>
     entryId: string
     id: string
-    slug: string
 }
 
 export interface EntryMutationReceipt {
@@ -143,7 +140,6 @@ export interface PublicEntry<Data = Record<string, unknown>> {
     publishedAt: string
     revisionId: string
     seo?: PublicEntrySeo
-    slug: string
 }
 
 export interface AssetRecord {

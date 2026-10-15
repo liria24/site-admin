@@ -7,7 +7,7 @@ import { defineUseFetchAddon } from '#app/composables/addons'
 import { hashKey } from '#app'
 import type { UseFetchOptions } from '#app/composables/fetch'
 import type { AsyncDataExecuteOptions, AsyncDataMiddleware } from '#app/composables/asyncData'
-import type { SiteAdminNamedAiActions } from '@liria24/site-admin/client'
+import type { SiteAdminNamedAiActions } from '@liria24/site-admin/internal/client'
 
 // Nuxt owns hashing, SSR payload hydration, cancellation and AsyncData state.
 export const siteAdminAiFetch = createUseFetch({
@@ -46,16 +46,16 @@ export const siteAdminAiFetch = createUseFetch({
 })
 
 type AiActionName = Extract<keyof SiteAdminNamedAiActions, string>
-export type UseAiActionOptions<Name extends AiActionName> =
+export type UseAiOptions<Name extends AiActionName> =
   Pick<UseFetchOptions<SiteAdminNamedAiActions[Name]['data']>, 'immediate' | 'server' | 'lazy' | 'timeout' | 'dedupe' | 'deep'> & {
-    props: MaybeRefOrGetter<SiteAdminNamedAiActions[Name]['props']>
+    input: MaybeRefOrGetter<SiteAdminNamedAiActions[Name]['input']>
     authScope?: MaybeRefOrGetter<string>
   }
 
-export function useAiAction<Name extends AiActionName>(name: Name, options: UseAiActionOptions<Name>) {
-  const { props, authScope, ...nativeOptions } = options
+export function useAi<Name extends AiActionName>(name: Name, options: UseAiOptions<Name>) {
+  const { input, authScope, ...nativeOptions } = options
   const scope = useSiteAdminAuthScope(authScope)
-  const body = computed(() => ({ props: JSON.parse(JSON.stringify(toValue(props))) }))
+  const body = computed(() => ({ input: JSON.parse(JSON.stringify(toValue(input))) }))
   const path = ${JSON.stringify(options.managementBase.replace(/\/$/u, '') + '/ai/actions/')} + encodeURIComponent(name)
   const connection = siteAdminManagementClientOptions()
   const key = computed(() => 'site-admin-ai:' + hashKey([connection.origin, path, scope.value, body.value]))

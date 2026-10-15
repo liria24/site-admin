@@ -72,6 +72,7 @@ const initialize = (
         'useRuntimeConfig',
         'useRequestURL',
         'useNuxtApp',
+        'tryUseNuxtApp',
         'defineOgImage',
         'computed',
         'toValue',
@@ -80,13 +81,14 @@ const initialize = (
         'watch',
         'createSiteAdminRouteResolver',
         'mergeSiteAdminSeo',
-        `${compiled}\nreturn useSeo`,
-    ) as (
-        ...dependencies: unknown[]
-    ) => (
-        input?: Input | ReturnType<typeof ref<Input>> | (() => Input),
-        override?: Input | ReturnType<typeof ref<Input>> | (() => Input),
-    ) => void
+        `${compiled}\nreturn { useSeo: useSiteAdminSeoMetadata, useSiteAdminSeoMetadata }`,
+    ) as (...dependencies: unknown[]) => {
+        useSeo: (
+            input?: Input | ReturnType<typeof ref<Input>> | (() => Input),
+            override?: Input | ReturnType<typeof ref<Input>> | (() => Input),
+        ) => void
+        useSiteAdminSeoMetadata: (input?: Input | (() => Input)) => void
+    }
     const scope = effectScope()
     scopes.push(scope)
     const helper = create(
@@ -106,6 +108,7 @@ const initialize = (
                 }
             },
         }),
+        () => undefined,
         defineOgImage,
         computed,
         toValue,
@@ -115,18 +118,22 @@ const initialize = (
         createSiteAdminRouteResolver,
         mergeSiteAdminSeo,
     )
-    const useSeo = (...args: Parameters<typeof helper>) => scope.run(() => helper(...args))
+    const useSeo = (...args: Parameters<typeof helper.useSeo>) => scope.run(() => helper.useSeo(...args))
+    const useMetadata = (...args: Parameters<typeof helper.useSiteAdminSeoMetadata>) =>
+        scope.run(() => helper.useSiteAdminSeoMetadata(...args))
     const meta = () =>
         Object.fromEntries(
-            Object.entries(useSeoMeta.mock.calls.at(-1)![0] as Record<string, unknown>).map(([name, value]) => [
-                name,
-                typeof value === 'function' ? (value as () => unknown)() : value,
-            ]),
+            useSeoMeta.mock.calls.flatMap(([input]) =>
+                Object.entries(input as Record<string, unknown>).map(([name, value]) => [
+                    name,
+                    typeof value === 'function' ? (value as () => unknown)() : value,
+                ]),
+            ),
         )
-    return { useSeo, useHead, useSeoMeta, defineOgImage, route, meta, contexts, scope }
+    return { useSeo, useMetadata, useHead, useSeoMeta, defineOgImage, route, meta, contexts, scope }
 }
 
-describe('generated Nuxt useSeo', () => {
+describe('automatic Nuxt SEO metadata', () => {
     it('automatic metadata consumes entry.seo through the same reactive defaults/route resolver', async () => {
         const state = ref<{ kind: string; entry: { locale: string; seo: PublicEntrySeo; data: unknown } } | null>(null)
         const result = {
@@ -141,8 +148,11 @@ describe('generated Nuxt useSeo', () => {
         const middleware = new Function(
             'defineNuxtRouteMiddleware',
             'useState',
-            'useSiteAdminClient',
+            'createSiteAdminClient',
+            'siteAdminPublicClientOptions',
             'navigateTo',
+            'useRequestURL',
+            'useNuxtApp',
             siteAdminNuxtRouteTemplate({ i18n: false }, { supported: [], strategy: 'no_prefix' })
                 .replace(/^import .*\n/gmu, '')
                 .replace('export default ', 'return '),
@@ -150,11 +160,14 @@ describe('generated Nuxt useSeo', () => {
             (value: unknown) => value,
             () => state,
             () => client,
+            () => ({}),
             vi.fn(),
+            () => new URL('https://site.test'),
+            () => ({}),
         ) as (route: { path: string }) => Promise<void>
         await middleware({ path: '/page' })
         expect(client.resolveRoute).toHaveBeenCalledOnce()
-        expect(state.value).toEqual(result)
+        expect(state.value).toEqual({ ...result, path: '/page', origin: 'https://site.test' })
         const helper = initialize(false, {
             seo: { titleTemplate: '%s | Global' },
             routeRules: { '/page': { seo: { robots: 'noindex, follow' } } },
@@ -162,16 +175,20 @@ describe('generated Nuxt useSeo', () => {
         const plugin = new Function(
             'defineNuxtPlugin',
             'useState',
-            'useSeo',
+            'useSiteAdminSeoMetadata',
             'useHead',
+            'useRoute',
+            'computed',
             siteAdminNuxtMetadataTemplate({ seo: true, ogImage: false, schemaOrg: false })
                 .replace(/^import .*\n/gmu, '')
                 .replace('export default ', 'return '),
         )(
             (value: unknown) => value,
             () => state,
-            helper.useSeo,
+            helper.useMetadata,
             helper.useHead,
+            () => ({ path: '/page' }),
+            computed,
         ) as () => void
         helper.scope.run(plugin)
         expect(helper.meta()).toMatchObject({
@@ -281,6 +298,21 @@ describe('generated Nuxt useSeo', () => {
         expect(headTags).toMatch(/name="twitter:card"[^>]+content="summary"/u)
     })
 
+    it('allows native page and layout head metadata to override automatic defaults', async () => {
+        const head = nativeHead.createHead()
+        head.push({ meta: [{ name: 'robots', content: 'index, follow' }] }, { tagPriority: 'high' })
+        const { useMetadata } = initialize(
+            false,
+            { seo: { title: 'Default', titleTemplate: '%s | Site', robots: 'noindex, follow' } },
+            head,
+        )
+        useMetadata()
+        head.push({ title: 'New Post', titleTemplate: '%s | Admin' })
+        const { headTags } = await head.render()
+        expect(headTags).toContain('<title>New Post | Admin</title>')
+        expect(headTags).toMatch(/name="robots"[^>]+content="noindex, follow"/u)
+    })
+
     it('clears inherited title templates and disables earlier generated image tags in actual Unhead', async () => {
         const head = nativeHead.createHead()
         head.push(
@@ -301,7 +333,7 @@ describe('generated Nuxt useSeo', () => {
         const { useSeo } = initialize(false, {}, head)
         useSeo({ title: 'Page', titleTemplate: null, image: false })
         const { headTags } = await head.render()
-        expect(headTags).toContain('<title>Page</title>')
+        expect(headTags).toContain('<title>Page | Earlier</title>')
         expect(headTags).not.toContain('og:image')
         expect(headTags).not.toContain('twitter:image')
     })

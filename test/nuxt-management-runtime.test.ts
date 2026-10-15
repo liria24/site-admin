@@ -1,3 +1,4 @@
+import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import {
     generatedRuntimeSource,
     nativeNuxtDependencies,
@@ -5,6 +6,7 @@ import {
     nativeRuntimeSource,
     readNuxtSource,
 } from './nuxt-native-runtime'
+import { modelEntry as modelRecord } from './model-fixture'
 import { createError } from 'h3'
 import { describe, expect, it } from 'vitest'
 import * as Vue from 'vue'
@@ -16,12 +18,10 @@ import {
     SiteAdminClientError,
     type SiteAdminManagementClient,
 } from '../packages/site-admin/src/client'
-import { createSiteAdminDescriptor, defineSiteAdminConfig, image, text } from '../packages/site-admin/src'
-import {
-    siteAdminNuxtClientTemplate,
-    siteAdminNuxtFormTemplate,
-} from '../packages/site-admin/src/nuxt/client-templates'
-import { useSiteAdminForm } from '../packages/site-admin/src/form'
+import { defineSiteAdminConfig, image, text } from '../packages/site-admin/src'
+import { siteAdminNuxtClientTemplate } from '../packages/site-admin/src/nuxt/client-templates'
+import { useEntryForm } from '../packages/site-admin/src/form'
+import { createSiteAdminModel, siteAdminModelError, type SiteAdminModel } from '../packages/site-admin/src/model'
 
 interface State {
     data: Vue.Ref<unknown>
@@ -41,20 +41,12 @@ interface Helpers {
         locale?: string,
     ): string
     siteAdminManagementClientOptions(): import('../packages/site-admin/src/client').SiteAdminManagementClientOptions
-    useAiAction(name: string, options: Record<string, unknown>): State & Promise<State>
-    useSiteAdminForm(
-        model: string,
-        options: Record<string, unknown>,
-    ): Promise<ReturnType<typeof useSiteAdminForm<Record<string, unknown>>>>
-    useSiteAdminManagementList(model: string, options?: Record<string, unknown>): State
-    useSiteAdminManagementEntry(
-        model: string,
-        id: Vue.MaybeRefOrGetter<string>,
-        options?: Record<string, unknown>,
-    ): State
-    useSiteAdminList(model: string, options?: Record<string, unknown>): State
-    useSiteAdminEntry(model: string, id: string, options?: Record<string, unknown>): State
-    useSiteAdminBatch(requests: Record<string, unknown>, options?: Record<string, unknown>): State
+    useAi(name: string, options: Record<string, unknown>): State & Promise<State>
+    modelList(model: string, options?: Record<string, unknown>): State
+    modelEntry(model: string, id: Vue.MaybeRefOrGetter<string>, options?: Record<string, unknown>): State
+    publicList(model: string, options?: Record<string, unknown>): State
+    publicEntry(model: string, id: string, options?: Record<string, unknown>): State
+    publicBatch(requests: Record<string, unknown>, options?: Record<string, unknown>): State
     useSiteAdminManagementClient(): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     createNuxtSiteAdminManagementClient(
         connection: { origin: string; basePath: string; fetch: typeof fetch; credentials?: RequestCredentials },
@@ -96,6 +88,7 @@ const nativeEnvironment = async (
                 await Promise.all([...(hooks.get(name) ?? [])].map((callback) => callback(...args)))
             },
         },
+        callHook: async () => {},
         runWithContext: <Value>(callback: () => Value): Value => callback(),
     }
     const nativeDependencies = {
@@ -129,7 +122,15 @@ const nativeEnvironment = async (
     )
     let managementFactories = 0
     let requestFetches = 0
+    const states = new Map<string, Vue.Ref<unknown>>()
     const dependencies = {
+        createSiteAdminModel,
+        siteAdminModelError,
+        useRoute: () => ({ path: '/' }),
+        useState: (key: string, initialize: () => unknown) => {
+            if (!states.has(key)) states.set(key, Vue.ref(initialize()))
+            return states.get(key)!
+        },
         ...nativeDependencies,
         ...runtime,
         siteAdminAsyncData: runtime.useAsyncData,
@@ -157,26 +158,16 @@ const nativeEnvironment = async (
     }
     const helpers = new Function(
         ...Object.keys(dependencies),
-        `${generated}; return { ${aiActions ? 'useAiAction,' : ''} siteAdminAttachAsyncData, useSiteAdminManagementList, useSiteAdminManagementEntry, useSiteAdminEntry, useSiteAdminList, useSiteAdminBatch, useSiteAdminManagementClient, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminReadModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
+        `${generated}; return { ${aiActions ? 'useAi,' : ''} siteAdminAttachAsyncData, modelList: useAdminEntries, modelEntry: useAdminEntry, publicEntry: (model, id, opts) => useContent(model, { ...opts, id }), publicList: useContent, publicBatch: useContent, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminReadModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
     )(...Object.values(dependencies)) as Helpers
-    const states = new Map<string, Vue.Ref<unknown>>()
-    const formDependencies = {
-        ...dependencies,
-        ...helpers,
-        Vue,
-        createForm: useSiteAdminForm,
-        useState: (key: string, initialize: () => unknown) => {
-            if (!states.has(key)) states.set(key, Vue.ref(initialize()))
-            return states.get(key)!
-        },
-    }
-    const formSource = generatedRuntimeSource(siteAdminNuxtFormTemplate())
-    helpers.useSiteAdminForm = new Function(...Object.keys(formDependencies), `${formSource}; return useSiteAdminForm`)(
-        ...Object.values(formDependencies),
-    ) as Helpers['useSiteAdminForm']
     return {
         app,
         helpers,
+        setRouteResult: (value: unknown) => {
+            const route = states.get('site-admin-route')
+            if (route) route.value = value
+            else states.set('site-admin-route', Vue.ref(value))
+        },
         refreshSubscribers: () => hooks.get('app:data:refresh')?.size ?? 0,
         managementFactories: () => managementFactories,
         requestFetches: () => requestFetches,
@@ -228,7 +219,7 @@ describe('native createUseFetch AI actions', () => {
                 const scope = Vue.effectScope()
                 // Exercise extensions on the awaited instance, as used by async component setup.
                 const state = await scope.run(() =>
-                    helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
+                    helpers.useAi('plain', { input: { content: 'A' }, immediate: false }),
                 )!
                 try {
                     await state.execute()
@@ -265,7 +256,7 @@ describe('native createUseFetch AI actions', () => {
         )
         const scope = Vue.effectScope()
         // Also exercise extensions on the unawaited native composable return.
-        const state = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }))!
+        const state = scope.run(() => helpers.useAi('plain', { input: { content: 'A' }, immediate: false }))!
         try {
             expect(await settles(state.execute({ signal: AbortSignal.abort() }))).toBe(true)
             expect(state.status.value).toBe('idle')
@@ -307,9 +298,7 @@ describe('native createUseFetch AI actions', () => {
             { aiActions: true },
         )
         const scope = Vue.effectScope()
-        const state = await scope.run(() =>
-            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
-        )!
+        const state = await scope.run(() => helpers.useAi('plain', { input: { content: 'A' }, immediate: false }))!
         try {
             const controller = new AbortController()
             const pending = state.execute({ signal: controller.signal })
@@ -338,9 +327,7 @@ describe('native createUseFetch AI actions', () => {
             { aiActions: true },
         )
         const scope = Vue.effectScope()
-        const state = await scope.run(() =>
-            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }),
-        )!
+        const state = await scope.run(() => helpers.useAi('plain', { input: { content: 'A' }, immediate: false }))!
         const controller = new AbortController()
         const stop = Vue.watch(
             state.status,
@@ -381,7 +368,7 @@ describe('native createUseFetch AI actions', () => {
         )
         const scope = Vue.effectScope()
         const state = await scope.run(() =>
-            helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false, timeout: 5 }),
+            helpers.useAi('plain', { input: { content: 'A' }, immediate: false, timeout: 5 }),
         )!
         try {
             expect(await settles(state.execute({ signal: AbortSignal.abort(new Error('Stopped')) }))).toBe(true)
@@ -400,7 +387,7 @@ describe('native createUseFetch AI actions', () => {
             scope.stop()
         }
     })
-    it('executes only explicitly with fixed POST/watch/retry and snapshots reactive props', async () => {
+    it('executes only explicitly with fixed POST/watch/retry and snapshots reactive input', async () => {
         const bodies: unknown[] = []
         const { helpers } = await nativeEnvironment(
             async (_, init) => {
@@ -410,19 +397,19 @@ describe('native createUseFetch AI actions', () => {
             },
             { aiActions: true },
         )
-        const props = Vue.ref({ content: 'First' })
+        const input = Vue.ref({ content: 'First' })
         const scope = Vue.effectScope()
         const state = scope.run(() =>
-            helpers.useAiAction('proofread', { props, immediate: false, method: 'GET', retry: 3, watch: true }),
+            helpers.useAi('proofread', { input, immediate: false, method: 'GET', retry: 3, watch: true }),
         )!
         await state
-        props.value.content = 'Second'
+        input.value.content = 'Second'
         await flush()
         expect(bodies).toHaveLength(0)
         const pending = state.execute()
-        props.value.content = 'Third'
+        input.value.content = 'Third'
         await pending
-        expect(bodies).toEqual([{ props: { content: 'Second' } }])
+        expect(bodies).toEqual([{ input: { content: 'Second' } }])
         await flush()
         expect(bodies).toHaveLength(1)
         await state.execute()
@@ -434,21 +421,21 @@ describe('native createUseFetch AI actions', () => {
         const { app, helpers } = await nativeEnvironment(
             async (_, init) => {
                 calls++
-                return Response.json(JSON.parse(String(init?.body)).props.content)
+                return Response.json(JSON.parse(String(init?.body)).input.content)
             },
             { aiActions: true },
         )
         const scope = Vue.effectScope()
         const auth = Vue.ref('alice')
-        const a = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, authScope: auth }))!
-        const b = scope.run(() => helpers.useAiAction('plain', { props: { content: 'B' }, authScope: auth }))!
+        const a = scope.run(() => helpers.useAi('plain', { input: { content: 'A' }, authScope: auth }))!
+        const b = scope.run(() => helpers.useAi('plain', { input: { content: 'B' }, authScope: auth }))!
         await Promise.all([a, b])
         expect(a.data.value).toBe('A')
         expect(b.data.value).toBe('B')
         expect(calls).toBe(2)
         app.isHydrating = true
         app.payload.serverRendered = true
-        const hydrated = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, authScope: 'alice' }))!
+        const hydrated = scope.run(() => helpers.useAi('plain', { input: { content: 'A' }, authScope: 'alice' }))!
         await hydrated
         expect(hydrated.data.value).toBe('A')
         expect(calls).toBe(2)
@@ -476,7 +463,7 @@ describe('native createUseFetch AI actions', () => {
             { aiActions: true },
         )
         const scope = Vue.effectScope()
-        const state = scope.run(() => helpers.useAiAction('plain', { props: { content: 'A' }, immediate: false }))!
+        const state = scope.run(() => helpers.useAi('plain', { input: { content: 'A' }, immediate: false }))!
         const first = state.execute()
         const duplicate = state.execute()
         expect(calls).toBe(1)
@@ -496,8 +483,8 @@ describe('native createUseFetch AI actions', () => {
 const modelDescriptor = createSiteAdminDescriptor(
     defineSiteAdminConfig({
         models: {
-            posts: { fields: { title: text({ required: true }), image: image() } },
-            authors: { fields: { title: text({ required: true }) } },
+            posts: { fields: { slug: text(), title: text({ required: true }), image: image() } },
+            authors: { fields: { slug: text(), title: text({ required: true }) } },
         },
     }),
 )
@@ -520,8 +507,8 @@ describe('native management AsyncData and mutation invalidation', () => {
         const id = Vue.ref('one')
         const actor = Vue.ref('alice')
         const states = scope.run(() => ({
-            entry: helpers.useSiteAdminManagementEntry('posts', id, { immediate: false, authScope: actor }),
-            list: helpers.useSiteAdminManagementList('posts', { immediate: false, authScope: actor }),
+            entry: helpers.modelEntry('posts', id, { immediate: false, authScope: actor }),
+            list: helpers.modelList('posts', { immediate: false, authScope: actor }),
         }))!
         await flush()
         id.value = 'two'
@@ -566,8 +553,8 @@ describe('native management AsyncData and mutation invalidation', () => {
                     setup() {
                         state =
                             kind === 'entry'
-                                ? helpers.useSiteAdminManagementEntry('posts', 'one', options)
-                                : helpers.useSiteAdminManagementList('posts', options)
+                                ? helpers.modelEntry('posts', 'one', options)
+                                : helpers.modelList('posts', options)
                         return () => Vue.h('div', state!.status.value)
                     },
                 }),
@@ -594,8 +581,8 @@ describe('native management AsyncData and mutation invalidation', () => {
         const html = await renderToString(
             Vue.createSSRApp({
                 setup() {
-                    const entry = environment.helpers.useSiteAdminManagementEntry('posts', 'one')
-                    const list = environment.helpers.useSiteAdminManagementList('posts')
+                    const entry = environment.helpers.modelEntry('posts', 'one')
+                    const list = environment.helpers.modelList('posts')
                     return () => Vue.h('div', entry.status.value + ':' + list.status.value)
                 },
             }),
@@ -670,7 +657,7 @@ describe('native management AsyncData and mutation invalidation', () => {
                 return descriptorReply.promise
             }
             const id = url.pathname.split('/').at(-1)!
-            const record = { id, model: 'posts', locale: '', version: 1, slug: id, data: { title: id, image: 'asset' } }
+            const record = { id, model: 'posts', locale: '', version: 1, data: { slug: id, title: id, image: 'asset' } }
             return Response.json(
                 url.pathname === '/manage/entries' ? { items: [record], total: 1, limit: 50, offset: 0 } : record,
             )
@@ -678,8 +665,8 @@ describe('native management AsyncData and mutation invalidation', () => {
         const scope = Vue.effectScope()
         const id = Vue.ref('one')
         const states = scope.run(() => ({
-            list: helpers.useSiteAdminManagementList('posts', { authScope: 'alice' }),
-            entry: helpers.useSiteAdminManagementEntry('posts', id, { authScope: 'alice' }),
+            list: helpers.modelList('posts', { authScope: 'alice' }),
+            entry: helpers.modelEntry('posts', id, { authScope: 'alice' }),
         }))!
         await flush()
         expect(models).toBe(1)
@@ -713,7 +700,7 @@ describe('native management AsyncData and mutation invalidation', () => {
             return Response.json({ items: [{ id: 'one', model: 'posts', data: { title: actor.value } }], total: 1 })
         })
         const scope = Vue.effectScope()
-        const state = scope.run(() => environment.helpers.useSiteAdminManagementList('posts', { authScope: actor }))!
+        const state = scope.run(() => environment.helpers.modelList('posts', { authScope: actor }))!
         await flush()
         expect(modelCalls).toBe(1)
         actor.value = 'bob'
@@ -739,7 +726,7 @@ describe('native management AsyncData and mutation invalidation', () => {
             return Response.json({ items: [], total: 0, limit: 50, offset: 0 })
         })
         const scope = Vue.effectScope()
-        const state = scope.run(() => helpers.useSiteAdminManagementList('posts'))!
+        const state = scope.run(() => helpers.modelList('posts'))!
         await flush()
         expect(state.error.value).toMatchObject({ statusCode: status })
         expect(state.data.value).toBeUndefined()
@@ -757,9 +744,8 @@ describe('native management AsyncData and mutation invalidation', () => {
                     id: 'one',
                     model: 'posts',
                     locale: url.searchParams.get('locale') ?? '',
-                    slug: 'one',
                     version: 1,
-                    data: { title: 'Title' },
+                    data: { slug: 'one', title: 'Title' },
                 }
                 if (url.pathname === '/manage/entries')
                     return Response.json({ items: [entry], total: 1, limit: 50, offset: 0 })
@@ -773,10 +759,10 @@ describe('native management AsyncData and mutation invalidation', () => {
         const scope = Vue.effectScope()
         const explicit = Vue.ref('ja')
         const states = scope.run(() => ({
-            list: helpers.useSiteAdminManagementList('posts'),
-            entry: helpers.useSiteAdminManagementEntry('posts', 'one'),
-            localized: helpers.useSiteAdminManagementList('posts', { locale: explicit }),
-            public: helpers.useSiteAdminList('posts'),
+            list: helpers.modelList('posts'),
+            entry: helpers.modelEntry('posts', 'one'),
+            localized: helpers.modelList('posts', { locale: explicit }),
+            public: helpers.publicList('posts'),
         }))!
         await flush()
         expect((states.entry.data.value as { locale: string }).locale).toBe('')
@@ -817,15 +803,12 @@ describe('native management AsyncData and mutation invalidation', () => {
         const prefix = ['http://site.test', '/manage', 'alice']
         app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'models', null, null, null])] =
             modelDescriptor
-        app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'form-entry', 'posts', 'one', null])] = {
-            entry: {
-                id: 'one',
-                model: 'posts',
-                locale: '',
-                slug: 'one',
-                version: 3,
-                data: { title: 'Hydrated', image: 'asset' },
-            },
+        app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'entry', 'posts', 'one', null])] = {
+            id: 'one',
+            model: 'posts',
+            locale: '',
+            version: 3,
+            data: { slug: 'one', title: 'Hydrated', image: 'asset' },
         }
         const renderer = Vue.createRenderer<object, object>({
             createComment: () => ({}),
@@ -839,14 +822,21 @@ describe('native management AsyncData and mutation invalidation', () => {
             setElementText: () => {},
             setText: () => {},
         })
-        let controller: ReturnType<typeof useSiteAdminForm<Record<string, unknown>>> | undefined
+        let controller: ReturnType<typeof useEntryForm<Record<string, unknown>>> | undefined
         const component = renderer.createApp({
             render: () =>
                 Vue.h(Vue.Suspense, null, {
                     default: () =>
                         Vue.h({
                             async setup() {
-                                controller = await helpers.useSiteAdminForm('posts', { id: 'one', authScope: 'alice' })
+                                const [pending, restore] = (
+                                    Vue as typeof Vue & {
+                                        withAsyncContext: (fn: () => unknown) => [Promise<unknown>, () => void]
+                                    }
+                                ).withAsyncContext(() => helpers.modelEntry('posts', 'one', { authScope: 'alice' }))
+                                const resource = await pending
+                                restore()
+                                controller = useEntryForm(resource as SiteAdminModel<Record<string, unknown>>)
                                 return () => Vue.h('div')
                             },
                         }),
@@ -855,8 +845,8 @@ describe('native management AsyncData and mutation invalidation', () => {
         component.mount({})
         await flush()
         expect(controller?.form.state.values.title).toBe('Hydrated')
-        expect(controller?.baseVersion.value).toBe(3)
-        expect(controller?.dirty.value).toBe(false)
+        expect(controller?.draft.snapshot().version).toBe(3)
+        expect(controller?.draft.isDirty.value).toBe(false)
         expect(requests).toBe(0)
         component.unmount()
     })
@@ -870,9 +860,8 @@ describe('native management AsyncData and mutation invalidation', () => {
             id: entryId,
             model: 'posts',
             locale: '',
-            slug: entryId,
             version: 1,
-            data: { title: actor.value + ' ' + entryId },
+            data: { slug: entryId, title: actor.value + ' ' + entryId },
         })
         const { helpers } = await nativeEnvironment(async (input, init) => {
             const path = new URL(String(input)).pathname
@@ -897,17 +886,23 @@ describe('native management AsyncData and mutation invalidation', () => {
             setElementText: () => {},
             setText: () => {},
         })
-        let controller: ReturnType<typeof useSiteAdminForm<Record<string, unknown>>> | undefined
+        let controller: ReturnType<typeof useEntryForm<Record<string, unknown>>> | undefined
         const component = renderer.createApp({
             render: () =>
                 Vue.h(Vue.Suspense, null, {
                     default: () =>
                         Vue.h({
                             async setup() {
-                                controller = await helpers.useSiteAdminForm('posts', {
-                                    id: () => id.value,
-                                    authScope: actor,
-                                })
+                                const [pending, restore] = (
+                                    Vue as typeof Vue & {
+                                        withAsyncContext: (fn: () => unknown) => [Promise<unknown>, () => void]
+                                    }
+                                ).withAsyncContext(() =>
+                                    helpers.modelEntry('posts', () => id.value, { authScope: actor }),
+                                )
+                                const resource = await pending
+                                restore()
+                                controller = useEntryForm(resource as SiteAdminModel<Record<string, unknown>>)
                                 return () => Vue.h('div')
                             },
                         }),
@@ -925,7 +920,7 @@ describe('native management AsyncData and mutation invalidation', () => {
         expect(slowSignal?.aborted).toBe(true)
         slow.resolve(Response.json(record('slow')))
         await flush()
-        expect(controller?.entryId.value).toBe('two')
+        expect(controller?.draft.snapshot().entryId).toBe('two')
         expect(controller?.form.state.values.title).toBe('alice two')
         id.value = 'one'
         await flush()
@@ -933,7 +928,7 @@ describe('native management AsyncData and mutation invalidation', () => {
         actor.value = 'bob'
         await flush()
         expect(controller?.form.state.values.title).toBe('bob one')
-        expect(controller?.dirty.value).toBe(false)
+        expect(controller?.draft.isDirty.value).toBe(false)
         component.unmount()
     })
 
@@ -949,10 +944,9 @@ describe('native management AsyncData and mutation invalidation', () => {
             const record = (id = 'one') => ({
                 id,
                 model,
-                data: { title: 'v' + version, image: 'asset' },
                 version,
-                slug: id,
                 locale: '',
+                data: { slug: id, title: 'v' + version, image: 'asset' },
             })
             if (method === 'PATCH') {
                 version += 1
@@ -973,12 +967,12 @@ describe('native management AsyncData and mutation invalidation', () => {
         const { app, helpers } = await nativeEnvironment(request)
         const scope = Vue.effectScope()
         const active = scope.run(() => ({
-            posts: helpers.useSiteAdminManagementList('posts', { authScope: 'alice' }),
-            authors: helpers.useSiteAdminManagementList('authors', { authScope: 'alice' }),
-            bob: helpers.useSiteAdminManagementList('posts', { authScope: 'bob' }),
-            entry: helpers.useSiteAdminManagementEntry('posts', 'one', { authScope: 'alice' }),
-            other: helpers.useSiteAdminManagementEntry('posts', 'two', { authScope: 'alice' }),
-            batch: helpers.useSiteAdminBatch({ posts: { list: 'posts' }, authors: { list: 'authors' } }),
+            posts: helpers.modelList('posts', { authScope: 'alice' }),
+            authors: helpers.modelList('authors', { authScope: 'alice' }),
+            bob: helpers.modelList('posts', { authScope: 'bob' }),
+            entry: helpers.modelEntry('posts', 'one', { authScope: 'alice' }),
+            other: helpers.modelEntry('posts', 'two', { authScope: 'alice' }),
+            batch: helpers.publicBatch({ posts: { list: 'posts' }, authors: { list: 'authors' } }),
         }))!
         await flush()
         expect(
@@ -990,9 +984,13 @@ describe('native management AsyncData and mutation invalidation', () => {
             { origin: 'http://site.test', basePath: '/manage', fetch: request },
             Vue.ref('alice'),
         )
-        await client.updateEntry('one', { data: { title: 'Saved' }, expectedVersion: 1 })
-        expect(calls['GET /manage/entries?model=posts']).toBe((before['GET /manage/entries?model=posts'] ?? 0) + 1)
-        expect(calls['GET /manage/entries?model=authors']).toBe(before['GET /manage/entries?model=authors'])
+        await client.updateEntry('one', { data: { slug: 'saved', title: 'Saved' }, expectedVersion: 1 })
+        expect(calls['GET /manage/entries?model=posts&limit=20&offset=0']).toBe(
+            (before['GET /manage/entries?model=posts&limit=20&offset=0'] ?? 0) + 1,
+        )
+        expect(calls['GET /manage/entries?model=authors&limit=20&offset=0']).toBe(
+            before['GET /manage/entries?model=authors&limit=20&offset=0'],
+        )
         expect(calls['GET /manage/entries/two']).toBe(before['GET /manage/entries/two'])
         expect(calls['GET /content/posts']).toBe((before['GET /content/posts'] ?? 0) + 1)
         expect(calls['GET /content/authors']).toBe((before['GET /content/authors'] ?? 0) + 1)
@@ -1001,16 +999,14 @@ describe('native management AsyncData and mutation invalidation', () => {
             'v2',
         )
         const leaving = Vue.effectScope()
-        leaving.run(() => helpers.useSiteAdminManagementList('posts', { authScope: 'alice', q: 'inactive' }))
+        leaving.run(() => helpers.modelList('posts', { authScope: 'alice', q: 'inactive' }))
         await flush()
         leaving.stop()
         const inactiveKey = Object.keys(app.payload.data).find((key) => key.includes('inactive'))!
-        await client.updateEntry('one', { data: { title: 'Again' }, expectedVersion: 2 })
+        await client.updateEntry('one', { data: { slug: 'again', title: 'Again' }, expectedVersion: 2 })
         expect(inactiveKey in app.payload.data).toBe(false)
         const returning = Vue.effectScope()
-        const returned = returning.run(() =>
-            helpers.useSiteAdminManagementList('posts', { authScope: 'alice', q: 'inactive' }),
-        )!
+        const returned = returning.run(() => helpers.modelList('posts', { authScope: 'alice', q: 'inactive' }))!
         await flush()
         expect((returned.data.value as { items: Array<{ data: { title: string } }> }).items[0]?.data.title).toBe('v3')
         returning.stop()
@@ -1027,10 +1023,10 @@ describe('native management AsyncData and mutation invalidation', () => {
         const { app, helpers, refreshSubscribers } = await nativeEnvironment(request)
         const scope = Vue.effectScope()
         scope.run(() => ({
-            entry: helpers.useSiteAdminEntry('posts', 'old'),
-            batch: helpers.useSiteAdminBatch({
-                entry: { entry: 'posts', slugOrId: 'old' },
-                second: { entry: 'posts', slugOrId: 'second' },
+            entry: helpers.publicEntry('posts', 'old'),
+            batch: helpers.publicBatch({
+                entry: { entry: 'posts', id: 'old' },
+                second: { entry: 'posts', id: 'second' },
             }),
         }))
         await flush()
@@ -1075,15 +1071,15 @@ describe('native management AsyncData and mutation invalidation', () => {
         const { helpers } = await nativeEnvironment(request)
         const scope = Vue.effectScope()
         const active = scope.run(() => ({
-            transformed: helpers.useSiteAdminEntry('posts', 'old', {
+            transformed: helpers.publicEntry('posts', 'old', {
                 transform: (entry: { data: unknown }) => entry.data,
             }),
-            picked: helpers.useSiteAdminEntry('posts', 'picked', { pick: ['data'] }),
-            authors: helpers.useSiteAdminEntry('authors', 'old', {
+            picked: helpers.publicEntry('posts', 'picked', { pick: ['data'] }),
+            authors: helpers.publicEntry('authors', 'old', {
                 transform: (entry: { data: unknown }) => entry.data,
             }),
-            batch: helpers.useSiteAdminBatch(
-                { entry: { entry: 'posts', slugOrId: 'batch-old' } },
+            batch: helpers.publicBatch(
+                { entry: { entry: 'posts', id: 'batch-old' } },
                 {
                     transform: (batch: { entry: { data: { data: unknown } } }) => ({
                         entry: { data: batch.entry.data.data },
@@ -1104,52 +1100,65 @@ describe('native management AsyncData and mutation invalidation', () => {
         expect((active.transformed.data.value as { title: string }).title).toBe('v2')
         scope.stop()
     })
+})
 
-    it('documents native public enumeration limits for serialize:false and app-owned getCachedData', async () => {
-        let reads = 0
-        const request: typeof fetch = async (input, init) => {
-            if (init?.method === 'PATCH') return Response.json({ id: 'one', model: 'posts', version: 2 })
-            if (String(input).endsWith('/models')) return Response.json(modelDescriptor)
-            reads += 1
-            return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
-        }
-        const { app, helpers } = await nativeEnvironment(request)
-        const scope = Vue.effectScope()
-        const local = scope.run(() =>
-            helpers.useSiteAdminManagementList('posts', { authScope: 'alice', serialize: false }),
-        )!
-        await flush()
-        const descriptorKey = helpers.siteAdminManagementKey(
-            { origin: 'http://site.test', basePath: '/manage' },
-            'alice',
-            'models',
-            null,
-            null,
-        )
-        expect(Object.keys(app.payload.data)).toEqual([descriptorKey])
-        const client = helpers.createNuxtSiteAdminManagementClient(
-            { origin: 'http://site.test', basePath: '/manage', fetch: request },
-            Vue.ref('alice'),
-        )
-        await client.updateEntry('one', { data: {}, expectedVersion: 1 })
-        expect(reads).toBe(1)
-        await local.refresh()
-        expect(reads).toBe(2)
-        expect(Object.keys(app.payload.data)).toEqual([descriptorKey])
-        const cached = { items: [{ data: { title: 'App cache' } }], total: 1 }
-        const ownCache = scope.run(() =>
-            helpers.useSiteAdminManagementList('posts', {
-                authScope: 'alice',
-                q: 'own-cache',
-                getCachedData: () => cached,
-            }),
-        )!
-        await flush()
-        await client.updateEntry('one', { data: {}, expectedVersion: 2 })
-        expect(ownCache.data.value).toBe(cached)
-        await ownCache.refresh({ cachedData: undefined })
-        expect(ownCache.data.value).not.toBe(cached)
-        expect(reads).toBe(3)
-        scope.stop()
+it('reuses the same-origin route entry before public native transformations', async () => {
+    let reads = 0
+    const environment = await nativeEnvironment(async () => {
+        reads++
+        return Response.json({ ...modelRecord('two'), data: { title: 'Fetched' } })
     })
+    const raw = { ...modelRecord('one'), data: { title: 'Resolved' } }
+    environment.setRouteResult({ kind: 'page', path: '/', origin: 'http://site.test', entry: raw })
+    const scope = Vue.effectScope()
+    const entry = scope.run(() =>
+        environment.helpers.publicEntry('posts', 'one', {
+            transform: (value: { data: { title: string } }) => value.data.title,
+        }),
+    )!
+    await entry.execute({ dedupe: 'defer' })
+    expect(entry.data.value).toBe('Resolved')
+    expect(raw.data.title).toBe('Resolved')
+    expect(reads).toBe(0)
+    const other = scope.run(() => environment.helpers.publicEntry('posts', 'two'))!
+    await other.execute({ dedupe: 'defer' })
+    expect(reads).toBe(1)
+    scope.stop()
+})
+
+it('preserves a management snapshot on refresh failure and corrects a deleted last page', async () => {
+    const page = Vue.ref(2)
+    let total = 21
+    let fail = false
+    const environment = await nativeEnvironment(async (input, init) => {
+        const url = new URL(String(input))
+        if (url.pathname.endsWith('/models')) return Response.json(modelDescriptor)
+        if (init?.method === 'DELETE') {
+            total = 20
+            return new Response(null, { status: 204, headers: { 'x-site-admin-model': 'posts' } })
+        }
+        if (fail)
+            return Response.json(
+                { error: { code: 'SITE_ADMIN_STORAGE_UNAVAILABLE', message: 'Try later' } },
+                { status: 503 },
+            )
+        const offset = Number(url.searchParams.get('offset'))
+        return Response.json({ items: offset >= total ? [] : [modelRecord('one')], total, limit: 20, offset })
+    })
+    const scope = Vue.effectScope()
+    const source = scope.run(() => environment.helpers.modelList('posts', { page }))! as State & {
+        remove: (entry: ReturnType<typeof modelRecord>) => Promise<unknown>
+    }
+    await source.execute({ dedupe: 'defer' })
+    fail = true
+    await source.refresh()
+    expect(source.status.value).toBe('error')
+    expect(source.error.value).toMatchObject({ data: { code: 'SITE_ADMIN_STORAGE_UNAVAILABLE' } })
+    expect(source.data.value).toMatchObject({ total: 21, items: [{ id: 'one' }] })
+    fail = false
+    await source.remove(modelRecord('one'))
+    expect(page.value).toBe(1)
+    expect(source.data.value).toMatchObject({ total: 20, offset: 0 })
+    expect(source.status.value).toBe('success')
+    scope.stop()
 })

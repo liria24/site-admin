@@ -22,7 +22,7 @@ export const searchQuery = (
 }
 
 /** Storage data uses domain names and values, never SQL, ORM columns or encoded JSON. */
-export type StorageEntryState = Omit<EntryRecord, 'data' | 'revisionId' | 'slug'>
+export type StorageEntryState = Omit<EntryRecord, 'data' | 'revisionId'>
 export type StorageEntryPatch = Partial<
     Pick<
         StorageEntryState,
@@ -42,7 +42,6 @@ export interface StoragePublishedEntry {
     model: string
     publishedAt: string
     revisionId: string
-    slug: string
     translationGroup: string
 }
 export interface StorageRoute {
@@ -80,6 +79,7 @@ export interface StorageContentCommit {
     routes?: readonly StorageRouteChange[]
     updates?: readonly { id: string; patch: StorageEntryPatch }[]
     delete?: string
+    prune?: readonly string[]
     publicGeneration?: boolean
 }
 export interface StorageEntryFilter {
@@ -119,7 +119,6 @@ export interface StorageContent {
         ids?: readonly string[]
         locale?: string
         translationGroups?: readonly string[]
-        key?: string
     }): Promise<StoragePublishedEntry[]>
     routes(filter?: {
         entryId?: string

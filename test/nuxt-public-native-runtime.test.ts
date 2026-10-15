@@ -28,7 +28,7 @@ type State<Data> = PromiseLike<unknown> & {
 interface Helpers {
     entry(
         model: string,
-        slug: MaybeRefOrGetter<string>,
+        id: MaybeRefOrGetter<string>,
         options: { locale: Ref<string>; watch?: Ref<unknown>[]; dedupe: 'defer' },
     ): State<PublicEntry | null | undefined>
     list(model: string, options: { locale: Ref<string> }): State<PublicEntry[] | undefined>
@@ -75,6 +75,7 @@ it.each(['completed', 'during', 'transition'] as const)(
                 data: {
                     _siteAdmin: { id: slug, model: 'posts', slug, locale },
                     title: key,
+                    slug,
                     body: { nodes: [['p', {}, 'Body']], frontmatter: {}, meta: {} },
                 },
             }
@@ -121,6 +122,8 @@ it.each(['completed', 'during', 'transition'] as const)(
                 { asyncData: true },
             )
             const initialize = new Function(
+                'useState',
+                'useRoute',
                 'siteAdminAsyncData',
                 'createSiteAdminClient',
                 'createSiteAdminManagementClient',
@@ -132,9 +135,11 @@ it.each(['completed', 'during', 'transition'] as const)(
                 'onScopeDispose',
                 'queuePostFlushCb',
                 'clearNuxtData',
-                `${generated}; return { entry: useSiteAdminEntry, list: useSiteAdminList }`,
+                `${generated}; return { entry: (model, slug, options) => useContent(model, { ...options, id: slug }), list: useContent }`,
             ) as (...dependencies: unknown[]) => Helpers
             const helpers = initialize(
+                () => Vue.ref(null),
+                () => ({ path: '/' }),
                 nativeRuntime.useAsyncData,
                 createSiteAdminClient,
                 createSiteAdminManagementClient,
@@ -197,10 +202,10 @@ it.each(['completed', 'during', 'transition'] as const)(
             await expect.poll(() => counts['slow:ja'], { timeout: 1000, interval: 5 }).toBe(1)
             if (hydration === 'transition') app.isHydrating = false
             slug.value = 'fast'
-            await expect.poll(() => entry.data.value?.slug, { timeout: 1000, interval: 5 }).toBe('fast')
+            await expect.poll(() => entry.data.value?.data.slug, { timeout: 1000, interval: 5 }).toBe('fast')
             await new Promise((resolve) => setTimeout(resolve, 150))
             expect(entry.status.value).toBe('success')
-            expect(entry.data.value?.slug).toBe('fast')
+            expect(entry.data.value?.data.slug).toBe('fast')
             expect(observations.find((item) => item.key === 'slow:ja')?.aborted).toBe(true)
             locale.value = 'en'
             await expect.poll(() => entry.data.value?.locale, { timeout: 1000, interval: 5 }).toBe('en')

@@ -1,4 +1,4 @@
-import { boolean, defineSiteAdminAuthorization, defineSiteAdminConfig, markdown, text, url } from '@liria24/site-admin'
+import { boolean, defineSiteAdminConfig, markdown, text, url } from '@liria24/site-admin'
 import { Output } from 'ai'
 import { z } from 'zod'
 import { aiModel } from './server/ai-model.ts'
@@ -12,40 +12,59 @@ export default defineSiteAdminConfig({
             proofread: {
                 type: 'text-generation',
                 model: aiModel,
-                props: { content: z.string() },
+                input: z.object({ content: z.string() }).strict(),
                 prompt: ({ content }) => 'SITE_ADMIN_SERVER_ONLY_AI_SENTINEL:' + content,
                 output: Output.object({ schema: z.object({ content: z.string() }) }),
             },
             plain: {
                 type: 'text-generation',
                 model: aiModel,
-                props: { content: z.string() },
+                input: z.object({ content: z.string() }).strict(),
                 prompt: ({ content }) => content,
             },
         },
     },
-    authorization: defineSiteAdminAuthorization({
-        editor: { ai: ['proofread'], models: { posts: ['create', 'publish', 'readDraft', 'update'] } },
-    }),
+    authorization: {
+        roles: {
+            editor: { ai: ['proofread'], models: { posts: ['create', 'publish', 'readDraft', 'update'] } },
+        },
+    },
     database: async () => (await import('./server/database')).getSiteAdminDatabase(),
     tasks: { publishDue: true, syncAssets: true },
     seo: { titleTemplate: '%s | Global' },
     routeRules: {
-        '/seo-probe': { seo: { titleTemplate: '%s | Test', type: 'article', twitterCard: 'summary' } },
-        '/ja/seo-probe': { seo: { titleTemplate: null, robots: 'noindex, follow', image: false } },
+        '/seo-probe': {
+            seo: {
+                title: 'SEO helper probe',
+                description: 'Shared SEO description',
+                image: { component: 'Default.takumi' },
+                titleTemplate: '%s | Test',
+                type: 'article',
+                twitterCard: 'summary',
+            },
+        },
+        '/ja/seo-probe': {
+            seo: {
+                title: 'SEO helper probe',
+                description: 'Shared SEO description',
+                titleTemplate: null,
+                robots: 'noindex, follow',
+                image: false,
+            },
+        },
     },
     models: {
         links: {
-            fields: { destination: url({ required: true }), title: text({ required: true }) },
+            fields: { slug: text(), destination: url({ required: true }), title: text({ required: true }) },
             publishing: false,
             route: { path: '/go/:slug', redirect: 'destination' },
         },
         posts: {
-            fields: { description: text(), title: text({ required: true }), body: markdown() },
+            fields: { slug: text(), description: text(), title: text({ required: true }), body: markdown() },
             localized: true,
             displayFields: { description: 'description', title: 'title' },
-            route: true,
+            route: '/posts/:slug',
         },
-        settings: { fields: { enabled: boolean() }, publishing: false },
+        settings: { fields: { slug: text(), enabled: boolean() }, publishing: false },
     },
 })

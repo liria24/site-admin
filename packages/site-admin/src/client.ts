@@ -22,7 +22,7 @@ export type { InferPublicModelData, InferSiteAdminModels, InferSiteAdminPublicMo
 export interface SiteAdminClientRegistry {}
 export type SiteAdminNamedAiActions = SiteAdminClientRegistry extends { namedAiActions: infer Actions }
     ? Actions
-    : Record<string, { props: Record<string, unknown>; data: unknown }>
+    : Record<string, { input: Record<string, unknown>; data: unknown }>
 
 export type SiteAdminPublicModels = SiteAdminClientRegistry extends { publicModels: infer Models }
     ? Models
@@ -53,13 +53,7 @@ export type SiteAdminCreateEntryInput<Data = Record<string, unknown>> = Omit<Ent
 export type SiteAdminUpdateEntryInput<Data = Record<string, unknown>> = Omit<UpdateEntryInput, 'actorId' | 'data'> & {
     data: Data
 }
-/** Unsaved form proposal. Applying and saving remain explicit controller actions. */
-export interface SiteAdminDraftProposal<Data = Record<string, unknown>> {
-    data: Partial<Data>
-    issues: SiteAdminIssue[]
-    slug?: string
-}
-
+/** Authenticated asset presentation stays inside the management adapter. */
 export const managementAssetUrl = (id: string, base = '/api/site-admin'): string =>
     `${base.replace(/\/$/u, '')}/assets/${encodeURIComponent(id)}/content`
 
@@ -78,7 +72,6 @@ export interface SiteAdminManagementClientOptions extends SiteAdminClientOptions
 export interface SiteAdminMutation {
     id: string
     model?: string
-    slug?: string
 }
 
 export interface SiteAdminRequestOptions {
@@ -95,6 +88,8 @@ export interface PublicMarkdownListOptions extends PublicListOptions {
 }
 
 export interface PublicRouteResult {
+    path?: string
+    origin?: string
     entry?: Record<string, unknown>
     kind: 'page' | 'redirect'
     status?: number
@@ -248,24 +243,27 @@ const entry = <Value>(document: { data: Record<string, unknown> } | null): Value
 }
 
 export interface SiteAdminClient<Models = SiteAdminPublicModels, SummaryModels = SiteAdminPublicSummaryModels> {
-    assetUrl(id: string): string
+    assetUrl(this: void, id: string): string
     get<Name extends ModelName<Models>>(
+        this: void,
         model: Name,
-        slugOrId: string,
+        id: string,
         options?: PublicListOptions,
     ): Promise<Models[Name] | null>
-    get<Value>(model: ModelName<Models>, slugOrId: string, options?: PublicListOptions): Promise<Value | null>
+    get<Value>(this: void, model: ModelName<Models>, id: string, options?: PublicListOptions): Promise<Value | null>
     list<Name extends ModelName<Models> & keyof SummaryModels>(
+        this: void,
         model: Name,
         options: PublicMarkdownListOptions & { markdown: 'summary' },
     ): Promise<SummaryModels[Name][]>
     list<Name extends ModelName<Models>>(
+        this: void,
         model: Name,
         options?: PublicListOptions & { markdown?: 'full' },
     ): Promise<Models[Name][]>
-    list<Value>(model: ModelName<Models>, options?: PublicListOptions): Promise<Value[]>
+    list<Value>(this: void, model: ModelName<Models>, options?: PublicListOptions): Promise<Value[]>
     models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
-    resolveRoute(path: string, options?: PublicListOptions): Promise<PublicRouteResult | null>
+    resolveRoute(this: void, path: string, options?: PublicListOptions): Promise<PublicRouteResult | null>
 }
 
 export const createSiteAdminClient = <
@@ -277,9 +275,9 @@ export const createSiteAdminClient = <
     const { base, json } = transport(options, '/api/content')
     return {
         assetUrl: (id) => `${base}/_assets/${encodeURIComponent(id)}`,
-        get: (model: ModelName<Models>, slugOrId: string, requestOptions: PublicListOptions = {}) =>
+        get: (model: ModelName<Models>, id: string, requestOptions: PublicListOptions = {}) =>
             json<{ data: Record<string, unknown> }>(
-                `/${encodeURIComponent(model)}/${encodeURIComponent(slugOrId)}`,
+                `/${encodeURIComponent(model)}/${encodeURIComponent(id)}`,
                 { method: 'GET', ...(requestOptions.signal ? { signal: requestOptions.signal } : {}) },
                 { locale: requestOptions.locale },
                 true,
@@ -311,7 +309,7 @@ export const createSiteAdminClient = <
 }
 
 export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
-    assetUrl(id: string): string
+    assetUrl(this: void, id: string): string
     models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
     listEntries<Name extends ModelName<Models>>(
         model: Name,
@@ -333,24 +331,33 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
     createEntry<Name extends ModelName<Models>>(
         model: Name,
         input: SiteAdminCreateEntryInput<Models[Name]>,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<Models[Name]>>
     updateEntry<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
         input: SiteAdminUpdateEntryInput<Data>,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<Data>>
-    deleteEntry(id: string, input: SiteAdminVersionInput): Promise<void>
+    deleteEntry(id: string, input: SiteAdminVersionInput, options?: SiteAdminRequestOptions): Promise<void>
     publishEntry<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
         input: SiteAdminPublishInput<Data>,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<Data>>
-    unpublishEntry(id: string, input: SiteAdminVersionInput): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
+    unpublishEntry(
+        id: string,
+        input: SiteAdminVersionInput,
+        options?: SiteAdminRequestOptions,
+    ): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
     schedulePublish<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
         input: SiteAdminScheduleInput<Data>,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<Data>>
     cancelScheduledPublish(
         id: string,
         input: SiteAdminVersionInput,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
     setSortOrder(
         id: string,
@@ -368,12 +375,13 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
         id: string,
         revisionId: string,
         input: SiteAdminVersionInput,
+        options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
     pruneRevisions(id: string, retain: number): Promise<{ deleted: string[] }>
     referencesTo(id: string, options: SiteAdminReferencesOptions): Promise<IncomingReference[]>
     runAiAction<Name extends Extract<keyof SiteAdminNamedAiActions, string>>(
         name: Name,
-        input: { props: SiteAdminNamedAiActions[Name]['props'] },
+        input: { input: SiteAdminNamedAiActions[Name]['input'] },
         options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminNamedAiActions[Name]['data']>
     uploadAsset(file: File): Promise<AssetRecord>
@@ -439,8 +447,9 @@ export const createSiteAdminManagementClient = <
         path: string,
         method: string,
         body: unknown,
+        requestOptions?: SiteAdminRequestOptions,
     ): Promise<Value> => {
-        const result = await mutate<Value>(path, method, body)
+        const result = await mutate<Value>(path, method, body, requestOptions)
         const mutations: SiteAdminMutation[] = Array.isArray(result) ? result : [result as SiteAdminMutation]
         await Promise.all(mutations.map(notify))
         return result
@@ -482,26 +491,36 @@ export const createSiteAdminManagementClient = <
             return items
         },
         getEntry: (id, requestOptions = {}) => get(entryPath(id), undefined, requestOptions.signal),
-        createEntry: (model, input) => mutateEntry(entryPath(model), 'POST', input),
-        updateEntry: (id, input) => mutateEntry(entryPath(id), 'PATCH', input),
-        deleteEntry: async (id, input) => {
+        createEntry: (model, input, requestOptions) => mutateEntry(entryPath(model), 'POST', input, requestOptions),
+        updateEntry: (id, input, requestOptions) => mutateEntry(entryPath(id), 'PATCH', input, requestOptions),
+        deleteEntry: async (id, input, requestOptions) => {
             const result = await response(entryPath(id), {
+                ...requestOptions,
                 headers: { 'if-match': `"${input.expectedVersion}"` },
                 method: 'DELETE',
             })
             const model = result?.headers.get('x-site-admin-model')
             await notify({ id, ...(model ? { model } : {}) })
         },
-        publishEntry: (id, input) => mutateEntry(`${entryPath(id)}/publish`, 'POST', input),
-        unpublishEntry: (id, input) => mutateEntry(`${entryPath(id)}/unpublish`, 'POST', input),
-        schedulePublish: (id, input) => mutateEntry(`${entryPath(id)}/schedule`, 'POST', input),
-        cancelScheduledPublish: (id, input) => mutateEntry(`${entryPath(id)}/cancel-schedule`, 'POST', input),
+        publishEntry: (id, input, requestOptions) =>
+            mutateEntry(`${entryPath(id)}/publish`, 'POST', input, requestOptions),
+        unpublishEntry: (id, input, requestOptions) =>
+            mutateEntry(`${entryPath(id)}/unpublish`, 'POST', input, requestOptions),
+        schedulePublish: (id, input, requestOptions) =>
+            mutateEntry(`${entryPath(id)}/schedule`, 'POST', input, requestOptions),
+        cancelScheduledPublish: (id, input, requestOptions) =>
+            mutateEntry(`${entryPath(id)}/cancel-schedule`, 'POST', input, requestOptions),
         setSortOrder: (id, sortOrder, expectedVersion) =>
             mutateEntry(`${entryPath(id)}/sort`, 'PATCH', { expectedVersion, sortOrder }),
         setSortOrders: (model, items) => mutateEntry(`${entryPath(model)}/reorder`, 'POST', { items }),
         listRevisions: (id) => get(`${entryPath(id)}/revisions`),
-        restoreRevision: (id, revisionId, input) =>
-            mutateEntry(`${entryPath(id)}/revisions/${encodeURIComponent(revisionId)}/restore`, 'POST', input),
+        restoreRevision: (id, revisionId, input, requestOptions) =>
+            mutateEntry(
+                `${entryPath(id)}/revisions/${encodeURIComponent(revisionId)}/restore`,
+                'POST',
+                input,
+                requestOptions,
+            ),
         pruneRevisions: (id, retain) => mutate(`${entryPath(id)}/revisions/prune`, 'POST', { retain }),
         referencesTo: (id, requestOptions) => get(`${entryPath(id)}/references`, { ...requestOptions }),
         runAiAction: (name, input, requestOptions) =>

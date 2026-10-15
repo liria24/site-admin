@@ -18,9 +18,10 @@ import { createMigratedTestAdmin } from './migrate'
 
 const config = defineSiteAdminConfig({
     models: {
-        authors: { fields: { name: text({ required: true }), bio: markdown({ required: true }) } },
+        authors: { fields: { slug: text(), name: text({ required: true }), bio: markdown({ required: true }) } },
         posts: {
             fields: {
+                slug: text(),
                 title: text({ required: true }),
                 body: markdown({ required: true }),
                 sections: array(object({ body: markdown({ required: true }) }), { required: true }),
@@ -38,7 +39,7 @@ describe('public client Markdown contract', () => {
                 posts: {
                     route: '/posts/:slug',
                     displayFields: { description: 'body' },
-                    fields: { title: text(), body: markdown() },
+                    fields: { slug: text(), title: text(), body: markdown() },
                 },
             },
         })
@@ -53,15 +54,15 @@ describe('public client Markdown contract', () => {
             })
             for (const slug of ['one', 'two']) {
                 const entry = await admin.createEntry('posts', {
-                    slug,
                     data: {
                         title: slug,
                         body: `${slug} introduction\n\n<!-- more -->\n\nFULL_SENTINEL_${slug}`,
+                        slug: slug,
                     },
                 })
                 await admin.publishEntry(entry.id, { expectedVersion: entry.version })
-                expect(await admin.resolvePath(`/posts/${slug}`)).toMatchObject({ entry: { slug } })
-                expect(JSON.stringify(await client.get('posts', slug))).toContain(`FULL_SENTINEL_${slug}`)
+                expect(await admin.resolvePath(`/posts/${slug}`)).toMatchObject({ entry: { data: { slug } } })
+                expect(JSON.stringify(await client.get('posts', entry.id))).toContain(`FULL_SENTINEL_${slug}`)
             }
             const response = await handlePublicRequest(
                 admin,
@@ -73,17 +74,20 @@ describe('public client Markdown contract', () => {
             expect(payload).toContain('two introduction')
             expect(payload).not.toContain('FULL_SENTINEL_')
             const summary = await client.list('posts', { markdown: 'summary' })
-            expect(summary.map(({ slug }) => slug).sort()).toEqual(['one', 'two'])
+            expect(
+                summary.map(({ data: { slug } }) => slug).sort((a, b) => String(a).localeCompare(String(b))),
+            ).toEqual(['one', 'two'])
             expect(summary.map(({ seo }) => seo?.description ?? '').sort()).toEqual([
                 'one introduction',
                 'two introduction',
             ])
             expect(JSON.stringify(await client.list('posts'))).toContain('FULL_SENTINEL_one')
             expect(JSON.stringify(await client.list('posts'))).toContain('FULL_SENTINEL_two')
-            expect((await client.list('posts', { markdown: 'summary' })).map(({ slug }) => slug).sort()).toEqual([
-                'one',
-                'two',
-            ])
+            expect(
+                (await client.list('posts', { markdown: 'summary' }))
+                    .map(({ data: { slug } }) => slug)
+                    .sort((a, b) => String(a).localeCompare(String(b))),
+            ).toEqual(['one', 'two'])
         } finally {
             await database.dispose()
         }
@@ -92,10 +96,13 @@ describe('public client Markdown contract', () => {
         const database = createDatabase(nodeSqlite({ name: ':memory:' }))
         try {
             const admin = await createMigratedTestAdmin({ config, database })
-            const author = await admin.createEntry('authors', { data: { bio: 'Author **bio**', name: 'Author' } })
+            const author = await admin.createEntry('authors', {
+                data: { slug: 'author', bio: 'Author **bio**', name: 'Author' },
+            })
             await admin.publishEntry(author.id, { expectedVersion: author.version })
             const post = await admin.createEntry('posts', {
                 data: {
+                    slug: 'post',
                     author: author.id,
                     body: '---\nlabel: Frontmatter\n---\nIntro\n\n<!-- more -->\n\n**Body**',
                     sections: [{ body: '# Section' }],
@@ -149,10 +156,13 @@ describe('public client Markdown contract', () => {
             const admin = await createMigratedTestAdmin({ config: configured, database })
             const source = (label: string) =>
                 `---\nprivate: FULL_FRONTMATTER_${label}\n---\n${label} summary\n\n<!-- more -->\n\nFULL_BODY_${label}`
-            const author = await admin.createEntry('authors', { data: { name: 'Author', bio: source('AUTHOR') } })
+            const author = await admin.createEntry('authors', {
+                data: { slug: 'author', name: 'Author', bio: source('AUTHOR') },
+            })
             await admin.publishEntry(author.id, { expectedVersion: author.version })
             const post = await admin.createEntry('posts', {
                 data: {
+                    slug: 'post',
                     title: 'Post',
                     body: source('POST'),
                     sections: [{ body: source('NESTED') }],
@@ -235,11 +245,11 @@ describe('public client Markdown contract', () => {
                     database,
                 })
                 const author = await admin.createEntry('authors', {
-                    data: { name: 'Author', bio: 'FULL_DISABLED_AUTHOR' },
+                    data: { slug: 'author', name: 'Author', bio: 'FULL_DISABLED_AUTHOR' },
                 })
                 await admin.publishEntry(author.id, { expectedVersion: author.version })
                 const post = await admin.createEntry('posts', {
-                    data: { title: 'Post', body: 'FULL_DISABLED_POST', sections: [], author: author.id },
+                    data: { slug: 'post', title: 'Post', body: 'FULL_DISABLED_POST', sections: [], author: author.id },
                 })
                 await admin.publishEntry(post.id, { expectedVersion: post.version })
                 const response = await handlePublicRequest(

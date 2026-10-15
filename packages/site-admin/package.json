@@ -19,85 +19,101 @@
     "type": "module",
     "sideEffects": false,
     "exports": {
-        "./adapter": {
-            "types": "./dist/adapter.d.ts",
-            "import": "./dist/adapter.js"
-        },
-        "./generate": {
-            "types": "./dist/generate.d.ts",
-            "import": "./dist/generate.js"
-        },
         ".": {
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js"
-        },
-        "./ai": {
-            "types": "./dist/ai.d.ts",
-            "import": "./dist/ai.js"
-        },
-        "./client": {
-            "types": "./dist/client.d.ts",
-            "import": "./dist/client.js"
-        },
-        "./form": {
-            "types": "./dist/form.d.ts",
-            "import": "./dist/form.js"
         },
         "./nuxt": {
             "types": "./dist/nuxt.d.ts",
             "import": "./dist/nuxt.js"
         },
-        "./server": {
-            "types": "./dist/server.d.ts",
-            "import": "./dist/server.js"
-        },
-        "./runtime/public-handler": "./dist/runtime/public-handler.js",
-        "./runtime/management-handler": "./dist/runtime/management-handler.js",
-        "./runtime/ai-action-handler": "./dist/runtime/ai-action-handler.js",
-        "./runtime/devtools-snapshot": "./dist/runtime/devtools-snapshot.js",
         "./package.json": "./package.json",
         "./module.json": "./dist/module.json",
         "./adapters/drizzle": {
             "types": "./dist/adapters/drizzle.d.ts",
             "import": "./dist/adapters/drizzle.js"
         },
-        "./nuxt/server": {
-            "types": "./dist/nuxt/server.d.ts",
-            "import": "./dist/nuxt/server.js"
-        },
-        "./runtime/nitro2": "./dist/runtime/nitro2.js",
-        "./runtime/tasks": {
-            "types": "./dist/runtime/tasks.d.ts",
-            "import": "./dist/runtime/tasks.js"
-        },
-        "./runtime/tasks/publish-due": {
+        "./internal/runtime/tasks/publish-due": {
             "types": "./dist/runtime/tasks/publish-due.d.ts",
             "import": "./dist/runtime/tasks/publish-due.js"
         },
-        "./runtime/tasks/asset-gc": {
-            "types": "./dist/runtime/tasks/asset-gc.d.ts",
-            "import": "./dist/runtime/tasks/asset-gc.js"
-        },
-        "./runtime/tasks/sync-assets": {
+        "./internal/runtime/tasks/sync-assets": {
             "types": "./dist/runtime/tasks/sync-assets.d.ts",
             "import": "./dist/runtime/tasks/sync-assets.js"
         },
-        "./runtime/database": {
-            "types": "./dist/runtime/database.d.ts",
-            "import": "./dist/runtime/database.js"
+        "./internal/runtime/tasks/asset-gc": {
+            "types": "./dist/runtime/tasks/asset-gc.d.ts",
+            "import": "./dist/runtime/tasks/asset-gc.js"
         },
-        "./config-resolution": {
+        "./internal/config-resolution": {
             "types": "./dist/config-resolution.d.ts",
             "import": "./dist/config-resolution.js"
         },
-        "./dependency-aliases": {
-            "types": "./dist/dependency-aliases.d.ts",
-            "import": "./dist/dependency-aliases.js"
+        "./internal/runtime/database": {
+            "types": "./dist/runtime/database.d.ts",
+            "import": "./dist/runtime/database.js"
         },
-        "./seo": {
+        "./internal/runtime/tasks": {
+            "types": "./dist/runtime/tasks.d.ts",
+            "import": "./dist/runtime/tasks.js"
+        },
+        "./internal/nuxt/server": {
+            "types": "./dist/nuxt/server.d.ts",
+            "import": "./dist/nuxt/server.js"
+        },
+        "./internal/generate": {
+            "types": "./dist/generate.d.ts",
+            "import": "./dist/generate.js"
+        },
+        "./internal/adapter": {
+            "types": "./dist/adapter.d.ts",
+            "import": "./dist/adapter.js"
+        },
+        "./internal/client": {
+            "types": "./dist/client.d.ts",
+            "import": "./dist/client.js"
+        },
+        "./internal/server": {
+            "types": "./dist/server.d.ts",
+            "import": "./dist/server.js"
+        },
+        "./internal/model": {
+            "types": "./dist/model.d.ts",
+            "import": "./dist/model.js"
+        },
+        "./internal/form": {
+            "types": "./dist/form.d.ts",
+            "import": "./dist/form.js"
+        },
+        "./internal/seo": {
             "types": "./dist/seo.d.ts",
             "import": "./dist/seo.js"
-        }
+        },
+        "./internal/ai": {
+            "types": "./dist/ai.d.ts",
+            "import": "./dist/ai.js"
+        },
+        "./client": {
+            "types": "./dist/public-client.d.ts",
+            "import": "./dist/public-client.js"
+        },
+        "./server": {
+            "types": "./dist/server-api.d.ts",
+            "import": "./dist/server-api.js"
+        },
+        "./internal/admin-client": {
+            "types": "./dist/admin-client.d.ts",
+            "import": "./dist/admin-client.js"
+        },
+        "./internal/descriptor": {
+            "types": "./dist/descriptor.d.ts",
+            "import": "./dist/descriptor.js"
+        },
+        "./internal/runtime/public-handler": "./dist/runtime/public-handler.js",
+        "./internal/runtime/management-handler": "./dist/runtime/management-handler.js",
+        "./internal/runtime/ai-action-handler": "./dist/runtime/ai-action-handler.js",
+        "./internal/runtime/devtools-snapshot": "./dist/runtime/devtools-snapshot.js",
+        "./internal/runtime/nitro2": "./dist/runtime/nitro2.js"
     },
     "publishConfig": {
         "access": "public",
@@ -113,35 +129,35 @@
         "@nuxt/devtools-kit": "4.0.0-beta.5",
         "@nuxt/kit": "^4.6.1",
         "@nuxt/schema": "^4.6.1",
-        "@nuxtjs/better-auth": "^0.3.9",
-        "@nuxtjs/i18n": "^10.6.0",
-        "@nuxtjs/robots": "^7.0.2",
-        "@nuxtjs/sitemap": "^9.1.0",
         "@standard-schema/spec": "^1.1.0",
-        "ai": "^7.0.139",
-        "better-auth": "^1.7.7",
-        "comark": "^0.7.0",
         "comark-content": "^0.4.1",
-        "devframe": "1.2.4",
-        "exsolve": "^1.1.3",
-        "files-sdk": "^3.1.0",
+        "devframe": "1.2.5",
         "h3": "^1.15.11",
         "jiti": "^2.7.0",
         "nitropack": "2.13.4",
-        "nuxt-files-sdk": "^0.3.0",
-        "nuxt-llms": "^0.2.0",
-        "nuxt-og-image": "^7.0.6",
-        "nuxt-schema-org": "^7.0.1",
-        "nuxt-seo-utils": "^9.0.1",
         "pathe": "^2.0.3",
         "rou3": "^1.0.0"
     },
     "peerDependencies": {
-        "@better-auth/drizzle-adapter": "^1.7.7",
+        "@better-auth/drizzle-adapter": "^1.7.9",
+        "@nuxtjs/better-auth": "^0.3.9",
+        "@nuxtjs/i18n": "^10.6.0",
+        "@nuxtjs/robots": "^7.0.2",
+        "@nuxtjs/sitemap": "^9.1.0",
         "@tanstack/vue-form": "2.0.0-alpha.2",
+        "ai": "^7.0.141",
+        "better-auth": "^1.7.9",
+        "comark": "^0.7.0",
         "drizzle-kit": "1.0.0-rc.4",
         "drizzle-orm": "1.0.0-rc.4",
-        "nuxt": "^4.6.0",
+        "files-sdk": "^3.1.1",
+        "nuxt": "^4.6.1",
+        "nuxt-files-sdk": "^0.3.1",
+        "nuxt-llms": "^0.2.0",
+        "nuxt-og-image": "^7.0.7",
+        "nuxt-schema-org": "^7.0.1",
+        "nuxt-seo-utils": "^9.0.1",
+        "nuxt-site-config": "^5.0.3",
         "vue": "^3.6.0-rc.2"
     },
     "peerDependenciesMeta": {
@@ -161,6 +177,48 @@
             "optional": true
         },
         "vue": {
+            "optional": true
+        },
+        "@nuxtjs/better-auth": {
+            "optional": true
+        },
+        "@nuxtjs/i18n": {
+            "optional": true
+        },
+        "@nuxtjs/robots": {
+            "optional": true
+        },
+        "@nuxtjs/sitemap": {
+            "optional": true
+        },
+        "ai": {
+            "optional": true
+        },
+        "better-auth": {
+            "optional": true
+        },
+        "comark": {
+            "optional": true
+        },
+        "files-sdk": {
+            "optional": true
+        },
+        "nuxt-files-sdk": {
+            "optional": true
+        },
+        "nuxt-llms": {
+            "optional": true
+        },
+        "nuxt-og-image": {
+            "optional": true
+        },
+        "nuxt-schema-org": {
+            "optional": true
+        },
+        "nuxt-seo-utils": {
+            "optional": true
+        },
+        "nuxt-site-config": {
             "optional": true
         }
     },

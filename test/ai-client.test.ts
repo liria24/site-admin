@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createSiteAdminManagementClient } from '../packages/site-admin/src/client'
 
 describe('native named AI management client', () => {
-    it('posts explicit props with native cancellation and same-origin credentials without invalidating saved data', async () => {
+    it('posts explicit input with native cancellation and same-origin credentials without invalidating saved data', async () => {
         const onMutation = vi.fn()
         const calls: Array<{ body: unknown; url: string }> = []
         const signal = new AbortController().signal
@@ -18,10 +18,10 @@ describe('native named AI management client', () => {
                 return Response.json(proposal)
             },
         })
-        expect(await client.runAiAction('correct/title', { props: { content: 'Manual' } }, { signal })).toEqual(
+        expect(await client.runAiAction('correct/title', { input: { content: 'Manual' } }, { signal })).toEqual(
             proposal,
         )
-        expect(calls).toEqual([{ url: '/manage/ai/actions/correct%2Ftitle', body: { props: { content: 'Manual' } } }])
+        expect(calls).toEqual([{ url: '/manage/ai/actions/correct%2Ftitle', body: { input: { content: 'Manual' } } }])
         expect(onMutation).not.toHaveBeenCalled()
         expect(client).not.toHaveProperty('generateMetadata')
         expect(client).not.toHaveProperty('proofreadDraft')
@@ -32,7 +32,7 @@ describe('native named AI management client', () => {
             Response.json({ error: { code: 'SITE_ADMIN_AI_UNAVAILABLE', message: 'Unavailable' } }, { status: 503 }),
         )
         const client = createSiteAdminManagementClient({ fetch: request })
-        await expect(client.runAiAction('metadata', { props: {} })).rejects.toMatchObject({
+        await expect(client.runAiAction('metadata', { input: {} })).rejects.toMatchObject({
             code: 'SITE_ADMIN_AI_UNAVAILABLE',
             status: 503,
         })

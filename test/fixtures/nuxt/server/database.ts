@@ -1,6 +1,6 @@
 import { drizzle } from 'drizzle-orm/node-sqlite'
 import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
-import type { SiteAdminDatabase } from '@liria24/site-admin/adapter'
+import type { SiteAdminDatabase } from '@liria24/site-admin/internal/adapter'
 // @ts-ignore The consumer test generates its application-owned schema before building.
 import * as schema from '../.data/schema/schema'
 

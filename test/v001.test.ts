@@ -4,14 +4,7 @@ import nodeSqlite from 'db0/connectors/node-sqlite'
 import { Files } from 'files-sdk'
 import { memory } from 'files-sdk/memory'
 import { fs } from 'files-sdk/fs'
-import {
-    defineSiteAdminAuthorization,
-    defineSiteAdminConfig,
-    file,
-    markdown,
-    relation,
-    text,
-} from '../packages/site-admin/src'
+import { defineSiteAdminConfig, file, markdown, relation, text } from '../packages/site-admin/src'
 import { managementAssetUrl } from '../packages/site-admin/src/client'
 import { createSiteAdmin, handleManagementRequest, handlePublicRequest } from '../packages/site-admin/src/server'
 import { createMigratedTestAdmin, testAdapter } from './migrate'
@@ -29,10 +22,12 @@ afterEach(async () => {
 
 it('returns only mutation receipts without readDraft, including sort, older publication, and every sibling action', async () => {
     const config = defineSiteAdminConfig({
-        authorization: defineSiteAdminAuthorization({
-            operator: { models: { posts: ['create', 'update', 'sort', 'publish', 'schedule', 'restore'] } },
-        }),
-        models: { posts: { fields: { title: text() }, sortable: true } },
+        authorization: {
+            roles: {
+                operator: { models: { posts: ['create', 'update', 'sort', 'publish', 'schedule', 'restore'] } },
+            },
+        },
+        models: { posts: { fields: { slug: text(), title: text() }, sortable: true } },
     })
     let roles = ['operator']
     const admin = await createMigratedTestAdmin({
@@ -40,12 +35,11 @@ it('returns only mutation receipts without readDraft, including sort, older publ
         database: database(),
         authorize: () => ({ id: 'operator', roles }),
     })
-    let entry = await admin.createEntry('posts', { slug: 'secret-slug', data: { title: 'secret draft' } })
+    let entry = await admin.createEntry('posts', { data: { slug: 'secret-slug', title: 'secret draft' } })
     const older = entry.revisionId
     entry = await admin.updateEntry(entry.id, {
         expectedVersion: entry.version,
-        slug: 'new-secret-slug',
-        data: { title: 'new secret' },
+        data: { slug: 'new-secret-slug', title: 'new secret' },
     })
     const mutate = async (path: string, body: object, method = 'POST') => {
         const response = await handleManagementRequest(
@@ -72,9 +66,13 @@ it('returns only mutation receipts without readDraft, including sort, older publ
     await mutate(`entries/${entry.id}/schedule`, { expectedVersion: entry.version, at: '2099-01-01T00:00:00Z' })
     await mutate(`entries/${entry.id}/cancel-schedule`, { expectedVersion: entry.version })
     await mutate(`entries/${entry.id}/revisions/${older}/restore`, { expectedVersion: entry.version })
-    await mutate(`entries/${entry.id}`, { expectedVersion: entry.version, data: { title: 'another secret' } }, 'PATCH')
+    await mutate(
+        `entries/${entry.id}`,
+        { expectedVersion: entry.version, data: { title: 'another secret', slug: 'secret-slug' } },
+        'PATCH',
+    )
     await mutate(`entries/${entry.id}/unpublish`, { expectedVersion: entry.version })
-    await mutate('entries/posts', { data: { title: 'created secret' }, slug: 'created-secret' })
+    await mutate('entries/posts', { data: { slug: 'created-secret', title: 'created secret' } })
     const ai = await handleManagementRequest(
         admin,
         new Request(`http://localhost/api/site-admin/entries/${entry.id}/ai/unknown`, {
@@ -88,8 +86,8 @@ it('returns only mutation receipts without readDraft, including sort, older publ
     const relationConfig = defineSiteAdminConfig({
         ...config,
         models: {
-            posts: { fields: { required: relation('targets', { required: true }) } },
-            targets: { fields: { title: text() } },
+            posts: { fields: { slug: text(), required: relation('targets', { required: true }) } },
+            targets: { fields: { slug: text(), title: text() } },
         },
     })
     // Validation errors for an existing draft can also contain private relation IDs.
@@ -98,7 +96,10 @@ it('returns only mutation receipts without readDraft, including sort, older publ
         config: relationConfig,
         authorize: () => ({ id: 'operator', roles: ['operator'] }),
     })
-    const target = await relationAdmin.createEntry('targets', { id: 'hidden-target', data: { title: 'hidden' } })
+    const target = await relationAdmin.createEntry('targets', {
+        id: 'hidden-target',
+        data: { slug: 'hidden', title: 'hidden' },
+    })
     const related = await relationAdmin.createEntry('posts', { data: { required: target.id } })
     const blocked = await handleManagementRequest(
         relationAdmin,
@@ -122,7 +123,7 @@ it('returns only mutation receipts without readDraft, including sort, older publ
             body: JSON.stringify({ expectedVersion: entry.version, sortOrder: 2 }),
         }),
     )
-    expect(await full.json()).toMatchObject({ data: { title: 'another secret' }, slug: 'secret-slug' })
+    expect(await full.json()).toMatchObject({ data: { slug: 'secret-slug', title: 'another secret' } })
 })
 
 it('paginates after permission and search filtering with stable ties and explicit invalid bounds', async () => {
@@ -131,10 +132,10 @@ it('paginates after permission and search filtering with stable ties and explici
         now: () => new Date('2026-01-01'),
         authorize: () => ({ id: 'reader', roles: ['reader'] }),
         config: defineSiteAdminConfig({
-            authorization: defineSiteAdminAuthorization({ reader: { models: { posts: ['readDraft'] } } }),
+            authorization: { roles: { reader: { models: { posts: ['readDraft'] } } } },
             models: {
-                posts: { fields: { title: text() } },
-                secrets: { fields: { title: text() } },
+                posts: { fields: { slug: text(), title: text() } },
+                secrets: { fields: { slug: text(), title: text() } },
             },
         }),
     })
@@ -143,7 +144,7 @@ it('paginates after permission and search filtering with stable ties and explici
             id: `item-${String(index).padStart(3, '0')}`,
             data: { title: index % 10 === 0 ? 'match' : 'other' },
         })
-    await admin.createEntry('secrets', { data: { title: 'match secret' } })
+    await admin.createEntry('secrets', { data: { slug: 'match-secret', title: 'match secret' } })
     const get = (query = '') =>
         handleManagementRequest(admin, new Request(`http://localhost/api/site-admin/entries${query}`))
     expect(await (await get()).json()).toMatchObject({ items: expect.any(Array), total: 101, limit: 50, offset: 0 })
@@ -169,7 +170,10 @@ it('rejects depth 17 and repeated DAG amplification during publication and publi
         database: db,
         config: defineSiteAdminConfig({
             models: {
-                nodes: { fields: { left: relation('nodes'), right: relation('nodes') }, route: true },
+                nodes: {
+                    fields: { slug: text(), left: relation('nodes'), right: relation('nodes') },
+                    route: '/nodes/:slug',
+                },
             },
         }),
     })
@@ -177,8 +181,7 @@ it('rejects depth 17 and repeated DAG amplification during publication and publi
     for (let index = 0; index <= 17; index++) {
         const entry = await admin.createEntry('nodes', {
             id: `chain-${index}`,
-            slug: `chain-${index}`,
-            data: previous ? { left: previous } : {},
+            data: { ...(previous ? { left: previous } : {}), slug: `chain-${index}` },
         })
         if (index <= 16) await admin.publishEntry(entry.id, { expectedVersion: entry.version })
         else {
@@ -200,7 +203,10 @@ it('rejects depth 17 and repeated DAG amplification during publication and publi
         database: database(),
         config: defineSiteAdminConfig({
             models: {
-                nodes: { fields: { left: relation('nodes'), right: relation('nodes') }, route: true },
+                nodes: {
+                    fields: { slug: text(), left: relation('nodes'), right: relation('nodes') },
+                    route: '/nodes/:slug',
+                },
             },
         }),
     })
@@ -208,8 +214,7 @@ it('rejects depth 17 and repeated DAG amplification during publication and publi
     for (let index = 0; index <= 13; index++) {
         const entry = await binary.createEntry('nodes', {
             id: `dag-${index}`,
-            slug: `dag-${index}`,
-            data: previous ? { left: previous, right: previous } : {},
+            data: { ...(previous ? { left: previous, right: previous } : {}), slug: `dag-${index}` },
         })
         if (index <= 12) await binary.publishEntry(entry.id, { expectedVersion: entry.version })
         else
@@ -234,9 +239,9 @@ const separated = async (separateDrafts = true) => {
     const config = defineSiteAdminConfig({
         assets: { storage: 'content', separateDrafts, operationLeaseSeconds: 1, cleanup: { minimumAge: 0 } },
         models: {
-            posts: { fields: { attachment: file(), body: markdown(), title: text() } },
-            auto: { fields: { attachment: file() }, publishing: false },
-            private: { fields: { attachment: file() }, publishing: false, public: false },
+            posts: { fields: { slug: text(), attachment: file(), body: markdown(), title: text() } },
+            auto: { fields: { slug: text(), attachment: file() }, publishing: false },
+            private: { fields: { slug: text(), attachment: file() }, publishing: false, public: false },
         },
     })
     const options = {
@@ -266,14 +271,17 @@ it('keeps originals private and synchronizes all publication, revision, history,
     expect(asset.storage).toBe('draft')
     expect(await draft.exists(asset.key)).toBe(true)
     expect((await publicFiles.list()).items.length).toBe(0)
-    let first = await admin.createEntry('posts', { data: { attachment: asset.id, title: 'first' } })
+    let first = await admin.createEntry('posts', { data: { slug: 'first', attachment: asset.id, title: 'first' } })
     let second = await admin.createEntry('posts', { data: { body: `![](site-admin://asset/${asset.id})` } })
     first = await admin.publishEntry(first.id, { expectedVersion: first.version })
     second = await admin.publishEntry(second.id, { expectedVersion: second.version })
     expect((await publicFiles.list()).items.length).toBe(1)
     expect(await (await admin.downloadAsset(asset.id)).file.text()).toBe('private original')
     const oldRevision = first.revisionId
-    first = await admin.updateEntry(first.id, { expectedVersion: first.version, data: { attachment: replacement.id } })
+    first = await admin.updateEntry(first.id, {
+        expectedVersion: first.version,
+        data: { slug: first.data.slug, attachment: replacement.id },
+    })
     expect((await publicFiles.list()).items.length).toBe(1)
     first = await admin.publishEntry(first.id, { expectedVersion: first.version })
     expect((await publicFiles.list()).items.length).toBe(2)
@@ -295,7 +303,7 @@ it('keeps originals private and synchronizes all publication, revision, history,
     const autoAsset = await admin.uploadAsset({ body: 'auto', filename: 'auto.txt' })
     let auto = await admin.createEntry('auto', { data: { attachment: autoAsset.id } })
     expect((await publicFiles.list()).items.length).toBe(1)
-    auto = await admin.updateEntry(auto.id, { expectedVersion: auto.version, data: {} })
+    auto = await admin.updateEntry(auto.id, { expectedVersion: auto.version, data: { slug: auto.data.slug } })
     expect((await publicFiles.list()).items.length).toBe(0)
     await admin.createEntry('private', { data: { attachment: autoAsset.id } })
     expect((await publicFiles.list()).items.length).toBe(0)
@@ -316,7 +324,7 @@ it('preserves populated Markdown ledgers, original revisions and asset policy ac
             )
             .bind(revision)
             .all()
-    let entry = await admin.createEntry('posts', { data: { body, title: 'Markdown' } })
+    let entry = await admin.createEntry('posts', { data: { slug: 'markdown', body, title: 'Markdown' } })
     const revision = entry.revisionId
     const expectedLedger = [
         { asset_id: image.id, field_path: 'body.$markdown', position: 0 },
@@ -355,7 +363,10 @@ it('preserves populated Markdown ledgers, original revisions and asset policy ac
     expect(await (await admin.downloadAsset(example.id)).file.text()).toBe('example')
     await expect(admin.deleteAsset(example.id)).rejects.toMatchObject({ code: 'SITE_ADMIN_ASSET_IN_USE' })
 
-    entry = await admin.updateEntry(entry.id, { expectedVersion: entry.version, data: { body: 'Next' } })
+    entry = await admin.updateEntry(entry.id, {
+        expectedVersion: entry.version,
+        data: { slug: entry.data.slug, body: 'Next' },
+    })
     expect(await admin.content('posts')).toBe(content)
     expect((await (await admin.content('posts')).list())[0]?.data.body).toEqual(item.data.body)
     entry = await admin.publishEntry(entry.id, { expectedVersion: entry.version })

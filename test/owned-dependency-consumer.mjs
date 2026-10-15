@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { consumerDependencies } from './consumer-dependencies.mjs'
-/** Strict packed consumer: only Site Admin owns the seven public dependency namespaces. */
-export const verifyOwnedDependencies = async (tarball) => {
+/** Strict packed consumer: apps install and import the public peers directly. */
+export const verifyPeerDependencies = async (tarball) => {
     const directory = await mkdtemp(join(tmpdir(), 'site-admin-owned-consumer-'))
     const run = (command, args, env = process.env) => {
         const result = spawnSync(command, args, {
@@ -34,54 +34,50 @@ export const verifyOwnedDependencies = async (tarball) => {
             JSON.stringify({
                 name: 'site-admin-owned-consumer',
                 private: true,
+                overrides: { vue: consumerDependencies(['vue']).vue },
+                pnpm: { overrides: { vue: consumerDependencies(['vue']).vue } },
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolve(tarball).replaceAll('\\', '/')}`,
-                    ...consumerDependencies(['@types/node', 'nuxt', 'typescript', 'vue']),
+                    ...consumerDependencies([
+                        '@types/node',
+                        'nuxt',
+                        'typescript',
+                        'vue',
+                        'better-auth',
+                        '@nuxtjs/better-auth',
+                        'nuxt-files-sdk',
+                        'files-sdk',
+                        'comark',
+                        'ai',
+                    ]),
                 },
             }),
         )
-        console.log('Owned consumer: isolated pnpm installation')
+        console.log('Peer consumer: isolated pnpm installation')
         run('pnpm', ['install', '--ignore-scripts', '--no-frozen-lockfile'])
         await put(
             'check-owned.mjs',
             `
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
-import { createSiteAdminDependencyAliases, createSiteAdminDependencyTypePaths, siteAdminDependencyModules } from '@liria24/site-admin/dependency-aliases'
-const require = createRequire(import.meta.url)
-for (const name of Object.values(siteAdminDependencyModules)) assert.throws(() => require.resolve(name), { code: 'MODULE_NOT_FOUND' })
-const aliases = createSiteAdminDependencyAliases()
-const paths = createSiteAdminDependencyTypePaths()
-assert.equal(Object.keys(siteAdminDependencyModules).length, 7)
-assert.equal(Object.keys(aliases).length, 24)
-assert.deepEqual(Object.keys(paths), Object.keys(aliases))
-assert.equal(aliases['#drizzle-orm'], undefined)
-assert.equal(aliases['#drizzle-orm/sqlite-core'], undefined)
-assert.equal(paths['#drizzle-orm'], undefined)
-for (const id of ['#better-auth', '#better-auth/plugins', '#better-auth/client/plugins', '#nuxtjs/better-auth/config', '#nuxt-files-sdk/config', '#files-sdk/client', '#files-sdk/memory', '#comark/parse', '#comark-content/client', '#ai']) {
-  assert.ok(aliases[id], id)
-  assert.ok(paths[id], id)
-}
-for (const id of ['#better-auth/nitro-compat', '#better-auth/app-secret', '#nuxt-files-sdk/snapshot', '#nuxt-files-sdk/files']) assert.equal(aliases[id], undefined)
-assert.equal(aliases['#comark/plugins/emoji'], undefined)
-assert.equal(aliases['#comark/vue'], undefined)
-assert.equal(aliases['#better-auth/dist/index.mjs'], undefined)
+for (const name of ['better-auth/plugins', '@nuxtjs/better-auth/config', 'nuxt-files-sdk/config', 'files-sdk/memory', 'comark/parse', 'ai']) assert.ok(import.meta.resolve(name))
+assert.throws(() => import.meta.resolve('@liria24/site-admin/dependency-aliases'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' })
+
 `,
         )
         run(process.execPath, ['check-owned.mjs'])
         // Exercise the complete semantic test backend through public packed types.
         const memorySource = (await readFile(new URL('./memory-storage.ts', import.meta.url), 'utf8'))
             .replaceAll('../packages/site-admin/src/config', '@liria24/site-admin')
-            .replaceAll('../packages/site-admin/src/adapter', '@liria24/site-admin/adapter')
-            .replaceAll('../packages/site-admin/src/server/types', '@liria24/site-admin/server')
+            .replaceAll('../packages/site-admin/src/adapter', '@liria24/site-admin/internal/adapter')
+            .replaceAll('../packages/site-admin/src/server/types', '@liria24/site-admin/internal/server')
             .replaceAll('../packages/site-admin/src/errors', '@liria24/site-admin')
             .replaceAll('../packages/site-admin/src/storage', './site-admin-storage')
         await put('server/memory-storage.ts', memorySource)
         await put(
             'server/site-admin-storage.ts',
             (await readFile(new URL('../packages/site-admin/src/storage.ts', import.meta.url), 'utf8'))
-                .replaceAll('./server/types', '@liria24/site-admin/server')
+                .replaceAll('./server/types', '@liria24/site-admin/internal/server')
                 .replaceAll('./errors', '@liria24/site-admin'),
         )
         await put(
@@ -99,10 +95,10 @@ export default defineNuxtConfig({
             'site-admin.config.ts',
             `
 import { defineSiteAdminConfig, text } from '@liria24/site-admin'
-import { defineFilesConfig } from '#nuxt-files-sdk/config'
-import { getProvider } from '#files-sdk/providers'
-import { parseMarkdown } from '#comark/parse'
-import type { BetterAuthOptions } from '#better-auth'
+import { defineFilesConfig } from 'nuxt-files-sdk/config'
+import { getProvider } from 'files-sdk/providers'
+import { parseMarkdown } from 'comark/parse'
+import type { BetterAuthOptions } from 'better-auth'
 import { createMemoryDatabase } from './server/memory-storage'
 if (!getProvider('memory')) throw new Error('Native owned provider alias failed')
 const files = defineFilesConfig({ storage: { adapter: 'memory' } })
@@ -120,16 +116,16 @@ export default defineSiteAdminConfig({
         await put(
             'server/auth.config.ts',
             `
-import { defineServerAuth } from '#nuxtjs/better-auth/config'
-import { username } from '#better-auth/plugins'
+import { defineServerAuth } from '@nuxtjs/better-auth/config'
+import { username } from 'better-auth/plugins'
 export default defineServerAuth({ emailAndPassword: { enabled: true }, plugins: [username()] })
 `,
         )
         await put(
             'app/auth.config.ts',
             `
-import { defineClientAuth } from '#nuxtjs/better-auth/config'
-import { usernameClient } from '#better-auth/client/plugins'
+import { defineClientAuth } from '@nuxtjs/better-auth/config'
+import { usernameClient } from 'better-auth/client/plugins'
 export default defineClientAuth({ plugins: [usernameClient()] })
 `,
         )
@@ -137,9 +133,9 @@ export default defineClientAuth({ plugins: [usernameClient()] })
             'app/app.vue',
             `
 <script setup lang="ts">
-import { createAuthClient } from '#better-auth/vue'
-import { createFilesClient } from '#files-sdk/client'
-import { parseMarkdown } from '#comark/parse'
+import { createAuthClient } from 'better-auth/vue'
+import { createFilesClient } from 'files-sdk/client'
+import { parseMarkdown } from 'comark/parse'
 const auth = createAuthClient()
 const files = createFilesClient()
 void auth; void files; void parseMarkdown
@@ -150,14 +146,14 @@ void auth; void files; void parseMarkdown
         await put(
             'server/api/owned.get.ts',
             `
-import { memory } from '#files-sdk/memory'
-import { createFiles } from '#files-sdk'
-import { parseMarkdown } from '#comark/parse'
-import { generateText } from '#ai'
+import { memory } from 'files-sdk/memory'
+import { createFiles } from 'files-sdk'
+import { parseMarkdown } from 'comark/parse'
+import { generateText } from 'ai'
 import { defineEventHandler } from 'nuxt/server'
 import { useServerFiles as nativeFiles } from 'nuxt-files-sdk/runtime'
-import { useServerFiles as bridgedFiles } from '#nuxt-files-sdk/runtime'
-import { useSiteAdmin } from '@liria24/site-admin/nuxt/server'
+import { useServerFiles as bridgedFiles } from 'nuxt-files-sdk/runtime'
+import { useSiteAdmin } from '@liria24/site-admin/internal/nuxt/server'
 export default defineEventHandler(async (event) => {
   const files = createFiles({ adapter: memory() })
   void files
@@ -172,28 +168,25 @@ export default defineEventHandler(async (event) => {
         await put(
             'standalone-types.ts',
             `
-import type { BetterAuthOptions } from '#better-auth'
-import { defineServerAuth } from '#nuxtjs/better-auth/config'
-import { defineFilesConfig } from '#nuxt-files-sdk/config'
-import { createFilesClient } from '#files-sdk/client'
-import { parseMarkdown } from '#comark/parse'
-import type { ContentClient } from '#comark-content/client'
-import { generateText } from '#ai'
+import type { BetterAuthOptions } from 'better-auth'
+import { defineServerAuth } from '@nuxtjs/better-auth/config'
+import { defineFilesConfig } from 'nuxt-files-sdk/config'
+import { createFilesClient } from 'files-sdk/client'
+import { parseMarkdown } from 'comark/parse'
+import { generateText } from 'ai'
 const auth: BetterAuthOptions = { emailAndPassword: { enabled: true } }
 const files = defineFilesConfig({ storage: { adapter: 'memory' } })
 void auth; void files; void defineServerAuth; void createFilesClient; void parseMarkdown; void generateText
-export type ContentProbe = ContentClient
 `,
         )
         await put(
             'write-types.mjs',
             `
 import { writeFile } from 'node:fs/promises'
-import { createSiteAdminDependencyTypePaths } from '@liria24/site-admin/dependency-aliases'
-await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { target: 'ES2024', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, skipLibCheck: true, noEmit: true, paths: createSiteAdminDependencyTypePaths() }, files: ['standalone-types.ts'] }))
+await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { target: 'ES2024', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, skipLibCheck: true, noEmit: true }, files: ['standalone-types.ts'] }))
 `,
         )
-        console.log('Owned consumer: common config CLI and independent Node type paths')
+        console.log('Peer consumer: common config CLI and ordinary Node package resolution')
         run(process.execPath, [
             'node_modules/@liria24/site-admin/dist/cli.js',
             'generate',
@@ -201,11 +194,11 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
             '.generated/schema.ts',
         ])
         if (!(await readFile(join(directory, '.generated/schema.ts'), 'utf8')).includes('site_admin_content_posts')) {
-            throw new Error('CLI did not load common hash-import configuration.')
+            throw new Error('CLI did not load common public-import configuration.')
         }
         run(process.execPath, ['write-types.mjs'])
         run(process.execPath, ['node_modules/typescript/bin/tsc', '--noEmit', '-p', 'tsconfig.standalone.json'])
-        console.log('Owned consumer: Nuxt prepare and app/server/node projects')
+        console.log('Peer consumer: Nuxt prepare and app/server/node projects')
         run(process.execPath, ['node_modules/nuxt/bin/nuxt.mjs', 'prepare'])
         for (const project of ['app', 'server', 'node']) {
             run(process.execPath, [
@@ -215,14 +208,14 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
                 `.nuxt/tsconfig.${project}.json`,
             ])
         }
-        console.log('Owned consumer: Nuxt production build')
+        console.log('Peer consumer: Nuxt production build')
         const env = { ...process.env, NUXT_BETTER_AUTH_SECRET: 'owned-consumer-test-secret-00000000000000000000' }
         run(process.execPath, ['node_modules/nuxt/bin/nuxt.mjs', 'build'], env)
         for (const name of await readdir(join(directory, '.output/public'), { recursive: true })) {
             if (!/\.(?:js|json|html)$/u.test(name)) continue
             const source = await readFile(join(directory, '.output/public', name), 'utf8')
             if (
-                source.includes('Owned consumer does not test database writes') ||
+                source.includes('Peer consumer does not test database writes') ||
                 source.includes('owned_consumer_revisions')
             ) {
                 throw new Error(`Server-only common configuration leaked into client output: ${name}`)
@@ -287,5 +280,5 @@ await writeFile('tsconfig.standalone.json', JSON.stringify({ compilerOptions: { 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     const tarball = process.env.SITE_ADMIN_TARBALL ?? process.argv[2]
     if (!tarball) throw new Error('Pass a packed Site Admin tarball as argv[2] or SITE_ADMIN_TARBALL.')
-    await verifyOwnedDependencies(tarball)
+    await verifyPeerDependencies(tarball)
 }

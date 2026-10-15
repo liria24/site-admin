@@ -120,7 +120,7 @@ describe('application-owned database resolution', () => {
     })
 
     it('leaves migrations to the app and shares the app Drizzle connection with native Better Auth', async () => {
-        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+        const config = defineSiteAdminConfig({ models: { posts: { fields: { slug: text(), title: text() } } } })
         await mkdir(resolve('.tmp'), { recursive: true })
         const path = await mkdtemp(resolve('.tmp/app-database-'))
         directories.push(path)
@@ -161,8 +161,12 @@ describe('application-owned database resolution', () => {
         const migration = (await readdir(output)).find((name) => !name.startsWith('.'))!
         client.exec(await readFile(resolve(output, migration, 'migration.sql'), 'utf8'))
         expect(
-            (await createSiteAdmin({ config, database }).createEntry('posts', { data: { title: 'App-owned' } })).data,
-        ).toEqual({ title: 'App-owned' })
+            (
+                await createSiteAdmin({ config, database }).createEntry('posts', {
+                    data: { slug: 'app-owned', title: 'App-owned' },
+                })
+            ).data,
+        ).toEqual({ slug: 'app-owned', title: 'App-owned' })
         const auth = authAdapter(applicationDb, { provider: 'sqlite', schema, transaction: false })({
             plugins: [admin()],
         })

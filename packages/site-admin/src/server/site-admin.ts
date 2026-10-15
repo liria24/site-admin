@@ -46,7 +46,7 @@ import type {
     StorageAssetCopyGuard,
     StorageEntryFilter,
 } from '../storage'
-import { entryPath, modelRouteOptions, preferredSlugSource, routeRedirect, slugify, validateSlug } from './routes'
+import { entryPath, modelRouteOptions, routeRedirect } from './routes'
 import type {
     AssetRecord,
     AssetSyncResult,
@@ -147,6 +147,15 @@ export class SiteAdmin<Context = unknown> {
         const maxSize = options.config.assets?.maxUploadSize
         if (maxSize !== undefined && (!Number.isSafeInteger(maxSize) || maxSize <= 0))
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'maxUploadSize must be a positive safe integer.')
+        for (const [name, model] of Object.entries(options.config.models)) {
+            if (model.publishing === false && model.scheduling === true)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_INVALID_INPUT',
+                    `Model "${name}" cannot schedule without publishing.`,
+                )
+        }
+        if (Object.hasOwn(options.config.authorization?.roles ?? {}, 'admin'))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'The built-in admin role cannot be overridden.')
         this.#options = options
         this.#resolveRouteRule = createSiteAdminRouteResolver(options.config.routeRules)
         this.#descriptor = createSiteAdminDescriptor(options.config)
@@ -271,7 +280,17 @@ export class SiteAdmin<Context = unknown> {
                     )
                 }
             }
-            if (definition.route) entryPath(modelName, definition, 'config-check', this.#apiBases())
+            if (definition.route) {
+                const pattern = route?.path ?? `/${modelName}/:id`
+                const data: Record<string, unknown> = {}
+                for (const [, key] of pattern.matchAll(/:([A-Za-z0-9_-]+)/gu)) {
+                    if (key === 'id') continue
+                    if (!Object.hasOwn(definition.fields, key!))
+                        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', `Unknown route field "${key}".`)
+                    data[key!] = 'config-check'
+                }
+                entryPath(modelName, definition, { id: 'config-check', data }, this.#apiBases())
+            }
         }
     }
 
@@ -353,7 +372,8 @@ export class SiteAdmin<Context = unknown> {
 
     async listRevisions(entryId: string): Promise<RevisionRecord[]> {
         await this.initialize()
-        await this.#requiredEntry(entryId)
+        const entry = await this.#requiredEntry(entryId)
+        this.#assertFeature(entry.model, 'revisions')
         return this.#storage.revisions(entryId)
     }
 
@@ -377,6 +397,7 @@ export class SiteAdmin<Context = unknown> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
         const definition = this.#model(entry.model)
+        this.#assertFeature(entry.model, 'revisions')
         const revision = await this.#revision(revisionId, entryId)
         const prepared = await this.#prepareRevision(definition, revision)
         const restoredRevisionId = this.#id()
@@ -393,7 +414,7 @@ export class SiteAdmin<Context = unknown> {
                     entryId,
                     model: entry.model,
                     revisionId: restoredRevisionId,
-                    slug: revision.slug,
+
                     time,
                 }),
             ],
@@ -416,6 +437,7 @@ export class SiteAdmin<Context = unknown> {
         if (!Number.isInteger(retain) || retain < 0) {
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"retain" must be a non-negative integer.')
         }
+        this.#assertFeature((await this.#requiredEntry(entryId)).model, 'revisions')
         const candidates = (await this.#storage.revisionIds(entryId)).slice(retain)
         return { deleted: await this.#storage.pruneRevisions(entryId, candidates) }
     }
@@ -424,19 +446,6 @@ export class SiteAdmin<Context = unknown> {
         const row = await this.#storage.readRevision(id, entryId)
         if (!row) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `Revision "${id}" does not exist.`)
         return row
-    }
-
-    #resolveSlug(
-        definition: ModelDefinition,
-        data: Record<string, unknown>,
-        explicit: string | undefined,
-        fallbackId: string,
-    ): string {
-        const maxLength = this.config.modelDefaults?.slug?.maxLength ?? 80
-        if (explicit === '' && definition.publishing !== false) return ''
-        if (explicit !== undefined) return validateSlug(explicit, maxLength)
-        const generated = slugify(preferredSlugSource(definition, data) ?? '', maxLength)
-        return validateSlug(generated || fallbackId, maxLength)
     }
 
     async #prepareData(
@@ -553,7 +562,7 @@ export class SiteAdmin<Context = unknown> {
         entryId: string
         model: string
         revisionId: string
-        slug: string
+
         time: string
         relations: IndexedReference[]
     }): StorageRevisionCandidate {
@@ -563,7 +572,7 @@ export class SiteAdmin<Context = unknown> {
             actorId: input.actorId ?? null,
             createdAt: input.time,
             data: input.data,
-            slug: input.slug,
+
             model: input.model,
             assets: input.assets,
             relations: input.relations.map((reference) => {
@@ -584,7 +593,7 @@ export class SiteAdmin<Context = unknown> {
         modelName: string
         locale: string
         revisionId: string
-        slug: string
+
         time: string
     }): Promise<StorageRouteChange[]> {
         const redirect = routeRedirect(input.definition, input.data)
@@ -594,7 +603,12 @@ export class SiteAdmin<Context = unknown> {
             (redirect && this.#options.routing?.redirects === false) ||
             input.definition.public === false
                 ? null
-                : entryPath(input.modelName, input.definition, input.slug, this.#apiBases())
+                : entryPath(
+                      input.modelName,
+                      input.definition,
+                      { id: input.entryId, data: input.data },
+                      this.#apiBases(),
+                  )
         const path = basePath === null ? null : this.#localizedPath(input.definition, basePath, input.locale)
         const status = this.config.modelDefaults?.historicalRedirectStatus ?? 301
         const changes: StorageRouteChange[] = [
@@ -610,7 +624,7 @@ export class SiteAdmin<Context = unknown> {
                     path: current.path,
                     locale: current.locale,
                     entryId: input.entryId,
-                    revisionId: input.revisionId,
+                    revisionId: null,
                     kind: 'historical',
                     targetPath: path,
                     status,
@@ -667,7 +681,7 @@ export class SiteAdmin<Context = unknown> {
                     }
                     continue
                 }
-                const basePath = entryPath(row.model, definition, row.slug, this.#apiBases())
+                const basePath = entryPath(row.model, definition, row, this.#apiBases())
                 if (!basePath) continue
                 const path = this.#localizedPath(definition, basePath, row.locale)
                 const current = routesByEntry
@@ -690,7 +704,7 @@ export class SiteAdmin<Context = unknown> {
                         locale: row.locale,
                         modelName: row.model,
                         revisionId: row.revisionId,
-                        slug: row.slug,
+
                         time,
                     })),
                 )
@@ -710,15 +724,28 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    #commit(input: StorageContentCommit): Promise<void> {
-        return this.#storage.commit(input)
+    async #commit(input: StorageContentCommit): Promise<void> {
+        if (input.prune !== undefined || !Object.values(this.config.models).some((model) => model.revisions === false))
+            return this.#storage.commit(input)
+        const ids = new Set([
+            ...(input.revisions ?? []).map((value) => value.entryId),
+            ...(input.updates ?? []).map((value) => value.id),
+        ])
+        const prune: string[] = []
+        for (const id of ids) {
+            const model =
+                input.revisions?.find((value) => value.entryId === id)?.model ??
+                (await this.#storage.readEntry(id))?.model
+            if (model && this.#model(model).revisions === false) prune.push(id)
+        }
+        await this.#storage.commit({ ...input, ...(prune.length ? { prune } : {}) })
     }
 
     async #afterCommit(event: SiteAdminLifecycleEvent, publicGraphChanged = false): Promise<void> {
         const result = publicGraphChanged ? await this.#syncAssetCopies() : { copied: [], deleted: [], failed: [] }
-        if (this.config.hooks?.afterCommit) {
+        if (this.#options.afterCommit) {
             try {
-                await this.config.hooks.afterCommit(event)
+                await this.#options.afterCommit(event)
             } catch (error) {
                 this.diagnostics.push({
                     code: 'SITE_ADMIN_HOOK_FAILED',
@@ -743,7 +770,6 @@ export class SiteAdmin<Context = unknown> {
         const locale = this.#locale(definition, input.locale)
         const id = safeId(input.id ?? this.#id(), 'Entry ID')
         const prepared = await this.#prepareData(definition, input.data, true)
-        const slug = this.#resolveSlug(definition, prepared.data, input.slug, id)
         const revisionId = this.#id()
         const time = this.#now()
         const published = definition.publishing === false
@@ -773,7 +799,7 @@ export class SiteAdmin<Context = unknown> {
                     entryId: id,
                     model: modelName,
                     revisionId,
-                    slug,
+
                     time,
                 }),
             ],
@@ -785,7 +811,7 @@ export class SiteAdmin<Context = unknown> {
                       modelName,
                       locale,
                       revisionId,
-                      slug,
+
                       time,
                   })
                 : [],
@@ -809,8 +835,6 @@ export class SiteAdmin<Context = unknown> {
         const entry = await this.#requiredEntry(entryId)
         const definition = this.#model(entry.model)
         const prepared = await this.#prepareData(definition, input.data, false)
-        const slug =
-            input.slug === undefined ? entry.slug : this.#resolveSlug(definition, prepared.data, input.slug, entry.id)
         const revisionId = this.#id(),
             time = this.#now(),
             published = definition.publishing === false
@@ -828,7 +852,7 @@ export class SiteAdmin<Context = unknown> {
                     entryId,
                     model: entry.model,
                     revisionId,
-                    slug,
+
                     time,
                 }),
             ],
@@ -840,7 +864,7 @@ export class SiteAdmin<Context = unknown> {
                       modelName: entry.model,
                       locale: entry.locale,
                       revisionId,
-                      slug,
+
                       time,
                   })
                 : [],
@@ -907,23 +931,11 @@ export class SiteAdmin<Context = unknown> {
         const definition = this.#model(entry.model)
         if (input.draft !== undefined && input.revisionId !== undefined)
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'draft and revisionId are mutually exclusive.')
-        if (
-            input.draft !== undefined &&
-            (!isObject(input.draft) ||
-                !isObject(input.draft.data) ||
-                (input.draft.slug !== undefined && typeof input.draft.slug !== 'string'))
-        )
-            throw new SiteAdminError(
-                'SITE_ADMIN_INVALID_INPUT',
-                'Publish draft must contain data and an optional slug.',
-            )
+        if (input.draft !== undefined && (!isObject(input.draft) || !isObject(input.draft.data)))
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Publish draft must contain data.')
         const revision = input.draft
             ? undefined
             : await this.#revision(input.revisionId ?? entry.currentRevisionId, entry.id)
-        const slug = validateSlug(
-            input.draft?.slug ?? revision?.slug ?? entry.slug,
-            this.config.modelDefaults?.slug?.maxLength ?? 80,
-        )
         const prepared = input.draft
             ? await this.#prepareData(definition, input.draft.data, false)
             : publishing
@@ -936,7 +948,7 @@ export class SiteAdmin<Context = unknown> {
             definition,
             prepared,
             revisionId,
-            slug,
+
             time,
             conditions: [
                 this.#guard(entry.id, input.expectedVersion),
@@ -951,7 +963,7 @@ export class SiteAdmin<Context = unknown> {
                               entryId: entry.id,
                               model: entry.model,
                               revisionId,
-                              slug,
+
                               time,
                           }),
                       ]
@@ -960,6 +972,7 @@ export class SiteAdmin<Context = unknown> {
     }
 
     async publishEntry(entryId: string, input: PublishEntryInput): Promise<EntryRecord> {
+        this.#assertFeature((await this.getEntry(entryId)).model, 'publishing')
         return this.#publishEntry(entryId, input, true)
     }
 
@@ -967,7 +980,7 @@ export class SiteAdmin<Context = unknown> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
         const candidate = await this.#publicationCandidate(entry, input, true)
-        const { definition, prepared, revisionId, slug, time, conditions, revisions } = candidate
+        const { definition, prepared, revisionId, time, conditions, revisions } = candidate
         await this.#commit({
             conditions,
             revisions,
@@ -978,7 +991,7 @@ export class SiteAdmin<Context = unknown> {
                 modelName: entry.model,
                 locale: entry.locale,
                 revisionId,
-                slug,
+
                 time,
             }),
             publicGeneration: definition.public !== false,
@@ -1042,6 +1055,7 @@ export class SiteAdmin<Context = unknown> {
     async unpublishEntry(entryId: string, input: { actorId?: string; expectedVersion: number }): Promise<EntryRecord> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
+        this.#assertFeature(entry.model, 'publishing')
         await this.#assertCanUnpublish(entryId)
         const publicGraphChanged = Boolean(this.#publicModel(entry.model) && entry.publishedRevisionId)
         await this.#commit({
@@ -1071,10 +1085,18 @@ export class SiteAdmin<Context = unknown> {
     async schedulePublish(entryId: string, input: PublishEntryInput & { at: Date | string }): Promise<EntryRecord> {
         await this.initialize()
         const entry = await this.#requiredEntry(entryId)
+        this.#assertFeature(entry.model, 'scheduling')
         const at = input.at instanceof Date ? input.at : new Date(input.at)
         if (!Number.isFinite(at.getTime()) || at.getTime() <= this.#date().getTime())
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Scheduled publish time must be in the future.')
-        const { revisionId, time, conditions, revisions } = await this.#publicationCandidate(entry, input, false)
+        const candidate = await this.#publicationCandidate(entry, input, false)
+        const { revisionId, time, conditions, revisions } = candidate
+        entryPath(
+            entry.model,
+            candidate.definition,
+            { id: entry.id, data: input.draft?.data ?? (await this.#revision(revisionId, entry.id)).data },
+            this.#apiBases(),
+        )
         await this.#commit({
             conditions,
             revisions,
@@ -1102,7 +1124,7 @@ export class SiteAdmin<Context = unknown> {
 
     async cancelScheduledPublish(entryId: string, input: { expectedVersion: number }): Promise<EntryRecord> {
         await this.initialize()
-        await this.#requiredEntry(entryId)
+        this.#assertFeature((await this.#requiredEntry(entryId)).model, 'scheduling')
         await this.#commit({
             conditions: [this.#guard(entryId, input.expectedVersion)],
             updates: [{ id: entryId, patch: { scheduledRevisionId: null, scheduledAt: null, updatedAt: this.#now() } }],
@@ -1117,6 +1139,7 @@ export class SiteAdmin<Context = unknown> {
         const result: PublishDueResult = { failed: [], published: [] }
         for (const entry of due) {
             try {
+                this.#assertFeature((await this.#requiredEntry(entry.id)).model, 'scheduling')
                 await this.#publishEntry(
                     entry.id,
                     {
@@ -1175,6 +1198,7 @@ export class SiteAdmin<Context = unknown> {
                 version: expectedVersion,
                 model,
             })),
+            prune: this.#model(model).revisions === false ? items.map((item) => item.id) : [],
             publicGeneration: Boolean(this.#publicModel(model)) && entries.some((entry) => entry?.publishedRevisionId),
             updates: items.map((item, index) => ({
                 id: item.id,
@@ -1204,6 +1228,12 @@ export class SiteAdmin<Context = unknown> {
             { ...(input.actorId ? { actorId: input.actorId } : {}), entryId, model: entry.model, type: 'delete' },
             publicGraphChanged,
         )
+    }
+
+    #assertFeature(model: string, feature: 'publishing' | 'scheduling' | 'revisions'): void {
+        const definition = this.#model(model)
+        if ((definition[feature] ?? (feature === 'scheduling' ? definition.publishing !== false : true)) === false)
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', `${feature} is disabled for model "${model}".`)
     }
 
     #id(): string {
@@ -1304,7 +1334,7 @@ export class SiteAdmin<Context = unknown> {
         const basePath =
             this.#options.routing?.enabled === false || (redirect && this.#options.routing?.redirects === false)
                 ? null
-                : entryPath(row.model, definition, row.slug, this.#apiBases())
+                : entryPath(row.model, definition, row, this.#apiBases())
         return basePath === null ? null : this.#localizedPath(definition, basePath, row.locale)
     }
 
@@ -1463,7 +1493,6 @@ export class SiteAdmin<Context = unknown> {
                 path,
                 publishedAt: row.publishedAt,
                 revisionId: row.revisionId,
-                slug: row.slug,
             }
         }
         const trail = new Set(parentTrail).add(row.id)
@@ -1475,7 +1504,6 @@ export class SiteAdmin<Context = unknown> {
             path,
             publishedAt: row.publishedAt,
             revisionId: row.revisionId,
-            slug: row.slug,
         }
         if (definition.localized && path) {
             // A transient projection index keeps large localized lists linear, without another content cache.
@@ -1517,13 +1545,13 @@ export class SiteAdmin<Context = unknown> {
             .map((row) => this.#projectPublished(row, graph, new Set(), budget, markdownSource))
     }
 
-    async getPublicEntry(modelName: string, slugOrId: string, locale?: string): Promise<PublicEntry | null> {
+    async getPublicEntry(modelName: string, id: string, locale?: string): Promise<PublicEntry | null> {
         await this.initialize()
         const definition = this.#model(modelName)
         if (definition.public === false)
             throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${modelName}" is private.`)
         const normalizedLocale = this.#locale(definition, locale)
-        const row = (await this.#storage.published({ model: modelName, locale: normalizedLocale, key: slugOrId }))[0]
+        const row = (await this.#storage.published({ model: modelName, locale: normalizedLocale, ids: [id] }))[0]
 
         if (!row) return null
         const graph = await this.#publicEntryGraph([row])
@@ -1625,7 +1653,7 @@ export class SiteAdmin<Context = unknown> {
                     (id) => this.#assetUrl(id),
                 )
                 this.#prepareContent(content, definition, generation)
-                await content.get(`${entry.slug}.json`)
+                await content.get(`${entry.id}.json`)
                 parsed = this.#parsedContent.get(entry.id)
             }
             const metadata = parsed?.file.data['_siteAdmin']

@@ -1,7 +1,7 @@
 import { drizzle, type AnyD1Database } from 'drizzle-orm/d1'
 import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
-import type { SiteAdminDatabase } from '@liria24/site-admin/adapter'
-import type { SiteAdminDatabaseContext } from '@liria24/site-admin/runtime/database'
+import type { SiteAdminDatabase } from '@liria24/site-admin/internal/adapter'
+import type { SiteAdminDatabaseContext } from '@liria24/site-admin/internal/runtime/database'
 // @ts-ignore The consumer test generates its application-owned schema before building.
 import * as schema from '../.data/schema/schema'
 

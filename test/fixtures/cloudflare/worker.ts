@@ -18,7 +18,13 @@ interface Env {
 
 const config = defineSiteAdminConfig({
     assets: { storage: 'content' },
-    models: { posts: { fields: { attachment: file(), title: text({ required: true }) }, route: true, sortable: true } },
+    models: {
+        posts: {
+            fields: { slug: text(), attachment: file(), title: text({ required: true }) },
+            route: '/posts/:slug',
+            sortable: true,
+        },
+    },
 })
 
 export default {
@@ -78,7 +84,9 @@ export default {
                     size: Number(request.headers.get('x-upload-size')),
                     filename: 'separated.bin',
                 })
-                let entry = await separated.createEntry('posts', { data: { title: 'Separated', attachment: asset.id } })
+                let entry = await separated.createEntry('posts', {
+                    data: { slug: 'separated', title: 'Separated', attachment: asset.id },
+                })
                 const privateBefore = await draftFiles.exists(asset.key)
                 const publicBefore = (await files.list({ prefix: `site-admin/public/${asset.id}/` })).items.length
                 entry = await separated.publishEntry(entry.id, { expectedVersion: entry.version })
@@ -105,7 +113,7 @@ export default {
             }
             if (new URL(request.url).pathname === '/reorder') {
                 const entries = await Promise.all(
-                    ['sort-a', 'sort-b'].map((title) => admin.createEntry('posts', { data: { title } })),
+                    ['sort-a', 'sort-b'].map((title) => admin.createEntry('posts', { data: { title, slug: title } })),
                 )
                 const published = await Promise.all(
                     entries.map((entry) => admin.publishEntry(entry.id, { expectedVersion: entry.version })),
@@ -133,11 +141,14 @@ export default {
                     generation: (await admin.publicGeneration()) - before,
                 })
             }
-            const draft = await admin.createEntry('posts', { data: { title: 'D1' } })
+            const draft = await admin.createEntry('posts', { data: { slug: 'd1', title: 'D1' } })
             const published = await admin.publishEntry(draft.id, { expectedVersion: draft.version })
             let conflict = false
             try {
-                await admin.updateEntry(draft.id, { data: { title: 'stale' }, expectedVersion: draft.version })
+                await admin.updateEntry(draft.id, {
+                    data: { slug: draft.data.slug, title: 'stale' },
+                    expectedVersion: draft.version,
+                })
             } catch {
                 conflict = true
             }

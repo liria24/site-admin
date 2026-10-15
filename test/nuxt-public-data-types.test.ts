@@ -17,11 +17,12 @@ it('preserves model-specific public data and native AsyncData options/transform/
         join(directory, 'imports.d.ts'),
         `interface ImportMeta { server: boolean }
 declare module '#imports' {
+  export const useRoute: () => { path: string }
   export const useRequestURL: () => URL
   export const useRequestFetch: () => (url: string, options: { [name: string]: unknown; onResponse?: (context: { response: Response }) => void }) => Promise<unknown>
   export const useState: <Value>(key: string, value: () => Value) => import('vue').Ref<Value>
   export { clearNuxtData, refreshNuxtData, useNuxtData } from '#app/composables/asyncData'
-  export const useNuxtApp: () => { payload: { data: Record<string, unknown> }; $i18n?: { locale: import('vue').Ref<string> }; runWithContext: <Value>(callback: () => Value) => Value }
+  export const useNuxtApp: () => { payload: { data: Record<string, unknown> }; callHook: (...args: unknown[]) => Promise<void>; $i18n?: { locale: import('vue').Ref<string> }; runWithContext: <Value>(callback: () => Value) => Value }
 }
 `,
     )
@@ -31,7 +32,7 @@ declare module '#imports' {
 import { array, datetime, defineSiteAdminConfig, image, images, markdown, relation, text, textarea, url, type InferSiteAdminPublicModels } from '@liria24/site-admin'
 import type { AsyncData } from '#app/composables/asyncData'
 import type { NuxtError } from '#app'
-import { useSiteAdminBatch, useSiteAdminEntry, useSiteAdminList } from './client'
+import { useContent } from './client'
 const config = defineSiteAdminConfig({ models: {
   arts: { fields: { title: text({ required: true }), description: textarea(), href: url(), images: images({ required: true }), createdAt: datetime() } },
   socials: { fields: { href: url({ required: true }), icon: text({ required: true }), label: text({ required: true }) } },
@@ -41,63 +42,63 @@ const config = defineSiteAdminConfig({ models: {
   authors: { fields: { bio: markdown({ required: true }) } },
   private: { fields: { secret: text() }, public: false },
 } })
-declare module '@liria24/site-admin/client' {
+declare module '@liria24/site-admin/internal/client' {
   interface SiteAdminClientRegistry { publicModels: InferSiteAdminPublicModels<typeof config>; publicSummaryModels: InferSiteAdminPublicModels<typeof config, 'summary'> }
 }
 const slug = ref('slug')
 const locale = ref('ja')
-const entry = useSiteAdminEntry('posts', slug)
+const entry = useContent('posts', { id: slug })
 const awaitable: AsyncData<InferSiteAdminPublicModels<typeof config>['posts'] | null | undefined, NuxtError | undefined> = entry
 const title: string | undefined = entry.data.value?.data.title
 const nodes: import('comark').Node[] | undefined = entry.data.value?.data.content.nodes
 const summary: import('comark').Node[] | undefined = entry.data.value?.data.content.meta.summary
 // @ts-expect-error Native summary is optional AST, never an excerpt string.
 const invalidSummary: string | undefined = entry.data.value?.data.content.meta.summary
-const transformed = useSiteAdminEntry('posts', () => slug.value, {
+const transformed = useContent('posts', { id: () => slug.value,
   transform: (entry) => ({ title: entry?.data.title ?? '' }), default: () => ({ title: '' }),
   locale: computed(() => locale.value), lazy: true, server: false, immediate: false,
   watch: [slug], deep: true, dedupe: 'defer', timeout: 500, enabled: ref(true),
   getCachedData: () => undefined, serialize: false, middleware: [(next) => next()],
-})
+ })
 const transformedTitle: string = transformed.data.value.title
-const titles = useSiteAdminList('posts', { transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
+const titles = useContent('posts', { transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
 const titleList: string[] = titles.data.value
-const summaryList = useSiteAdminList('posts', { markdown: 'summary' })
+const summaryList = useContent('posts', { markdown: 'summary' })
 const summaryNodes: import('comark').Node[] | undefined = summaryList.data.value?.[0]?.data.content.nodes
 // @ts-expect-error Summary rendering documents do not expose arbitrary plugin metadata.
 summaryList.data.value?.[0]?.data.content.meta.rawSource
 // @ts-expect-error Summary rendering documents do not expose Markdown source.
 summaryList.data.value?.[0]?.data.content.source
-const summaryTitles = useSiteAdminList('posts', { markdown: 'summary', transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
+const summaryTitles = useContent('posts', { markdown: 'summary', transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
 const summaryTitleList: string[] = summaryTitles.data.value
 // @ts-expect-error Summary mode belongs to list requests only.
-useSiteAdminEntry('posts', 'slug', { markdown: 'summary' })
+useContent('posts', { id: 'slug',  markdown: 'summary'  })
 // @ts-expect-error Unknown projection modes are rejected.
-useSiteAdminList('posts', { markdown: 'excerpt' })
-const picked = useSiteAdminEntry('posts', 'slug', { pick: ['data'] })
+useContent('posts', { markdown: 'excerpt' })
+const picked = useContent('posts', { id: 'slug',  pick: ['data']  })
 const pickedTitle: string | undefined = picked.data.value?.data.title
 // @ts-expect-error Native pick removes the top-level slug.
-picked.data.value?.slug
-const defaulted = useSiteAdminEntry('posts', 'slug', { default: () => null })
+picked.data.value?.data.slug
+const defaulted = useContent('posts', { id: 'slug',  default: () => null  })
 const defaultTitle: string | undefined = defaulted.data.value?.data.title
-const asyncTransform = useSiteAdminList('posts', { transform: async (items) => ({ count: items.length }), default: () => ({ count: 0 }) })
+const asyncTransform = useContent('posts', { transform: async (items) => ({ count: items.length }), default: () => ({ count: 0 }) })
 const count: number = asyncTransform.data.value.count
 // @ts-expect-error Unknown model names fail through the generated registry.
-useSiteAdminEntry('missing', 'slug')
+useContent('missing', { id: 'slug' })
 // @ts-expect-error Private models have no public HTTP projection.
-useSiteAdminList('private')
+useContent('private')
 // @ts-expect-error Native options retain their real value types.
-useSiteAdminList('posts', { dedupe: 'invalid' })
+useContent('posts', { dedupe: 'invalid' })
 // @ts-expect-error There is no second cache/key/selection framework.
-useSiteAdminEntry('posts', 'slug', { key: 'custom' })
+useContent('posts', { id: 'slug',  key: 'custom'  })
 // @ts-expect-error Public Markdown is a Comark document.
 const invalidBody: string | undefined = entry.data.value?.data.content
 entry.refresh({ dedupe: 'cancel' })
 entry.execute({ signal: new AbortController().signal })
 entry.clear()
-const batch = useSiteAdminBatch({
+const batch = useContent({
   arts: { list: 'arts' }, socials: { list: 'socials' }, careers: { list: 'careers' },
-  ranks: { list: 'ranks' }, posts: { list: 'posts' }, featured: { entry: 'posts', slugOrId: () => slug.value },
+  ranks: { list: 'ranks' }, posts: { list: 'posts' }, featured: { entry: 'posts', id: () => slug.value },
 }, { locale, dedupe: 'defer' })
 const artUrl: string | undefined = batch.data.value?.arts.data[0]?.data.images[0]?.url
 const socialHref: string | undefined = batch.data.value?.socials.data[0]?.data.href
@@ -106,40 +107,40 @@ const rankImage: string | undefined = batch.data.value?.ranks.data[0]?.data.imag
 const postNodes: import('comark').Node[] | undefined = batch.data.value?.posts.data[0]?.data.content.nodes
 const featuredTitle: string | undefined = batch.data.value?.featured.data?.data.title
 const itemErrorStatus: number | undefined = batch.data.value?.posts.error?.status
-const transformedBatch = useSiteAdminBatch({ posts: { list: 'posts' } }, {
+const transformedBatch = useContent({ posts: { list: 'posts' } }, {
   transform: (batch) => batch.posts.data.map((entry) => entry.data.title), default: () => [],
 })
 const batchTitles: string[] = transformedBatch.data.value
-const pickedBatch = useSiteAdminBatch({ posts: { list: 'posts' }, arts: { list: 'arts' } }, { pick: ['posts'] })
+const pickedBatch = useContent({ posts: { list: 'posts' }, arts: { list: 'arts' } }, { pick: ['posts'] })
 const pickedPostTitle: string | undefined = pickedBatch.data.value?.posts.data[0]?.data.title
 // @ts-expect-error Native pick removes arts from this batch result.
 pickedBatch.data.value?.arts
-const dynamicBatch = useSiteAdminBatch(computed(() => ({ selected: { entry: 'posts', slugOrId: slug } } as const)))
+const dynamicBatch = useContent(computed(() => ({ selected: { entry: 'posts', id: slug } } as const)))
 const selectedTitle: string | undefined = dynamicBatch.data.value?.selected.data?.data.title
-const summaryBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: 'summary' }, featured: { entry: 'posts', slugOrId: slug } })
+const summaryBatch = useContent({ posts: { list: 'posts', markdown: 'summary' }, featured: { entry: 'posts', id: slug } })
 const batchSummaryNodes: import('comark').Node[] | undefined = summaryBatch.data.value?.posts.data[0]?.data.content.nodes
 // @ts-expect-error The batch list mode also removes arbitrary plugin metadata.
 summaryBatch.data.value?.posts.data[0]?.data.content.meta.rawSource
 // @ts-expect-error Batch detail requests retain their full contract.
-useSiteAdminBatch({ featured: { entry: 'posts', slugOrId: slug, markdown: 'summary' } })
+useContent({ featured: { entry: 'posts', id: slug, markdown: 'summary' } })
 void [summaryNodes, summaryTitleList, batchSummaryNodes]
 declare const mode: 'full' | 'summary'
-const mixedBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: mode } })
+const mixedBatch = useContent({ posts: { list: 'posts', markdown: mode } })
 const mixedBio: string | import('@liria24/site-admin').SiteAdminMarkdownSummary | undefined = mixedBatch.data.value?.posts.data[0]?.data.author?.data.bio
 // @ts-expect-error A runtime union mode cannot promise a raw relation string.
 const rawMixedBio: string | undefined = mixedBatch.data.value?.posts.data[0]?.data.author?.data.bio
-const fullBatch = useSiteAdminBatch({ posts: { list: 'posts', markdown: 'full' } })
+const fullBatch = useContent({ posts: { list: 'posts', markdown: 'full' } })
 const fullBio: string | undefined = fullBatch.data.value?.posts.data[0]?.data.author?.data.bio
 const summaryBio: import('@liria24/site-admin').SiteAdminMarkdownSummary | undefined = summaryBatch.data.value?.posts.data[0]?.data.author?.data.bio
 void [mixedBio, rawMixedBio, fullBio, summaryBio]
 // @ts-expect-error Unknown batch models must fail.
-useSiteAdminBatch({ item: { list: 'missing' } })
+useContent({ item: { list: 'missing' } })
 // @ts-expect-error Private batch models must fail.
-useSiteAdminBatch({ item: { entry: 'private', slugOrId: 'entry' } })
+useContent({ item: { entry: 'private', id: 'entry' } })
 // @ts-expect-error Each request is one operation, not both.
-useSiteAdminBatch({ item: { list: 'posts', entry: 'posts', slugOrId: 'entry' } })
+useContent({ item: { list: 'posts', entry: 'posts', id: 'entry' } })
 // @ts-expect-error Entry requests need a slug/id.
-useSiteAdminBatch({ item: { entry: 'posts' } })
+useContent({ item: { entry: 'posts' } })
 // @ts-expect-error Item errors are serializable records without stacks/causes.
 batch.data.value?.posts.error?.stack
 batch.refresh()
@@ -157,7 +158,8 @@ void [awaitable, title, nodes, summary, invalidSummary, transformedTitle, titleL
             compilerOptions: {
                 paths: {
                     '@liria24/site-admin': [resolve('packages/site-admin/src/index.ts')],
-                    '@liria24/site-admin/client': [resolve('packages/site-admin/src/client.ts')],
+                    '@liria24/site-admin/internal/*': [resolve('packages/site-admin/src/*')],
+                    '@liria24/site-admin/internal/client': [resolve('packages/site-admin/src/client.ts')],
                     '#app': [resolve('node_modules/nuxt/dist/app/index.d.ts')],
                     '#app/composables/asyncData': [resolve('node_modules/nuxt/dist/app/composables/asyncData.d.ts')],
                     vue: [resolve('node_modules/vue/dist/vue.d.ts')],

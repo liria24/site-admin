@@ -1,5 +1,5 @@
 import { defineEventHandler } from 'nuxt/server'
-import { createSiteAdmin, handleManagementRequest } from '@liria24/site-admin/server'
+import { createSiteAdmin, handleManagementRequest } from '@liria24/site-admin/internal/server'
 import config from '../../site-admin.config'
 import { getSiteAdminDatabase } from '../database'
 
@@ -10,8 +10,7 @@ export default defineEventHandler(async (event) => {
         authorize: () => ({ id: 'synthetic-search-reader', roles: ['admin'] }),
     })
     const entry = await core.createEntry('posts', {
-        slug: 'synthetic-unicode-search',
-        data: { title: 'ΣΟΣ '.repeat(250) },
+        data: { title: 'ΣΟΣ '.repeat(250), slug: 'synthetic-unicode-search' },
     })
     const started = performance.now()
     const response = await handleManagementRequest(

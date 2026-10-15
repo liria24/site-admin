@@ -13,9 +13,10 @@ import { createSiteAdminClient, createSiteAdminManagementClient } from '../packa
 
 const config = defineSiteAdminConfig({
     models: {
-        authors: { fields: { name: text({ required: true }), bio: markdown() } },
+        authors: { fields: { slug: text(), name: text({ required: true }), bio: markdown() } },
         posts: {
             fields: {
+                slug: text(),
                 cover: image(),
                 title: text({ required: true }),
                 body: markdown(),
@@ -23,7 +24,7 @@ const config = defineSiteAdminConfig({
                 sections: array(object({ body: markdown({ required: true }) })),
             },
         },
-        private: { fields: { secret: text({ required: true }) }, public: false },
+        private: { fields: { slug: text(), secret: text({ required: true }) }, public: false },
     },
 })
 
@@ -77,7 +78,7 @@ const checkGeneratedRegistry = async (): Promise<void> => {
     void [allTitle, entryVersion, invalidAllTitle]
     const assetId: string | undefined =
         typeof page.items[0]!.data.cover === 'string' ? page.items[0]!.data.cover : page.items[0]!.data.cover?.id
-    const mutation = await management.createEntry('posts', { data: { title: 'New' } })
+    const mutation = await management.createEntry('posts', { data: { slug: 'new', title: 'New' } })
     if ('data' in mutation) {
         const savedTitle: string = mutation.data.title
         void savedTitle
@@ -92,7 +93,7 @@ const checkGeneratedRegistry = async (): Promise<void> => {
     // @ts-expect-error Model fields must have inferred value types.
     await management.createEntry('posts', { data: { title: 123 } })
     // @ts-expect-error Optimistic versions are required on update.
-    await management.updateEntry('entry', { data: { title: 'Updated' } })
+    await management.updateEntry('entry', { data: { slug: 'updated', title: 'Updated' } })
     // @ts-expect-error Updates must match one of the configured management model shapes.
     await management.updateEntry('entry', { data: { irrelevant: true }, expectedVersion: 1 })
     // @ts-expect-error Private model is omitted from inferred public map.

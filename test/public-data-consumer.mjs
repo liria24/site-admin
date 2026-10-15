@@ -269,12 +269,12 @@ export const verifyPublicDataConsumer = async (tarball, { browser = true } = {})
                 _siteAdmin: {
                     id: name,
                     model: 'posts',
-                    slug: name,
                     locale,
                     path: `/posts/${name}`,
                     publishedAt: '2026-01-01',
                     revisionId: `revision-${name}`,
                 },
+                slug: name,
                 title: `${name}:${locale}`,
                 body: { nodes: [['p', {}, 'Body']], frontmatter: {}, meta: {} },
             },
@@ -313,7 +313,7 @@ export const verifyPublicDataConsumer = async (tarball, { browser = true } = {})
                 type: 'module',
                 dependencies: {
                     '@liria24/site-admin': `file:${resolvePath(tarball)}`,
-                    ...consumerDependencies(['nuxt', 'typescript', 'vue', '@types/node']),
+                    ...consumerDependencies(['nuxt', 'typescript', 'vue', '@types/node', 'comark']),
                 },
                 overrides: { vue: '$vue' },
             }),
@@ -342,22 +342,26 @@ export default defineSiteAdminConfig({ models: {
 const slug = ref('ssr')
 const locale = ref('ja')
 const trigger = ref(0)
-const entry = useSiteAdminEntry('posts', slug, { locale, watch: [locale, trigger], dedupe: 'defer' })
-const duplicate = useSiteAdminEntry('posts', () => slug.value, { locale, dedupe: 'defer' })
-const list = useSiteAdminList('posts', { locale })
-const transformed = useSiteAdminList('posts', { locale: 'transformed', transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
-const timeout = useSiteAdminEntry('posts', 'timeout', { immediate: false, timeout: 25 })
+const entry = useContent('posts', { id: slug,  locale, watch: [locale, trigger], dedupe: 'defer'  })
+const duplicate = useContent('posts', { id: () => slug.value,  locale, dedupe: 'defer'  })
+const list = useContent('posts', { locale })
+const transformed = useContent('posts', { locale: 'transformed', transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
+const timeout = useContent('posts', { id: 'timeout',  immediate: false, timeout: 25  })
 // Direct native control distinguishes adapter behavior from native shared-key ownership.
 const nuxtApp = useNuxtApp()
-const nativeClient = useSiteAdminClient()
+const nativeClient = { get: async (_model: string, id: string, options: { signal: AbortSignal; locale: string }) => {
+  const document = await $fetch<{ data: { _siteAdmin: Record<string, unknown>; title: string } }>(${JSON.stringify(backendOrigin)} + '/content/posts/' + encodeURIComponent(id), { query: { locale: options.locale }, signal: options.signal, retry: 0 })
+  const { _siteAdmin, ...data } = document.data
+  return { ..._siteAdmin, data }
+} }
 const nativeHandler = (_app: unknown, { signal }: { signal: AbortSignal }) => nativeClient.get('posts', slug.value, { signal, locale: 'native-ja' })
 const nativeControl = useAsyncData(() => 'native-control:' + slug.value, nativeHandler, { dedupe: 'defer' })
 const nativeDuplicate = useAsyncData(() => 'native-control:' + slug.value, nativeHandler, { dedupe: 'defer' })
 const nativeSingle = useAsyncData(() => 'native-single:' + slug.value, (_app, { signal }) => nativeClient.get('posts', slug.value, { signal, locale: 'single-ja' }), { dedupe: 'defer' })
 const batchSlug = ref('batch-first')
 const batchLocale = ref('batch-ja')
-const batch = useSiteAdminBatch(computed(() => ({
-  catalog: { list: 'posts' }, featured: { entry: 'posts', slugOrId: batchSlug }, failed: { entry: 'posts', slugOrId: 'error' },
+const batch = useContent(computed(() => ({
+  catalog: { list: 'posts' }, featured: { entry: 'posts', id: batchSlug }, failed: { entry: 'posts', id: 'error' },
 } as const)), {
   locale: batchLocale, dedupe: 'defer',
   transform: (items) => ({ ...items, count: items.catalog.data.length }),
@@ -386,9 +390,9 @@ onMounted(async () => {
     list: { status: list.status.value, data: list.data.value, error: list.error.value?.message },
     batch: { slug: batchSlug.value, locale: batchLocale.value, status: batch.status.value, data: batch.data.value, error: batch.error.value?.message },
   })
-  const until = async (stage: string, predicate: () => boolean) => {
+  const until = async (stage: string, predicate: () => boolean | Promise<boolean>) => {
     checks.stage = stage
-    for (let index = 0; index < 300; index++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 10)) }
+    for (let index = 0; index < 300; index++) { if (await predicate()) return; await new Promise((resolve) => setTimeout(resolve, 10)) }
     throw new Error('Condition did not settle at ' + stage + '. State: ' + JSON.stringify(state()))
   }
   const getCounts = () => $fetch<Record<string, number>>(${JSON.stringify(`${backendOrigin}/counts`)})
@@ -400,19 +404,19 @@ onMounted(async () => {
     checks.hydrationState = state()
     check(entry.data.value?.data.title === 'ssr:ja', 'SSR entry must hydrate.')
     check(transformed.data.value[0] === 'list:transformed', 'SSR transform must hydrate.')
-    check(batch.data.value.featured.data?.slug === 'batch-first' && batch.data.value.catalog.data.length === 1 && batch.data.value.count === 1, 'One batch state must hydrate named success data and native transform.')
+    check(batch.data.value.featured.data?.data.slug === 'batch-first' && batch.data.value.catalog.data.length === 1 && batch.data.value.count === 1, 'One batch state must hydrate named success data and native transform.')
     check(batch.data.value.failed.error?.status === 500 && batch.data.value.failed.data === null && !batch.error.value, 'Batch item failure must retain successes without a whole-state error.')
     check(!JSON.stringify(batch.data.value).includes('stack') && !JSON.stringify(batch.data.value).includes('cause'), 'Batch error DTO must not serialize stacks/causes.')
     slug.value = 'slow'
     await nextTick()
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    await until('entry request started', async () => ((await getCounts())['slow:ja'] ?? 0) > 0)
     checks.slowState = state()
     slug.value = 'fast'
     await nextTick()
     checks.fastStartState = state()
-    await until('entry slow-to-fast race', () => entry.data.value?.slug === 'fast' && entry.status.value === 'success')
+    await until('entry slow-to-fast race', () => entry.data.value?.data.slug === 'fast' && entry.status.value === 'success')
     await new Promise((resolve) => setTimeout(resolve, 350))
-    check(entry.data.value?.slug === 'fast', 'Slow slug response must not overwrite the latest entry.')
+    check(entry.data.value?.data.slug === 'fast', 'Slow slug response must not overwrite the latest entry.')
     locale.value = 'en'
     await until('entry/list locale transition', () => entry.data.value?.locale === 'en' && list.status.value === 'success')
     checks.localeCounts = await getCounts()
@@ -423,7 +427,7 @@ onMounted(async () => {
     entry.clear()
     check(entry.data.value === undefined && entry.status.value === 'idle' && !entry.error.value, 'Clear must use native default/status/error.')
     await entry.execute()
-    check(entry.data.value?.slug === 'fast', 'Execute must refetch after clear.')
+    check(entry.data.value?.data.slug === 'fast', 'Execute must refetch after clear.')
     trigger.value += 1
     await until('native entry watch', () => entry.status.value === 'success')
     await new Promise((resolve) => setTimeout(resolve, 30))
@@ -440,12 +444,12 @@ onMounted(async () => {
     check(timeout.status.value === 'error' && !!timeout.error.value, 'Native timeout must report an error.')
     batchSlug.value = 'slow'
     await nextTick()
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    await until('batch request started', async () => ((await getCounts())['slow:batch-ja'] ?? 0) > 0)
     batchSlug.value = 'batch-fast'
     batchLocale.value = 'batch-en'
-    await until('batch slug/locale race', () => batch.status.value === 'success' && batch.data.value.featured.data?.slug === 'batch-fast' && batch.data.value.featured.data?.locale === 'batch-en')
+    await until('batch slug/locale race', () => batch.status.value === 'success' && batch.data.value.featured.data?.data.slug === 'batch-fast' && batch.data.value.featured.data?.locale === 'batch-en')
     await new Promise((resolve) => setTimeout(resolve, 350))
-    check(batch.data.value.featured.data?.slug === 'batch-fast', 'Late batch request must not overwrite the latest composite key.')
+    check(batch.data.value.featured.data?.data.slug === 'batch-fast', 'Late batch request must not overwrite the latest composite key.')
     const beforeBatchRefresh = await getCounts()
     await batch.refresh()
     const afterBatchRefresh = await getCounts()
@@ -454,7 +458,7 @@ onMounted(async () => {
     batch.clear()
     check(batch.data.value.count === 0 && batch.data.value.catalog.data.length === 0 && batch.status.value === 'idle', 'Batch clear must use the native default.')
     await batch.execute()
-    check(batch.data.value.featured.data?.slug === 'batch-fast' && batch.data.value.count === 1, 'Batch execute must restore transformed named data.')
+    check(batch.data.value.featured.data?.data.slug === 'batch-fast' && batch.data.value.count === 1, 'Batch execute must restore transformed named data.')
     checks.batchCounts = await getCounts()
     checks.stage = 'complete'
     checks.done = true
@@ -470,23 +474,23 @@ onMounted(async () => {
         )
         await put(
             'app/types.ts',
-            `const entry = useSiteAdminEntry('posts', 'slug')
+            `const entry = useContent('posts', { id: 'slug' })
 const title: string | undefined = entry.data.value?.data.title
-const nodes: import('#comark').Node[] | undefined = entry.data.value?.data.body.nodes
-const transformed = useSiteAdminList('posts', { transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
+const nodes: import('comark').Node[] | undefined = entry.data.value?.data.body.nodes
+const transformed = useContent('posts', { transform: (items) => items.map((entry) => entry.data.title), default: () => [] })
 const titles: string[] = transformed.data.value
 // @ts-expect-error Unknown model names fail.
-useSiteAdminEntry('missing', 'slug')
+useContent('missing', { slug: 'slug' })
 // @ts-expect-error Private models are unavailable.
-useSiteAdminList('private')
-const batch = useSiteAdminBatch({ catalog: { list: 'posts' }, featured: { entry: 'posts', slugOrId: 'slug' } }, {
+useContent('private')
+const batch = useContent({ catalog: { list: 'posts' }, featured: { entry: 'posts', id: 'slug' } }, {
   transform: (items) => ({ ...items, count: items.catalog.data.length }),
   default: () => ({ catalog: { data: [], error: null }, featured: { data: null, error: null }, count: 0 }),
 })
 const batchTitle: string | undefined = batch.data.value.featured.data?.data.title
 const batchCount: number = batch.data.value.count
 // @ts-expect-error Unknown batch models are unavailable.
-useSiteAdminBatch({ invalid: { list: 'missing' } })
+useContent({ invalid: { list: 'missing' } })
 void [title, nodes, titles, batchTitle, batchCount]`,
         )
         console.log('Public data consumer: real Nuxt macro build and generated app types')

@@ -33,10 +33,10 @@ describe('atomic database execution', () => {
         const reader = createDatabase(nodeSqlite({ path })),
             writer = createDatabase(nodeSqlite({ path }))
         databases.push(reader, writer)
-        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+        const config = defineSiteAdminConfig({ models: { posts: { fields: { slug: text(), title: text() } } } })
         const core = await createMigratedTestAdmin({ config, database: reader })
-        const entry = await core.createEntry('posts', { data: { title: 'Reader snapshot' } })
-        await core.createEntry('posts', { data: { title: 'Other' } })
+        const entry = await core.createEntry('posts', { data: { slug: 'reader-snapshot', title: 'Reader snapshot' } })
+        await core.createEntry('posts', { data: { slug: 'other', title: 'Other' } })
         const storage = (await testAdapter(reader, config)).bind(config)
         await storage.pageEntries({ q: 'reader' }, { limit: 1, offset: 0 })
         const nativeReader = (await reader.getInstance()) as import('node:sqlite').DatabaseSync

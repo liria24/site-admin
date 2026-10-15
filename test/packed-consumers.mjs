@@ -7,7 +7,7 @@ import { join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { verifyStandalone } from './standalone-consumer.mjs'
-import { verifyOwnedDependencies } from './owned-dependency-consumer.mjs'
+import { verifyPeerDependencies } from './owned-dependency-consumer.mjs'
 import { verifyPublicDataConsumer } from './public-data-consumer.mjs'
 import { assertAiOmitted } from './assert-ai-omitted.mjs'
 import { consumerDependencies } from './consumer-dependencies.mjs'
@@ -17,7 +17,7 @@ const packageManager = process.env.SITE_ADMIN_PACKAGE_MANAGER || 'bun'
 if (!['bun', 'npm', 'pnpm'].includes(packageManager)) throw new Error('Unknown SITE_ADMIN_PACKAGE_MANAGER.')
 const integrations = !process.env.SITE_ADMIN_PACKAGE_MANAGER || packageManager === 'pnpm'
 const ogImage = JSON.parse(
-    await readFile(new URL('../packages/site-admin/node_modules/nuxt-og-image/package.json', import.meta.url), 'utf8'),
+    await readFile(new URL('../node_modules/nuxt-og-image/package.json', import.meta.url), 'utf8'),
 )
 const renderers = Object.fromEntries(
     ['@takumi-rs/core', 'satori', '@resvg/resvg-js'].map((name) => {
@@ -129,7 +129,7 @@ try {
         await verifyStandalone(tarball)
         await verifyPublicDataConsumer(tarball)
     }
-    if (packageManager === 'pnpm') await verifyOwnedDependencies(tarball)
+    if (packageManager === 'pnpm') await verifyPeerDependencies(tarball)
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
     await writeFile(
         join(temporary, 'package.json'),
@@ -137,6 +137,19 @@ try {
             dependencies: {
                 '@liria24/site-admin': `file:${tarball.replaceAll('\\', '/')}`,
                 ...consumerDependencies([
+                    'better-auth',
+                    'ai',
+                    'comark',
+                    'nuxt-files-sdk',
+                    'files-sdk',
+                    'nuxt-site-config',
+                    '@nuxtjs/i18n',
+                    '@nuxtjs/robots',
+                    '@nuxtjs/sitemap',
+                    'nuxt-llms',
+                    'nuxt-og-image',
+                    'nuxt-schema-org',
+                    'nuxt-seo-utils',
                     '@better-auth/drizzle-adapter',
                     '@nuxtjs/better-auth',
                     '@tanstack/vue-form',
@@ -148,16 +161,20 @@ try {
                     'vue',
                 ]),
                 ...(!integrations ? renderers : {}),
+                // Select Vite's optional compiler at the root; Drizzle Kit keeps its older compiler nested.
+                ...(packageManager === 'npm' ? { esbuild: '^0.28.2' } : {}),
             },
             private: true,
+            overrides: { vue: consumerDependencies(['vue']).vue },
+            pnpm: { overrides: { vue: consumerDependencies(['vue']).vue } },
             type: 'module',
         }),
     )
     await writeFile(
         join(temporary, 'core.ts'),
         `import { defineSiteAdminConfig, image, text, type InferSiteAdminPublicModels } from '@liria24/site-admin'
-import { createSiteAdminClient, managementAssetUrl, type PublicAsset } from '@liria24/site-admin/client'
-import { createSiteAdmin } from '@liria24/site-admin/server'
+import { createSiteAdminClient, managementAssetUrl, type PublicAsset } from '@liria24/site-admin/internal/client'
+import { createSiteAdmin } from '@liria24/site-admin/internal/server'
 const config = defineSiteAdminConfig({ models: { posts: { fields: { cover: image(), title: text({ required: true }) } } } })
 const data = { title: 'Public', cover: { id: 'asset', url: '/api/content/_assets/asset' } } satisfies InferSiteAdminPublicModels<typeof config>['posts']['data']
 const cover: PublicAsset = data.cover
@@ -167,8 +184,8 @@ if (!config.models.posts || typeof createSiteAdmin !== 'function' || typeof crea
     )
     await writeFile(
         join(temporary, 'form.ts'),
-        `import { useSiteAdminForm } from '@liria24/site-admin/form'
-if (typeof useSiteAdminForm !== 'function') throw new Error('form export missing')
+        `import { useEntryForm } from '@liria24/site-admin/internal/form'
+if (typeof useEntryForm !== 'function') throw new Error('form export missing')
 `,
     )
     await writeFile(
@@ -221,7 +238,7 @@ export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], siteAdm
     )
     await writeFile(
         join(temporary, 'remote/app.vue'),
-        `<script setup>const route = useSiteAdminRoute()</script><template><div>{{ route?.entry?.data?.title || 'remote empty' }}</div></template>`,
+        `<script setup>const route = useRoute(); const { data: entry } = await useContent('posts', { path: () => route.path })</script><template><div>{{ entry?.data?.title || 'remote empty' }}</div></template>`,
     )
 
     await install()
@@ -243,9 +260,9 @@ registerHooks({ resolve(specifier, context, next) {
   return next(specifier, context)
 } })
 await import('@liria24/site-admin')
-await import('@liria24/site-admin/client')
-await import('@liria24/site-admin/server')
-await import('@liria24/site-admin/adapter')
+await import('@liria24/site-admin/internal/client')
+await import('@liria24/site-admin/internal/server')
+await import('@liria24/site-admin/internal/adapter')
 for (const module of ['assets', 'content', 'document', 'plugins']) {
   try {
     import.meta.resolve('@liria24/site-admin/markdown/' + module)
@@ -266,7 +283,7 @@ registerHooks({ resolve(specifier, context, next) {
   if (specifier === 'comark' || specifier.startsWith('comark/') || specifier.startsWith('markdown-exit') || specifier.startsWith('mdurl') || specifier.startsWith('linkify-it')) throw new Error('Form imported Markdown parser: ' + specifier)
   return next(specifier, context)
 } })
-await import('@liria24/site-admin/form')
+await import('@liria24/site-admin/internal/form')
 `,
     ])
     exec(['site-admin', 'generate', '--config', 'server/site-admin.config.ts', '--out', 'server/schema.ts'])
@@ -342,7 +359,7 @@ export default () => {
   // @ts-expect-error Unknown Site Admin hook.
   useServerHooks().hook('site-admin:missing', () => {})
 }
-const admin: ReturnType<typeof import('@liria24/site-admin/nuxt/server').useSiteAdmin> = useSiteAdmin()
+const admin: ReturnType<typeof import('@liria24/site-admin/server').useAdmin> = useAdmin()
 void admin
 `,
     )
@@ -355,8 +372,8 @@ const impersonatedBy: NonNullable<typeof nativeSession.session.value>['impersona
 const invalidRole: NonNullable<typeof nativeSession.user.value>['role'] = 1
 // @ts-expect-error Native session inference must retain its field type.
 const invalidImpersonatedBy: NonNullable<typeof nativeSession.session.value>['impersonatedBy'] = 1
-const client: import('@liria24/site-admin/client').SiteAdminClient = useSiteAdminClient()
-const route = useSiteAdminRoute()
+const client = useAdminClient()
+const route = useRoute()
 // @ts-expect-error No such public client method.
 client.missing()
 void route
@@ -409,8 +426,8 @@ void invalidImpersonatedBy
             setupNuxt(false)
         }
         await writeFile(nativeConfigPath, nativeConfig)
-        if (consumer.dependencies['nuxt-og-image'])
-            throw new Error('Consumer should not need a direct OG module dependency.')
+        if (!consumer.dependencies['nuxt-og-image'])
+            throw new Error('Consumer must install its enabled OG module peer.')
         const takumiPath = join(temporary, 'server/app/components/OgImage/Default.takumi.vue')
         const satoriPath = join(temporary, 'server/app/components/OgImage/Default.satori.vue')
         const template = await readFile(takumiPath, 'utf8')

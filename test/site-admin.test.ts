@@ -38,23 +38,24 @@ const setup = async (): Promise<{
     const config = defineSiteAdminConfig({
         assets: { maxUploadSize: 32, cleanup: { minimumAge: 86400 }, storage: 'content' },
         models: {
-            authors: { fields: { name: text({ required: true }) } },
+            authors: { fields: { slug: text(), name: text({ required: true }) } },
             posts: {
                 fields: {
+                    slug: text(),
                     body: markdown(),
                     cover: image(),
                     sections: array(object({ author: relation('authors', { required: true }), heading: text() })),
                     title: text({ required: true }),
                 },
-                route: true,
+                route: '/posts/:slug',
             },
             secrets: {
-                fields: { cover: image(), destination: url(), title: text() },
+                fields: { slug: text(), cover: image(), destination: url(), title: text() },
                 public: false,
                 publishing: false,
                 route: { path: '/secrets/:slug', redirect: 'destination' },
             },
-            settings: { fields: { enabled: boolean() }, publishing: false },
+            settings: { fields: { slug: text(), enabled: boolean() }, publishing: false },
         },
     })
     return {
@@ -79,15 +80,15 @@ const setup = async (): Promise<{
 describe('SiteAdmin', () => {
     it('public client exposes entry identity and gets route-less content by slug or id', async () => {
         const { admin } = await setup()
-        const draft = await admin.createEntry('authors', { slug: 'writer', data: { name: 'Writer' } })
+        const draft = await admin.createEntry('authors', { data: { slug: 'writer', name: 'Writer' } })
         await admin.publishEntry(draft.id, { expectedVersion: draft.version })
         const client = createSiteAdminClient({
             origin: 'http://localhost',
             fetch: (input, init) => handlePublicRequest(admin, new Request(input, init)),
         })
         const list = await client.list('authors')
-        expect(list).toMatchObject([{ id: draft.id, slug: 'writer', data: { name: 'Writer' } }])
-        expect(await client.get('authors', 'writer')).toEqual(list[0])
+        expect(list).toMatchObject([{ id: draft.id, data: { slug: 'writer', name: 'Writer' } }])
+        expect(await client.get('authors', 'writer')).toBeNull()
         expect(await client.get('authors', draft.id)).toEqual(list[0])
         expect(await client.get('authors', 'missing')).toBe(null)
     })
@@ -97,9 +98,10 @@ describe('SiteAdmin', () => {
             body: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
             filename: 'cover.png',
         })
-        const author = await admin.createEntry('authors', { data: { name: 'Ada' } })
+        const author = await admin.createEntry('authors', { data: { slug: 'ada', name: 'Ada' } })
         const post = await admin.createEntry('posts', {
             data: {
+                slug: 'first-post',
                 body: `Intro\n\n<!-- more -->\n\n![](site-admin://asset/${asset.id})`,
                 cover: { alt: 'Cover', id: asset.id },
                 sections: [{ author: author.id, heading: 'Byline' }],
@@ -117,7 +119,7 @@ describe('SiteAdmin', () => {
         const publishedAuthor = await admin.publishEntry(author.id, { expectedVersion: author.version })
         const publishedPost = await admin.publishEntry(post.id, { expectedVersion: post.version })
         const firstGeneration = await admin.publicGeneration()
-        const firstPublic = await admin.getPublicEntry('posts', 'first-post')
+        const firstPublic = await admin.getPublicEntry('posts', post.id)
 
         expect(firstPublic).toMatchObject({
             data: {
@@ -131,15 +133,14 @@ describe('SiteAdmin', () => {
         await expect(admin.downloadAsset(asset.id, true)).resolves.toMatchObject({ asset: { id: asset.id } })
 
         const draft = await admin.updateEntry(post.id, {
-            data: { ...publishedPost.data, title: 'Changed' },
             expectedVersion: publishedPost.version,
-            slug: 'changed',
+            data: { ...publishedPost.data, slug: 'changed', title: 'Changed' },
         })
         expect(await admin.publicGeneration()).toBe(firstGeneration)
-        expect(await admin.getPublicEntry('posts', 'first-post')).toMatchObject({
+        expect(await admin.getPublicEntry('posts', post.id)).toMatchObject({
             data: { title: 'First Post' },
         })
-        expect(await admin.getPublicEntry('posts', 'changed')).toBeNull()
+        expect(await admin.resolvePath('/posts/changed')).toBeNull()
 
         const republished = await admin.publishEntry(post.id, { expectedVersion: draft.version })
         expect(await admin.resolvePath('/posts/first-post')).toEqual({
@@ -153,7 +154,11 @@ describe('SiteAdmin', () => {
         })
         const content = await admin.content('posts')
         expect(await content.list()).toEqual(
-            expect.arrayContaining([expect.objectContaining({ path: '/posts/changed' })]),
+            expect.arrayContaining([
+                expect.objectContaining({
+                    data: expect.objectContaining({ _siteAdmin: expect.objectContaining({ path: '/posts/changed' }) }),
+                }),
+            ]),
         )
         expect(await admin.llms()).toContain('[Changed](/posts/changed) — Intro')
         expect(await admin.llms(true)).toContain('## Changed')
@@ -185,6 +190,7 @@ describe('SiteAdmin', () => {
         })
         await admin.createEntry('secrets', {
             data: {
+                slug: 'hidden',
                 cover: privateAsset.id,
                 destination: 'https://example.com/private',
                 title: 'Hidden',
@@ -214,7 +220,7 @@ describe('SiteAdmin', () => {
         expect(first.key).not.toBe(second.key)
 
         await admin.createEntry('posts', {
-            data: { body: '', cover: first.id, sections: [], title: 'Asset holder' },
+            data: { slug: 'asset-holder', body: '', cover: first.id, sections: [], title: 'Asset holder' },
         })
         await expect(admin.deleteAsset(first.id)).rejects.toMatchObject({ code: 'SITE_ADMIN_ASSET_IN_USE' })
         expect(await admin.runAssetGC()).toEqual({ deleted: [], failed: [] })
@@ -227,7 +233,7 @@ describe('SiteAdmin', () => {
 
     it('pins the scheduled revision and publishes it through the normal pipeline', async () => {
         const { admin, advance } = await setup()
-        const entry = await admin.createEntry('authors', { data: { name: 'Scheduled' } })
+        const entry = await admin.createEntry('authors', { data: { slug: 'scheduled', name: 'Scheduled' } })
         const scheduled = await admin.schedulePublish(entry.id, {
             at: '2026-01-01T01:00:00.000Z',
             expectedVersion: entry.version,
@@ -238,7 +244,7 @@ describe('SiteAdmin', () => {
         })
 
         const edited = await admin.updateEntry(entry.id, {
-            data: { name: 'Newer draft' },
+            data: { slug: entry.data.slug, name: 'Newer draft' },
             expectedVersion: scheduled.version,
         })
         expect(edited.scheduledRevisionId).toBe(entry.revisionId)

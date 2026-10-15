@@ -2,7 +2,6 @@ import type { SiteAdminConfig } from './config'
 import { contentTableName, fieldStorage, validateContentNames } from './schema-model'
 import { commonSchemaSource } from './schema-template'
 import type { BetterAuthOptions } from 'better-auth'
-import { admin } from 'better-auth/plugins'
 
 type NativeAuthConfig =
     | BetterAuthOptions
@@ -15,6 +14,7 @@ export async function generateCombinedSchema(config: SiteAdminConfig, auth: Nati
         throw new Error(
             'Auth generation requires the application-selected native adapter factory with createSchema. Defer opening its database during schema inspection.',
         )
+    const { admin } = await import('better-auth/plugins')
     const plugins = [...(resolved.plugins ?? [])]
     if (!plugins.some((plugin) => plugin.id === 'admin')) plugins.push(admin())
     const authOptions: BetterAuthOptions = {

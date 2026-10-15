@@ -170,7 +170,7 @@ try {
         fetch(`http://127.0.0.1:${port}/api/site-admin/ai/actions/${name}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...headers },
-            body: JSON.stringify({ props }),
+            body: JSON.stringify({ input: props }),
         })
     if ((await aiRequest('proofread')).status !== 401)
         throw new Error('Named AI action did not require a native session.')
@@ -206,6 +206,10 @@ try {
     }).then((entriesResponse) => entriesResponse.json())
     const formId = formEntries.items[0]?.id
     if (!formId) throw new Error('Form SSR fixture did not find its existing entry.')
+    const listResponse = await fetch(`http://127.0.0.1:${port}/admin-list-probe`, { headers: formHeaders })
+    const listHtml = await listResponse.text()
+    if (!listResponse.ok || !/data-admin-entry[^>]*>Hello<\/li>/u.test(listHtml))
+        throw new Error(`Admin list SSR did not render its awaited items: ${listResponse.status}`)
     const formResponse = await fetch(`http://127.0.0.1:${port}/form-probe?id=${encodeURIComponent(formId)}`, {
         headers: formHeaders,
     })
@@ -247,12 +251,13 @@ try {
     const seoHtml = await seoResponse.text()
     if (
         !seoResponse.ok ||
+        (seoHtml.match(/property="og:image"/gu) ?? []).length !== 1 ||
         !seoHtml.includes('<title>SEO helper probe | Test</title>') ||
         !seoHtml.includes('content="Shared SEO description"') ||
         !/property="og:type"[^>]+content="article"/u.test(seoHtml) ||
         !/name="twitter:card"[^>]+content="summary"/u.test(seoHtml)
     ) {
-        throw new Error(`Shared useSeo SSR probe failed: ${seoResponse.status} ${seoHtml.slice(0, 1000)}`)
+        throw new Error(`Automatic routeRules SEO SSR probe failed: ${seoResponse.status} ${seoHtml.slice(0, 1000)}`)
     }
     const localizedSeoResponse = await fetch(`http://127.0.0.1:${port}/ja/seo-probe`)
     const localizedSeoHtml = await localizedSeoResponse.text()
@@ -296,7 +301,10 @@ try {
     const summaryJson = await summaryHttp.text()
     if (!summaryHttp.ok || summaryJson.includes('FULL_SSR_') || !summaryJson.includes('Native summary'))
         throw new Error('Summary HTTP response contains body/frontmatter or lacks native summary nodes.')
-    const detailHttp = await fetch(`http://127.0.0.1:${port}/api/content/posts/hello?locale=en`)
+    const postId = (
+        await fetch(`http://127.0.0.1:${port}/api/content/posts?locale=en`).then((result) => result.json())
+    )[0].data['_siteAdmin'].id
+    const detailHttp = await fetch(`http://127.0.0.1:${port}/api/content/posts/${postId}?locale=en`)
     if (!(await detailHttp.text()).includes('FULL_SSR_BODY_SENTINEL'))
         throw new Error('Summary SSR must not modify the subsequent full detail cache.')
     if (redirect.status !== 302 || redirect.headers.get('location') !== 'https://example.com/destination') {

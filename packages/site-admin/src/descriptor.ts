@@ -29,6 +29,8 @@ export interface ModelDescriptor {
     displayFields?: ModelDefinition['displayFields']
     public: boolean
     publishing: boolean
+    scheduling: boolean
+    revisions: boolean
     route: ModelDefinition['route']
     serverValidation: boolean
     sortable: boolean
@@ -83,6 +85,8 @@ export const createSiteAdminDescriptor = (config: SiteAdminConfig): SiteAdminDes
                 ...(definition.displayFields ? { displayFields: definition.displayFields } : {}),
                 public: definition.public ?? true,
                 publishing: definition.publishing ?? true,
+                scheduling: definition.scheduling ?? definition.publishing !== false,
+                revisions: definition.revisions ?? true,
                 route: definition.route ?? false,
                 serverValidation: definition.validate !== undefined,
                 sortable: definition.sortable ?? false,

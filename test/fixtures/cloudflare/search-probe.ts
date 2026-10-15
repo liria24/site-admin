@@ -4,7 +4,13 @@ import { defineSiteAdminConfig, file, text } from '../../../packages/site-admin/
 import { createSiteAdmin, handleManagementRequest } from '../../../packages/site-admin/src/server/index'
 
 const config = defineSiteAdminConfig({
-    models: { posts: { fields: { attachment: file(), title: text({ required: true }) }, route: true, sortable: true } },
+    models: {
+        posts: {
+            fields: { slug: text(), attachment: file(), title: text({ required: true }) },
+            route: '/posts/:slug',
+            sortable: true,
+        },
+    },
 })
 
 /** Synthetic local-worker probes; the production package has no seeding or query-budget wrapper. */
@@ -15,7 +21,7 @@ export async function searchProbe(request: Request, binding: AnyD1Database, sche
         const core = createSiteAdmin({ config, database, authorize: () => ({ id: 'probe', roles: ['admin'] }) })
         const marker = 'A😀B%_[]C'
         const title = 'İ'.repeat(65_528) + marker + 'İ'.repeat(634_472)
-        const entry = await core.createEntry('posts', { slug: 'large-local-probe', data: { title } })
+        const entry = await core.createEntry('posts', { data: { title, slug: 'large-local-probe' } })
         const storage = database.bind(config)
         const before = JSON.stringify(await storage.revisions(entry.id))
         const counts: number[] = []
@@ -55,7 +61,7 @@ export async function searchProbe(request: Request, binding: AnyD1Database, sche
                 params: [candidates],
             },
             {
-                sql: "INSERT INTO site_admin_revisions(id,entry_id,slug,created_at) SELECT json_extract(value,'$.id')||'-r',json_extract(value,'$.id'),json_extract(value,'$.id'),'2026-10-09' FROM json_each(?)",
+                sql: "INSERT INTO site_admin_revisions(id,entry_id,created_at) SELECT json_extract(value,'$.id')||'-r',json_extract(value,'$.id'),'2026-10-09' FROM json_each(?)",
                 params: [candidates],
             },
             {

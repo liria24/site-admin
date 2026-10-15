@@ -1,10 +1,12 @@
+import { z } from 'zod'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
 import { MockLanguageModelV4 } from 'ai/test'
 import { defineSiteAdminConfig, number, text } from '../packages/site-admin/src'
 import { handleManagementRequest, type SiteAdminActor } from '../packages/site-admin/src/server'
-import { useSiteAdminForm } from '../packages/site-admin/src/form'
+import { modelFixture } from './model-fixture'
+import { useEntryForm } from '../packages/site-admin/src/form'
 import { createMigratedTestAdmin } from './migrate'
 
 const databases: Database[] = []
@@ -23,7 +25,7 @@ const setup = async () => {
     const config = defineSiteAdminConfig({
         ai: {
             model: new MockLanguageModelV4(),
-            actions: { publication: { type: 'text-generation', props: {}, prompt: prepare } },
+            actions: { publication: { type: 'text-generation', input: z.object({}).strict(), prompt: prepare } },
         },
         authorization: {
             roles: {
@@ -33,10 +35,21 @@ const setup = async () => {
             },
         },
         models: {
-            notes: { fields: { title: text({ required: true }), summary: text() }, route: '/notes/:slug' },
-            inventory: { fields: { quantity: number({ required: true }) }, route: false },
-            authors: { fields: { title: text({ required: true }) }, publishing: false, route: '/authors/:slug' },
-            settings: { fields: { quantity: number({ required: true }) }, publishing: false, route: false },
+            notes: {
+                fields: { slug: text(), title: text({ required: true }), summary: text() },
+                route: '/notes/:slug',
+            },
+            inventory: { fields: { slug: text(), quantity: number({ required: true }) }, route: false },
+            authors: {
+                fields: { slug: text(), title: text({ required: true }) },
+                publishing: false,
+                route: '/authors/:slug',
+            },
+            settings: {
+                fields: { slug: text(), quantity: number({ required: true }) },
+                publishing: false,
+                route: false,
+            },
         },
     })
     const admin = await createMigratedTestAdmin({
@@ -62,68 +75,64 @@ const request = (path: string, body: unknown) =>
 
 describe('application-owned AI and atomic publication candidates', () => {
     it.each([
-        { model: 'authors', data: { title: 'Ada Lovelace' }, slug: 'ada-lovelace' },
-        { model: 'settings', data: { quantity: 3 }, slug: 'id-1' },
-    ])('creates a non-publishing $model form with its deterministic fallback slug', async ({ model, data, slug }) => {
+        { model: 'authors', data: { slug: 'ada-lovelace', title: 'Ada Lovelace' } },
+        { model: 'settings', data: { slug: 'id-1', quantity: 3 } },
+    ])('creates a non-publishing $model form with its deterministic fallback slug', async ({ model, data }) => {
         const { admin, prepare } = await setup()
-        const controller = useSiteAdminForm<{ title?: string; quantity?: number }>({
-            descriptor: admin.descriptor.models[model]!,
-            modelName: model,
-            defaultValues: data,
-            origin: 'https://site.test',
-            fetch: (input, init) => handleManagementRequest(admin, new Request(input, init)),
-        })
-        await controller.form.handleSubmit()
-        expect(controller.serverError.value).toBeNull()
-        expect(controller.entryId.value).not.toBeNull()
-        const saved = await admin.getEntry(controller.entryId.value!)
-        expect(saved.slug).toBe(slug)
+        const fixture = modelFixture(
+            (input, init) => handleManagementRequest(admin, new Request(input, init)),
+            null,
+            {},
+            { model, descriptor: admin.descriptor.models[model]! },
+        )
+        const controllerState = useEntryForm(fixture.resource, { defaultValues: data })
+        await controllerState.form.handleSubmit()
+        expect(fixture.resource.error.value).toBeUndefined()
+        expect(controllerState.draft.snapshot().entryId).not.toBeNull()
+        const saved = await admin.getEntry(controllerState.draft.snapshot().entryId!)
+        expect(saved.data.slug).toBe(data.slug)
         expect(saved.data).toEqual(data)
         expect(saved.publishedRevisionId).toBe(saved.currentRevisionId)
-        expect((await admin.getPublicEntry(model, saved.id))?.slug).toBe(slug)
-        if ('title' in data) controller.form.setFieldValue('title', 'Changed')
-        else controller.form.setFieldValue('quantity', 4)
-        await controller.form.handleSubmit()
-        expect(controller.serverError.value).toBeNull()
-        expect((await admin.getEntry(saved.id)).slug).toBe(slug)
+        expect((await admin.getPublicEntry(model, saved.id))?.data.slug).toBe(data.slug)
+        if ('title' in data) controllerState.form.setFieldValue('title', 'Changed')
+        else controllerState.form.setFieldValue('quantity', 4)
+        await controllerState.form.handleSubmit()
+        expect(fixture.resource.error.value).toBeUndefined()
+        expect((await admin.getEntry(saved.id)).data.slug).toBe(data.slug)
         expect(prepare).not.toHaveBeenCalled()
     })
 
     it('preserves explicit slug and empty-slug validation for non-publishing forms', async () => {
         const { admin, prepare } = await setup()
-        let controlledSlug = ''
-        const controller = useSiteAdminForm({
-            descriptor: admin.descriptor.models.authors!,
-            modelName: 'authors',
-            defaultValues: { title: 'Author' },
-            slug: () => controlledSlug,
-            origin: 'https://site.test',
-            fetch: (input, init) => handleManagementRequest(admin, new Request(input, init)),
-        })
-        await controller.form.handleSubmit()
-        expect(controller.serverError.value?.code).toBe('SITE_ADMIN_INVALID_INPUT')
-        expect(controller.entryId.value).toBeNull()
-        controlledSlug = 'chosen-author'
-        await controller.form.handleSubmit()
-        expect(controller.serverError.value).toBeNull()
-        const saved = await admin.getEntry(controller.entryId.value!)
-        expect(saved.slug).toBe(controlledSlug)
-        controlledSlug = ''
-        await controller.form.handleSubmit()
-        expect(controller.serverError.value?.code).toBe('SITE_ADMIN_INVALID_INPUT')
-        expect((await admin.getEntry(saved.id)).slug).toBe(saved.slug)
+        const fixture = modelFixture(
+            (input, init) => handleManagementRequest(admin, new Request(input, init)),
+            null,
+            {},
+            { model: 'authors', descriptor: admin.descriptor.models.authors! },
+        )
+        const controllerState = useEntryForm(fixture.resource, { defaultValues: { title: 'Author' } })
+        const controlledSlug = 'chosen-author'
+        controllerState.form.setFieldValue('slug', controlledSlug)
+        await controllerState.form.handleSubmit()
+        expect(fixture.resource.error.value).toBeUndefined()
+        const saved = await admin.getEntry(controllerState.draft.snapshot().entryId!)
+        expect(saved.data.slug).toBe(controlledSlug)
+        controllerState.form.setFieldValue('slug', '')
+        await controllerState.form.handleSubmit()
+        expect(fixture.resource.error.value?.data?.code).toBe('SITE_ADMIN_INVALID_INPUT')
+        expect((await admin.getEntry(saved.id)).data.slug).toBe(saved.data.slug)
         expect(prepare).not.toHaveBeenCalled()
     })
 
     it('atomically stores and pins a scheduled candidate, preserving later edits and publishing the pinned revision', async () => {
         const { admin, prepare } = await setup()
-        const entry = await admin.createEntry('notes', { data: { title: 'Draft' }, slug: '' })
+        const entry = await admin.createEntry('notes', { data: { slug: '', title: 'Draft' } })
         const response = await handleManagementRequest(
             admin,
             request(`entries/${entry.id}/schedule`, {
                 at: '2098-01-01T00:00:00Z',
                 expectedVersion: entry.version,
-                draft: { data: { title: 'Scheduled', summary: '' }, slug: 'scheduled' },
+                draft: { data: { slug: 'scheduled', title: 'Scheduled', summary: '' } },
             }),
         )
         expect(response.status).toBe(200)
@@ -135,30 +144,29 @@ describe('application-owned AI and atomic publication candidates', () => {
             admin.schedulePublish(entry.id, {
                 at: '2098-01-01T00:00:00Z',
                 expectedVersion: entry.version,
-                draft: { data: { title: 'Double' }, slug: 'double' },
+                draft: { data: { slug: 'double', title: 'Double' } },
             }),
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
         expect(await admin.listRevisions(entry.id)).toHaveLength(2)
         await admin.updateEntry(entry.id, {
             expectedVersion: scheduled.version,
-            data: { title: 'Later edits' },
-            slug: 'later',
+            data: { slug: 'later', title: 'Later edits' },
         })
         expect(await admin.publishDue(new Date('2099-01-01T00:00:00Z'))).toMatchObject({
             published: [entry.id],
             failed: [],
         })
         expect((await admin.getPublicEntry('notes', entry.id))?.data.title).toBe('Scheduled')
-        expect((await admin.getPublicEntry('notes', entry.id))?.slug).toBe('scheduled')
+        expect((await admin.getPublicEntry('notes', entry.id))?.data.slug).toBe('scheduled')
         expect((await admin.getEntry(entry.id)).data.title).toBe('Later edits')
         expect(await admin.routeSnapshot()).toMatchObject([{ path: '/notes/scheduled' }])
         expect(prepare).not.toHaveBeenCalled()
     })
     it('stores unfinished metadata with zero AI calls and keeps the internal slug out of DTOs and public routes', async () => {
         const { admin, prepare } = await setup()
-        const draft = await admin.createEntry('notes', { data: { title: 'Draft', summary: '' }, slug: '' })
-        expect(draft.slug).toBe('')
-        expect((await admin.listRevisions(draft.id))[0]?.slug).toBe('')
+        const draft = await admin.createEntry('notes', { data: { slug: '', title: 'Draft', summary: '' } })
+        expect(draft.data.slug).toBe('')
+        expect((await admin.listRevisions(draft.id))[0]?.data.slug).toBe('')
         expect(await admin.getPublicEntry('notes', draft.id)).toBeNull()
         expect(await admin.routeSnapshot()).toEqual([])
         await expect(admin.publishEntry(draft.id, { expectedVersion: draft.version })).rejects.toMatchObject({
@@ -169,30 +177,29 @@ describe('application-owned AI and atomic publication candidates', () => {
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_INVALID_INPUT' })
         const updated = await admin.updateEntry(draft.id, {
             expectedVersion: draft.version,
-            data: { title: 'Edited' },
-            slug: '',
+            data: { slug: '', title: 'Edited' },
         })
-        expect(updated.slug).toBe('')
+        expect(updated.data.slug).toBe('')
         expect(prepare).not.toHaveBeenCalled()
     })
 
     it('keeps title-derived legacy create/publish working without running native AI', async () => {
         const { admin, prepare } = await setup()
-        const draft = await admin.createEntry('notes', { data: { title: 'Legacy title' } })
-        expect(draft.slug).toBe('legacy-title')
+        const draft = await admin.createEntry('notes', { data: { slug: 'legacy-title', title: 'Legacy title' } })
+        expect(draft.data.slug).toBe('legacy-title')
         await admin.publishEntry(draft.id, { expectedVersion: draft.version })
-        expect((await admin.getPublicEntry('notes', draft.id))?.slug).toBe('legacy-title')
+        expect((await admin.getPublicEntry('notes', draft.id))?.data.slug).toBe('legacy-title')
         expect(prepare).not.toHaveBeenCalled()
     })
 
     it('atomically publishes caller data and slug with matching current/public revision and one version increment', async () => {
         const { admin, prepare } = await setup()
-        const draft = await admin.createEntry('notes', { data: { title: 'Draft' }, slug: '' })
+        const draft = await admin.createEntry('notes', { data: { slug: '', title: 'Draft' } })
         const response = await handleManagementRequest(
             admin,
             request(`entries/${draft.id}/publish`, {
                 expectedVersion: draft.version,
-                draft: { data: { title: 'Published', summary: 'Manual' }, slug: 'final' },
+                draft: { data: { slug: 'final', title: 'Published', summary: 'Manual' } },
             }),
         )
         expect(response.status).toBe(200)
@@ -200,37 +207,37 @@ describe('application-owned AI and atomic publication candidates', () => {
         const saved = await admin.getEntry(draft.id)
         expect(saved.version).toBe(draft.version + 1)
         expect(saved.currentRevisionId).toBe(saved.publishedRevisionId)
-        expect(saved.data).toEqual({ title: 'Published', summary: 'Manual' })
+        expect(saved.data).toEqual({ slug: 'final', title: 'Published', summary: 'Manual' })
         expect((await admin.getPublicEntry('notes', draft.id))?.data.title).toBe('Published')
         expect(await admin.routeSnapshot()).toMatchObject([{ path: '/notes/final', entryId: draft.id }])
         expect(await admin.listRevisions(draft.id)).toHaveLength(2)
         expect(prepare).not.toHaveBeenCalled()
     })
 
-    it('preserves existing published slug when candidate omits it and rejects explicit manual empty slug', async () => {
+    it('requires a complete candidate and preserves its declared route field and rejects explicit manual empty slug', async () => {
         const { admin } = await setup()
-        let entry = await admin.createEntry('notes', { data: { title: 'Original' }, slug: 'stable-url' })
+        let entry = await admin.createEntry('notes', { data: { slug: 'stable-url', title: 'Original' } })
         entry = await admin.publishEntry(entry.id, { expectedVersion: entry.version })
         entry = await admin.publishEntry(entry.id, {
             expectedVersion: entry.version,
-            draft: { data: { title: 'Updated', summary: '' } },
+            draft: { data: { ...entry.data, title: 'Updated', summary: '' } },
         })
-        expect(entry.slug).toBe('stable-url')
+        expect(entry.data.slug).toBe('stable-url')
         expect(entry.data.summary).toBe('')
         await expect(
             admin.publishEntry(entry.id, {
                 expectedVersion: entry.version,
-                draft: { data: { title: 'Bad' }, slug: '' },
+                draft: { data: { slug: '', title: 'Bad' } },
             }),
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_INVALID_INPUT' })
         expect((await admin.getEntry(entry.id)).version).toBe(entry.version)
-        expect((await admin.getPublicEntry('notes', entry.id))?.slug).toBe('stable-url')
+        expect((await admin.getPublicEntry('notes', entry.id))?.data.slug).toBe('stable-url')
     })
 
     it('rejects stale/double publication without extra revisions and supports a refreshed retry', async () => {
         const { admin } = await setup()
-        const entry = await admin.createEntry('notes', { data: { title: 'Draft' }, slug: 'original' })
-        const input = { expectedVersion: entry.version, draft: { data: { title: 'First' }, slug: 'first' } }
+        const entry = await admin.createEntry('notes', { data: { slug: 'original', title: 'Draft' } })
+        const input = { expectedVersion: entry.version, draft: { data: { slug: 'first', title: 'First' } } }
         const results = await Promise.allSettled([
             admin.publishEntry(entry.id, input),
             admin.publishEntry(entry.id, input),
@@ -243,7 +250,7 @@ describe('application-owned AI and atomic publication candidates', () => {
         const latest = await admin.getEntry(entry.id)
         const retry = await admin.publishEntry(entry.id, {
             expectedVersion: latest.version,
-            draft: { data: { title: 'Retry' }, slug: 'retry' },
+            draft: { data: { slug: 'retry', title: 'Retry' } },
         })
         expect(retry.version).toBe(entry.version + 2)
         expect(retry.currentRevisionId).toBe(retry.publishedRevisionId)
@@ -251,13 +258,13 @@ describe('application-owned AI and atomic publication candidates', () => {
 
     it('rolls back candidate revision/current pointer/version on route conflict', async () => {
         const { admin } = await setup()
-        const occupying = await admin.createEntry('notes', { data: { title: 'Occupying' }, slug: 'taken' })
+        const occupying = await admin.createEntry('notes', { data: { slug: 'taken', title: 'Occupying' } })
         await admin.publishEntry(occupying.id, { expectedVersion: occupying.version })
-        const draft = await admin.createEntry('notes', { data: { title: 'Keep' }, slug: 'draft' })
+        const draft = await admin.createEntry('notes', { data: { slug: 'draft', title: 'Keep' } })
         await expect(
             admin.publishEntry(draft.id, {
                 expectedVersion: draft.version,
-                draft: { data: { title: 'Candidate' }, slug: 'taken' },
+                draft: { data: { slug: 'taken', title: 'Candidate' } },
             }),
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_ROUTE_CONFLICT' })
         expect(await admin.getEntry(draft.id)).toMatchObject({
@@ -273,10 +280,10 @@ describe('application-owned AI and atomic publication candidates', () => {
         { draft: { data: {} }, revisionId: 'revision' },
         { draft: null },
         { draft: { data: [] } },
-        { draft: { data: {}, slug: 1 } },
+        { draft: { data: { slug: 1 } } },
     ])('rejects ambiguous or malformed publish inputs %j', async (invalid) => {
         const { admin } = await setup()
-        const entry = await admin.createEntry('notes', { data: { title: 'Draft' } })
+        const entry = await admin.createEntry('notes', { data: { slug: 'draft', title: 'Draft' } })
         const response = await handleManagementRequest(
             admin,
             request(`entries/${entry.id}/publish`, { expectedVersion: entry.version, ...invalid }),
@@ -288,7 +295,7 @@ describe('application-owned AI and atomic publication candidates', () => {
 
     it('keeps revisionId API and permissions, requiring both publish and update for a candidate', async () => {
         const { admin, actor } = await setup()
-        const entry = await admin.createEntry('notes', { data: { title: 'Legacy' } })
+        const entry = await admin.createEntry('notes', { data: { slug: 'legacy', title: 'Legacy' } })
         actor({ id: 'publisher', roles: ['publisher'] })
         const rejected = await handleManagementRequest(
             admin,

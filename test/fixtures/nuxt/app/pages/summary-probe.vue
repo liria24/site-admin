@@ -1,6 +1,6 @@
 <script setup lang="ts">
-const list = await useSiteAdminList('posts', { locale: 'en', markdown: 'summary' })
-const batch = await useSiteAdminBatch({ posts: { list: 'posts', markdown: 'summary' } }, { locale: 'en' })
+const list = await useContent('posts', { locale: 'en', markdown: 'summary' })
+const batch = await useContent({ posts: { list: 'posts', markdown: 'summary' } }, { locale: 'en' })
 const listData = list.data
 const batchData = batch.data
 </script>
