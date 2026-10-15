@@ -3,6 +3,7 @@ import type { Body, Files, StoredFile } from 'files-sdk'
 
 import type { SiteAdminConfig } from '../config'
 import type { SiteAdminIssue } from '../errors'
+import type { Translations, TranslationInput } from '../i18n'
 
 export interface SiteAdminActor {
     id: string
@@ -41,24 +42,30 @@ export interface EntryInput {
     actorId?: string
     data: Record<string, unknown>
     id?: string
-    locale?: string
+    defaultLocale?: string
     sortOrder?: number | null
-    translationGroup?: string
+    translations?: TranslationInput
 }
 
 /** Publishes an existing revision or atomically stores and publishes a caller-owned candidate. */
 export type PublishEntryInput<Data = Record<string, unknown>> = {
     actorId?: string
     expectedVersion: number
-} & ({ revisionId?: string; draft?: never } | { draft: { data: Data }; revisionId?: never })
+} & (
+    | { revisionId?: string; draft?: never }
+    | { draft: { data?: Partial<Data>; translations?: TranslationInput }; revisionId?: never }
+)
 
 export interface UpdateEntryInput {
     actorId?: string
-    data: Record<string, unknown>
+    data?: Record<string, unknown>
+    translations?: TranslationInput
     expectedVersion: number
 }
 
 export interface EntryRecord {
+    defaultLocale: string
+    translations: Translations
     createdAt: string
     currentRevisionId: string
     data: Record<string, unknown>
@@ -71,12 +78,12 @@ export interface EntryRecord {
     scheduledAt: string | null
     scheduledRevisionId: string | null
     sortOrder: number | null
-    translationGroup: string
     updatedAt: string
     version: number
 }
 
 export interface RevisionRecord {
+    translations: Translations
     actorId: string | null
     createdAt: string
     data: Record<string, unknown>
@@ -131,6 +138,8 @@ export interface PublicEntrySeo {
 }
 
 export interface PublicEntry<Data = Record<string, unknown>> {
+    localeParams?: Record<string, Record<string, string> | false>
+    defaultLocale: string
     alternates?: Array<{ locale: string; path: string }>
     data: Data
     id: string

@@ -10,6 +10,7 @@ const schemaFile = fileURLToPath(new URL('./.data/schema/schema.ts', import.meta
 export default defineNuxtConfig({
     devtools: { enabled: false },
     modules: [siteAdmin],
+    ...{ files: false },
     hooks: {
         'better-auth:database:providers'(providers) {
             providers.application = {

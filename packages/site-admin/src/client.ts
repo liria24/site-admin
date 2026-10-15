@@ -47,11 +47,15 @@ export type SiteAdminEntryMutation<Data = Record<string, unknown>> = SiteAdminEn
 export type SiteAdminEntryPage<Data = Record<string, unknown>> = Omit<EntryPage, 'items'> & {
     items: SiteAdminEntry<Data>[]
 }
-export type SiteAdminCreateEntryInput<Data = Record<string, unknown>> = Omit<EntryInput, 'actorId' | 'data'> & {
+export type SiteAdminCreateEntryInput<Data = Record<string, unknown>> = Omit<
+    EntryInput,
+    'actorId' | 'data' | 'translations'
+> & {
     data: Data
+    translations?: import('./i18n').TranslationInput<Data>
 }
 export type SiteAdminUpdateEntryInput<Data = Record<string, unknown>> = Omit<UpdateEntryInput, 'actorId' | 'data'> & {
-    data: Data
+    data?: Partial<Data>
 }
 /** Authenticated asset presentation stays inside the management adapter. */
 export const managementAssetUrl = (id: string, base = '/api/site-admin'): string =>
@@ -76,6 +80,13 @@ export interface SiteAdminMutation {
 
 export interface SiteAdminRequestOptions {
     signal?: AbortSignal
+}
+
+export interface PublicPage<Data> {
+    items: Data[]
+    total: number
+    limit: number
+    offset: number
 }
 
 export interface PublicListOptions {
@@ -147,15 +158,16 @@ export class SiteAdminClientError extends Error {
     readonly code: string
     readonly issues?: SiteAdminIssue[]
     readonly status: number
-    readonly searchRemaining?: number
+    committed?: boolean
+    receipt?: { id: string; model: string; version: number; deleted?: boolean }
+    effects?: { assets: 'pending' }
 
-    constructor(code: string, message: string, status: number, issues?: SiteAdminIssue[], searchRemaining?: number) {
+    constructor(code: string, message: string, status: number, issues?: SiteAdminIssue[]) {
         super(message)
         this.name = 'SiteAdminClientError'
         this.code = code
         this.status = status
         if (issues !== undefined) this.issues = issues
-        if (searchRemaining !== undefined) this.searchRemaining = searchRemaining
     }
 }
 
@@ -163,26 +175,42 @@ const normalizeBase = (origin: string, basePath: string): string =>
     `${origin.replace(/\/$/u, '')}/${basePath.split('/').filter(Boolean).join('/')}`
 
 const responseError = async (response: Response): Promise<SiteAdminClientError> => {
-    const payload: unknown = await response.json().catch(() => null)
-    const error =
-        typeof payload === 'object' &&
-        payload !== null &&
-        'error' in payload &&
-        typeof payload.error === 'object' &&
-        payload.error !== null
-            ? (payload.error as { code?: unknown; issues?: unknown; message?: unknown; searchRemaining?: unknown })
-            : undefined
-    return new SiteAdminClientError(
-        String(error?.code ?? 'SITE_ADMIN_REQUEST_FAILED'),
-        String(error?.message ?? `Request failed with status ${response.status}.`),
+    const payload = (await response.json().catch(() => null)) as {
+        error?: {
+            code?: string
+            message?: string
+            issues?: SiteAdminIssue[]
+            committed?: boolean
+            receipt?: SiteAdminClientError['receipt']
+            effects?: SiteAdminClientError['effects']
+        }
+    } | null
+    const failure = payload?.error
+    const error = new SiteAdminClientError(
+        failure?.code ?? 'SITE_ADMIN_REQUEST_FAILED',
+        failure?.message ?? `Request failed with status ${response.status}.`,
         response.status,
-        Array.isArray(error?.issues) ? (error.issues as SiteAdminIssue[]) : undefined,
-        typeof error?.searchRemaining === 'number' &&
-            Number.isSafeInteger(error.searchRemaining) &&
-            error.searchRemaining > 0
-            ? error.searchRemaining
-            : undefined,
+        failure?.issues,
     )
+    const receipt = failure?.receipt
+    if (
+        failure?.committed &&
+        receipt &&
+        typeof receipt.id === 'string' &&
+        typeof receipt.model === 'string' &&
+        Number.isSafeInteger(receipt.version) &&
+        receipt.version > 0
+    ) {
+        error.committed = true
+        error.receipt = {
+            id: receipt.id,
+            model: receipt.model,
+            version: receipt.version,
+            ...(receipt.deleted === true ? { deleted: true } : {}),
+        }
+        if (failure.effects?.assets === 'pending') error.effects = { assets: 'pending' }
+    }
+    return error
 }
 
 const transport = (options: SiteAdminClientOptions, defaultBase: string, credentials?: RequestCredentials) => {
@@ -200,10 +228,12 @@ const transport = (options: SiteAdminClientOptions, defaultBase: string, credent
         query?: Record<string, string | number | undefined>,
         nullable = false,
     ): Promise<Response | null> => {
+        init.signal?.throwIfAborted()
         const result = await request(urlFor(path, query), {
             ...(credentials === undefined ? {} : { credentials }),
             ...init,
         })
+        init.signal?.throwIfAborted()
         if (nullable && result.status === 404) return null
         if (!result.ok) throw await responseError(result)
         return result
@@ -262,6 +292,18 @@ export interface SiteAdminClient<Models = SiteAdminPublicModels, SummaryModels =
         options?: PublicListOptions & { markdown?: 'full' },
     ): Promise<Models[Name][]>
     list<Value>(this: void, model: ModelName<Models>, options?: PublicListOptions): Promise<Value[]>
+    page<Name extends ModelName<Models> & keyof SummaryModels>(
+        this: void,
+        model: Name,
+        page: { limit: number; offset: number },
+        options: PublicMarkdownListOptions & { markdown: 'summary' },
+    ): Promise<PublicPage<SummaryModels[Name]>>
+    page<Name extends ModelName<Models>>(
+        this: void,
+        model: Name,
+        page: { limit: number; offset: number },
+        options?: PublicListOptions & { markdown?: 'full' },
+    ): Promise<PublicPage<Models[Name]>>
     models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
     resolveRoute(this: void, path: string, options?: PublicListOptions): Promise<PublicRouteResult | null>
 }
@@ -293,6 +335,16 @@ export const createSiteAdminClient = <
                 },
             ).then((items) => (items ?? []).map((item) => entry(item)!))
         },
+        page: (
+            model: ModelName<Models>,
+            page: { limit: number; offset: number },
+            requestOptions?: PublicMarkdownListOptions,
+        ) =>
+            json<PublicPage<{ data: Record<string, unknown> }>>(
+                '/' + encodeURIComponent(model),
+                { method: 'GET', ...(requestOptions?.signal ? { signal: requestOptions.signal } : {}) },
+                { ...page, locale: requestOptions?.locale, markdown: requestOptions?.markdown },
+            ).then((result) => ({ ...result!, items: result!.items.map((item) => entry(item)!) })),
         models: (requestOptions = {}) =>
             json<SiteAdminDescriptor>('/models', {
                 method: 'GET',
@@ -344,21 +396,21 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
         input: SiteAdminPublishInput<Data>,
         options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<Data>>
-    unpublishEntry(
+    unpublishEntry<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
         input: SiteAdminVersionInput,
         options?: SiteAdminRequestOptions,
-    ): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
+    ): Promise<SiteAdminEntryMutation<Data>>
     schedulePublish<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
         input: SiteAdminScheduleInput<Data>,
         options?: SiteAdminRequestOptions,
     ): Promise<SiteAdminEntryMutation<Data>>
-    cancelScheduledPublish(
+    cancelScheduledPublish<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
         input: SiteAdminVersionInput,
         options?: SiteAdminRequestOptions,
-    ): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
+    ): Promise<SiteAdminEntryMutation<Data>>
     setSortOrder(
         id: string,
         sortOrder: number | null,
@@ -371,12 +423,12 @@ export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
     listRevisions<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
     ): Promise<SiteAdminRevision<Data>[]>
-    restoreRevision(
+    restoreRevision<Data extends ManagementData<Models> = ManagementData<Models>>(
         id: string,
         revisionId: string,
         input: SiteAdminVersionInput,
         options?: SiteAdminRequestOptions,
-    ): Promise<SiteAdminEntryMutation<ManagementData<Models>>>
+    ): Promise<SiteAdminEntryMutation<Data>>
     pruneRevisions(id: string, retain: number): Promise<{ deleted: string[] }>
     referencesTo(id: string, options: SiteAdminReferencesOptions): Promise<IncomingReference[]>
     runAiAction<Name extends Extract<keyof SiteAdminNamedAiActions, string>>(
@@ -420,36 +472,22 @@ export const createSiteAdminManagementClient = <
         query: Record<string, string | number | undefined>,
         signal?: AbortSignal,
     ): Promise<Value> => {
-        let previous = Infinity
-        while (true) {
-            signal?.throwIfAborted()
-            try {
-                return await get<Value>('/entries', query, signal)
-            } catch (error) {
-                // Only this resumable search GET may retry. Strictly decreasing positive integers
-                // bound further requests by the first remaining count, without a global retry policy.
-                if (
-                    !query.q ||
-                    !(error instanceof SiteAdminClientError) ||
-                    error.status !== 503 ||
-                    error.code !== 'SITE_ADMIN_SEARCH_PREPARING' ||
-                    error.searchRemaining === undefined ||
-                    !Number.isSafeInteger(error.searchRemaining) ||
-                    error.searchRemaining <= 0 ||
-                    error.searchRemaining >= previous
-                )
-                    throw error
-                previous = error.searchRemaining
-            }
-        }
+        return get<Value>('/entries', query, signal)
     }
+
     const mutateEntry = async <Value extends SiteAdminMutation | SiteAdminMutation[]>(
         path: string,
         method: string,
         body: unknown,
         requestOptions?: SiteAdminRequestOptions,
     ): Promise<Value> => {
-        const result = await mutate<Value>(path, method, body, requestOptions)
+        let result: Value
+        try {
+            result = await mutate<Value>(path, method, body, requestOptions)
+        } catch (cause) {
+            if (cause instanceof SiteAdminClientError && cause.committed && cause.receipt) await notify(cause.receipt)
+            throw cause
+        }
         const mutations: SiteAdminMutation[] = Array.isArray(result) ? result : [result as SiteAdminMutation]
         await Promise.all(mutations.map(notify))
         return result
@@ -494,11 +532,18 @@ export const createSiteAdminManagementClient = <
         createEntry: (model, input, requestOptions) => mutateEntry(entryPath(model), 'POST', input, requestOptions),
         updateEntry: (id, input, requestOptions) => mutateEntry(entryPath(id), 'PATCH', input, requestOptions),
         deleteEntry: async (id, input, requestOptions) => {
-            const result = await response(entryPath(id), {
-                ...requestOptions,
-                headers: { 'if-match': `"${input.expectedVersion}"` },
-                method: 'DELETE',
-            })
+            let result: Response | null
+            try {
+                result = await response(entryPath(id), {
+                    ...requestOptions,
+                    headers: { 'if-match': `"${input.expectedVersion}"` },
+                    method: 'DELETE',
+                })
+            } catch (cause) {
+                if (cause instanceof SiteAdminClientError && cause.committed && cause.receipt)
+                    await notify(cause.receipt)
+                throw cause
+            }
             const model = result?.headers.get('x-site-admin-model')
             await notify({ id, ...(model ? { model } : {}) })
         },

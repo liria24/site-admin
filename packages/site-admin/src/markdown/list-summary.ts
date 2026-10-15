@@ -1,4 +1,4 @@
-import { parseMarkdown, type Node } from 'comark'
+import type { Node } from 'comark'
 import type { ContentListFile } from 'comark-content'
 import type { ModelDefinition, SiteAdminConfig, SiteAdminMarkdownSummary } from '../config'
 import type { AnyField, FieldRecord } from '../fields'
@@ -25,10 +25,12 @@ export const projectMarkdownListSummary = async (
     config: SiteAdminConfig,
     resolve: AssetUrlResolver,
 ): Promise<ContentListFile[]> => {
-    const plugins = markdownPlugins(config.markdown, resolve)
+    let plugins: Awaited<ReturnType<typeof markdownPlugins>> | undefined
     const fieldValue = async (field: AnyField, value: unknown): Promise<unknown> => {
         if (value === undefined || value === null) return value
         if (field.kind === 'markdown') {
+            plugins ??= await markdownPlugins(config.markdown, resolve)
+            const { parseMarkdown } = await import('comark')
             // Relations are opaque to markdown-fields; parse their source through the same native plugin pipeline.
             const document =
                 typeof value === 'string' ? await parseMarkdown(value, { plugins }) : markdownDocument(value)

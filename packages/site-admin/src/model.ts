@@ -1,3 +1,5 @@
+import { prepareAdminEntry } from './entry-preparation'
+import { resolveTranslation, type TranslationInput } from './i18n'
 import { createError, type H3Error } from 'h3'
 import { computed, getCurrentScope, onScopeDispose, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
 import { SiteAdminClientError } from './client'
@@ -10,12 +12,33 @@ export interface SiteAdminFailure {
     code: string
     issues?: Array<{ path: string; message: string }>
     committed?: boolean
+    receipt?: { id: string; model: string; version: number; deleted?: boolean }
+    effects?: { assets: 'pending' }
 }
 export type SiteAdminModelError = H3Error<SiteAdminFailure>
 export const siteAdminModelError = (cause: unknown, committed = false): SiteAdminModelError => {
+    const payload = cause as {
+        data?: { error?: { code?: string; message?: string; issues?: SiteAdminFailure['issues'] } }
+        statusCode?: number
+    }
+    if (payload?.data?.error?.code && payload.data.error.message) {
+        return createError<SiteAdminFailure>({
+            message: payload.data.error.message,
+            statusCode: payload.statusCode ?? 500,
+            data: {
+                code: payload.data.error.code,
+                ...(payload.data.error.issues ? { issues: payload.data.error.issues } : {}),
+            },
+            cause,
+        })
+    }
     const structured = cause instanceof SiteAdminClientError || cause instanceof SiteAdminError
     const failure = structured
-        ? { code: cause.code, ...(cause.issues ? { issues: cause.issues } : {}) }
+        ? {
+              code: cause.code,
+              ...(cause.issues ? { issues: cause.issues } : {}),
+              ...(cause.committed ? { committed: true, receipt: cause.receipt, effects: cause.effects } : {}),
+          }
         : ((cause as SiteAdminModelError)?.data ?? { code: 'SITE_ADMIN_REQUEST_FAILED' })
     return createError<SiteAdminFailure>({
         message: cause instanceof Error ? cause.message : 'Site Admin request failed.',
@@ -42,6 +65,7 @@ export interface SiteAdminModelState<Data extends Record<string, unknown>> {
     refresh: () => Promise<unknown>
 }
 export interface SiteAdminSessionDraft {
+    locale?: string
     value: Record<string, unknown>
     baseline: Record<string, unknown>
     entryId: string | null
@@ -55,8 +79,10 @@ export interface EntryFeatures {
     sortable: boolean
 }
 export interface EntryPrepareContext<Data extends Record<string, unknown> = Record<string, unknown>> {
+    locale: string
+    defaultLocale: string
     model: string
-    resource: SiteAdminModel<Data>
+    resource: { display(value: Data): ReturnType<SiteAdminModel<Data>['display']> }
     entry: SiteAdminEntry<Data> | undefined
     features: EntryFeatures
     operation: 'save' | 'publish' | 'schedule'
@@ -69,6 +95,7 @@ export interface SiteAdminModelContext<Data extends Record<string, unknown>> {
     descriptor: Ref<ModelDescriptor | undefined>
     id: Ref<string | null>
     identity: MaybeRefOrGetter<string>
+    defaultLocale?: string
     locale: MaybeRefOrGetter<string | undefined>
     client: SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     drafts: Record<string, SiteAdminSessionDraft>
@@ -85,6 +112,7 @@ export interface SiteAdminModelContext<Data extends Record<string, unknown>> {
         value: Data,
         at?: string,
         guard?: () => void,
+        snapshot?: { data: Partial<Data>; translations: TranslationInput<Data> },
     ) => Promise<SiteAdminEntryMutation<Data>>
 }
 
@@ -131,11 +159,31 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
                             await state.refresh()
                             if (state.error.value) throw state.error.value
                         }
-                        state.status.value = 'success'
+                        if (!state.error.value) state.status.value = 'success'
                     }
                     return result
                 } catch (cause) {
                     if (identity !== toValue(input.identity)) throw cause
+                    const receipt = (cause as { receipt?: SiteAdminFailure['receipt'] }).receipt
+                    if (receipt) {
+                        if (receipt.deleted) {
+                            delete context.receipt
+                            const data = state.data.value
+                            if (data && 'items' in data)
+                                state.data.value = {
+                                    ...data,
+                                    items: data.items.filter((entry) => entry.id !== receipt.id),
+                                    total: Math.max(0, data.total - 1),
+                                }
+                            else if (data && data.id === receipt.id) state.data.value = null
+                        } else {
+                            context.receipt = receipt as import('./client').SiteAdminEntryMutation<Data>
+                            input.id.value = receipt.id
+                        }
+                    }
+                    if ((cause as { committed?: boolean }).committed) {
+                        await state.refresh().catch(() => {})
+                    }
                     throw report(cause, committed)
                 } finally {
                     pending.delete(token)
@@ -155,7 +203,7 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
         },
         { flush: 'sync' },
     )
-    const descriptor = () => {
+    const getDescriptor = () => {
         if (!input.descriptor.value)
             throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', 'Model is unavailable.', 403)
         return input.descriptor.value
@@ -207,7 +255,7 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
             )
         const entry =
             'data' in result
-                ? { ...result, data: presentSiteAdminData<Data>(descriptor(), result.data, input.client.assetUrl) }
+                ? { ...result, data: presentSiteAdminData<Data>(getDescriptor(), result.data, input.client.assetUrl) }
                 : result
         context.receipt = entry
         const previous = state.data.value
@@ -226,31 +274,66 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
         entry: SiteAdminEntry<Data> | undefined,
         signal: AbortSignal,
         guard?: () => void,
+        snapshot?: { data: Partial<Data>; translations: TranslationInput<Data> },
     ) => {
-        const candidate = JSON.parse(JSON.stringify(value)) as Data
-        await input.prepare?.({
+        const descriptor = input.descriptor.value!
+        const locale = entry
+            ? (toValue(input.locale) ?? entry.defaultLocale)
+            : (input.defaultLocale ?? toValue(input.locale) ?? '')
+        const serialized = serializeSiteAdminData(descriptor, value)
+        if (entry && 'data' in entry) {
+            const previous = resolveTranslation(entry, locale).data
+            for (const key of Object.keys(descriptor.fields))
+                if (serialized[key] === undefined && previous[key] !== undefined) serialized[key] = null
+        }
+        const translated = entry && 'data' in entry && locale !== entry.defaultLocale
+        let data = serialized as Partial<Data>
+        let translations: TranslationInput<Data> | undefined
+        if (snapshot) {
+            data = snapshot.data
+            translations = snapshot.translations
+        } else if (translated) {
+            const baseline = serializeSiteAdminData(descriptor, resolveTranslation(entry, locale).data)
+            data = Object.fromEntries(
+                Object.entries(serialized).filter(
+                    ([key]) =>
+                        !descriptor.fields[key]?.i18n &&
+                        siteAdminSnapshot(serialized[key]) !== siteAdminSnapshot(baseline[key]),
+                ),
+            ) as Partial<Data>
+            const previous = entry.translations[locale] ?? {}
+            const override = { ...previous }
+            for (const [key, field] of Object.entries(descriptor.fields))
+                if (field.i18n && siteAdminSnapshot(serialized[key]) !== siteAdminSnapshot(baseline[key]))
+                    override[key] = serialized[key]
+            if (Object.keys(override).length || Object.hasOwn(entry.translations, locale))
+                translations = { [locale]: override } as TranslationInput<Data>
+        }
+        return prepareAdminEntry({
             model: input.model,
-            resource: actions as SiteAdminModel<Data>,
-            entry,
-            features: features.value,
+            descriptor,
+            ...(entry && 'data' in entry ? { entry } : {}),
             operation,
-            value: candidate,
+            input: { data, ...(translations ? { translations } : {}) },
+            defaultLocale: entry?.defaultLocale ?? locale,
+            assetUrl: input.client.assetUrl,
             signal,
+            ...(input.prepare ? { prepare: input.prepare } : {}),
+            resource: actions,
+            ...(guard ? { guard } : {}),
         })
-        signal.throwIfAborted()
-        guard?.()
-        return serializeSiteAdminData(descriptor(), candidate)
     }
+
     const write = async (
         entry: SiteAdminEntry<Data> | undefined,
-        data: Record<string, unknown>,
+        candidate: Awaited<ReturnType<typeof prepare>>,
         signal: AbortSignal,
     ) => {
         const result = entry
-            ? await input.client.updateEntry(entry.id, { data, expectedVersion: entry.version }, { signal })
+            ? await input.client.updateEntry(entry.id, { ...candidate, expectedVersion: entry.version }, { signal })
             : await input.client.createEntry(
                   input.model,
-                  { data, ...(toValue(input.locale) === undefined ? {} : { locale: toValue(input.locale)! }) },
+                  { ...candidate, ...(input.defaultLocale ? { defaultLocale: input.defaultLocale } : {}) },
                   { signal },
               )
         signal.throwIfAborted()
@@ -264,8 +347,9 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
         selected?: SiteAdminEntry<Data>,
         at?: string,
         guard?: () => void,
+        snapshot?: { data: Partial<Data>; translations: TranslationInput<Data> },
     ) =>
-        run(siteAdminSnapshot([operation, selected?.id ?? input.id.value, value, at]), async (signal) => {
+        run(siteAdminSnapshot([operation, selected?.id ?? input.id.value, value, at, snapshot]), async (signal) => {
             let entry = selected ? current(selected) : (head() as SiteAdminEntry<Data> | undefined)
             if (!entry && input.id.value !== null)
                 throw new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Load the entry before saving.', 400)
@@ -279,27 +363,40 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
                 )
             // Keep the first draft if application preparation or publication fails.
             if (!entry && operation !== 'save') {
-                const saved = await write(undefined, await prepare('save', data, undefined, signal, guard), signal)
-                entry = ('data' in saved ? saved : { ...saved, data }) as SiteAdminEntry<Data>
+                const saved = await write(
+                    undefined,
+                    await prepare('save', data, undefined, signal, guard, snapshot),
+                    signal,
+                )
+                entry = (
+                    'data' in saved
+                        ? saved
+                        : {
+                              ...saved,
+                              data,
+                              defaultLocale: input.defaultLocale ?? toValue(input.locale) ?? '',
+                              translations: {},
+                          }
+                ) as SiteAdminEntry<Data>
             }
-            const candidate = await prepare(operation, data, entry, signal, guard)
+            const candidate = await prepare(operation, data, entry, signal, guard, snapshot)
             if (operation === 'save') return write(entry, candidate, signal)
             const result =
                 operation === 'publish'
                     ? await input.client.publishEntry(
                           entry!.id,
-                          { expectedVersion: entry!.version, draft: { data: candidate } },
+                          { expectedVersion: entry!.version, draft: candidate },
                           { signal },
                       )
                     : await input.client.schedulePublish(
                           entry!.id,
-                          { at: at!, expectedVersion: entry!.version, draft: { data: candidate } },
+                          { at: at!, expectedVersion: entry!.version, draft: candidate },
                           { signal },
                       )
             signal.throwIfAborted()
             return accept(result, entry)
         })
-    context.submit = (operation, value, at, guard) => submit(operation, value, undefined, at, guard)
+    context.submit = (operation, value, at, guard, snapshot) => submit(operation, value, undefined, at, guard, snapshot)
     const mutate = (
         name: string,
         selected: SiteAdminEntry<Data> | undefined,
@@ -324,8 +421,16 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
         features,
         save: (value: Data) => submit('save', value),
         publish: (selected?: SiteAdminEntry<Data>, value?: Data) => submit('publish', value, selected),
-        schedule: (at: string, selected?: SiteAdminEntry<Data>, value?: Data) =>
-            submit('schedule', value, selected, at),
+        schedule: (valueAt: Date | string, selected?: SiteAdminEntry<Data>, value?: Data) => {
+            const at = new Date(valueAt)
+            if (!Number.isFinite(at.getTime()) || at.getTime() <= Date.now())
+                return Promise.reject(
+                    report(
+                        new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Choose a future publication time.', 400),
+                    ),
+                )
+            return submit('schedule', value, selected, at.toISOString())
+        },
         unpublish: (entry?: SiteAdminEntry<Data>) =>
             mutate('unpublish', entry, (item, signal) =>
                 input.client.unpublishEntry(item.id, { expectedVersion: item.version }, { signal }),
@@ -352,7 +457,7 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
                 async () =>
                     (await input.client.listRevisions<Data>(current(entry).id)).map((revision) => ({
                         ...revision,
-                        data: presentSiteAdminData<Data>(descriptor(), revision.data, input.client.assetUrl),
+                        data: presentSiteAdminData<Data>(getDescriptor(), revision.data, input.client.assetUrl),
                     })),
                 false,
             ),
@@ -373,7 +478,7 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
                 }
             }),
         display: (value: Data) => {
-            const fields = descriptor().displayFields
+            const fields = getDescriptor().displayFields
             const raw = value[fields?.image ?? 'images']
             const image = Array.isArray(raw) ? raw[0] : raw
             return {

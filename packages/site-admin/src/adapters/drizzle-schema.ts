@@ -15,6 +15,8 @@ import {
     relations,
     revisions,
     routes,
+    translations,
+    search,
 } from './drizzle-tables'
 
 const nullDefault = (value: string | null): boolean =>
@@ -97,6 +99,8 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
         relations,
         assetRefs,
         routes,
+        translations,
+        search,
         meta,
         ...Object.values(contentTables(database, config)),
     ]

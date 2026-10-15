@@ -62,8 +62,6 @@ export interface ModelDisplayFields {
 
 export interface ModelOptions<Fields extends FieldRecord = FieldRecord> {
     fields: Fields
-    /** Store one revision stream per locale. Nuxt i18n remains the locale source of truth. */
-    localized?: boolean
     displayFields?: ModelDisplayFields
     /** `false` makes saves immediately public. */
     publishing?: boolean
@@ -80,6 +78,7 @@ export interface ModelOptions<Fields extends FieldRecord = FieldRecord> {
 export type ModelDefinition<Fields extends FieldRecord = FieldRecord> = ModelOptions<Fields>
 
 export interface SiteAdminLifecycleEvent {
+    version?: number
     actorId?: string
     entryId: string
     model: string
@@ -108,7 +107,7 @@ export type SiteAdminModelAction =
     | 'update'
 
 export type SiteAdminAssetAction = 'delete' | 'gc' | 'read' | 'upload'
-export type SiteAdminSystemAction = 'diagnostics' | 'publishDue'
+export type SiteAdminSystemAction = 'diagnostics' | 'publishDue' | 'rebuildSearch'
 
 export interface SiteAdminRoleDefinition {
     /** Names of permitted ai.actions; '*' explicitly permits every configured action. */

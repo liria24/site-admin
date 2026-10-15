@@ -161,7 +161,7 @@ describe('native resource form', () => {
         await formState.schedule('2027-01-01T00:00:00Z')
         expect(requests[1]).toMatchObject({
             url: expect.stringContaining('/schedule'),
-            body: { expectedVersion: 2, at: '2027-01-01T00:00:00Z', draft: { data: { title: 'Scheduled' } } },
+            body: { expectedVersion: 2, at: '2027-01-01T00:00:00.000Z', draft: { data: { title: 'Scheduled' } } },
         })
     })
 })

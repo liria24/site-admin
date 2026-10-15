@@ -63,3 +63,28 @@ export const serializeSiteAdminData = <Data extends Record<string, unknown>>(
     descriptor: ModelDescriptor,
     data: Data,
 ): Record<string, unknown> => fieldsCodec(descriptor.fields, data)
+
+/** Present a whole revision or mutation receipt without expanding a redacted result. */
+export const presentAdminValue = <Value extends object>(
+    descriptor: ModelDescriptor,
+    value: Value,
+    url: (id: string) => string,
+): Value => {
+    const source = value as { data?: Record<string, unknown>; translations?: Record<string, Record<string, unknown>> }
+    return source.data === undefined
+        ? value
+        : ({
+              ...value,
+              data: presentSiteAdminData(descriptor, source.data, url),
+              ...(source.translations === undefined
+                  ? {}
+                  : {
+                        translations: Object.fromEntries(
+                            Object.entries(source.translations).map(([locale, data]) => [
+                                locale,
+                                presentSiteAdminData(descriptor, data, url),
+                            ]),
+                        ),
+                    }),
+          } as Value)
+}

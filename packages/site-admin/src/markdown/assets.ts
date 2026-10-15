@@ -1,5 +1,4 @@
 import type { ComarkPlugin, ElementNode, Node } from 'comark'
-import security from 'comark/plugins/security'
 
 export interface MarkdownAssetReference {
     id: string
@@ -63,6 +62,7 @@ export const markdownAssets = (resolve: AssetUrlResolver): ComarkPlugin => ({
         const destinations: Destination[] = []
         const references: MarkdownAssetReference[] = state.siteAdminAssetReferences ?? []
         resolveNodes(state.tree.nodes, new Set(references.map(({ id }) => id)), resolve, destinations)
+        const { default: security } = await import('comark/plugins/security')
         await security().post?.({ ...state, tree: { ...state.tree, nodes: destinations.map(({ check }) => check) } })
         for (const { node, name, check } of destinations) {
             if (Object.hasOwn(check[1], name)) node[1][name] = check[1][name]

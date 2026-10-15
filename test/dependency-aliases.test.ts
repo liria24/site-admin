@@ -10,7 +10,6 @@ it('declares shared runtime packages as peers without exporting dependency alias
         'comark',
         'files-sdk',
         'nuxt-files-sdk',
-        '@tanstack/vue-form',
         'nuxt',
         'vue',
     ]) {

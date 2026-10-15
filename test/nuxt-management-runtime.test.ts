@@ -497,6 +497,8 @@ describe('native management AsyncData and mutation invalidation', () => {
             requests.push(path)
             if (path === '/manage/models') return Response.json(modelDescriptor)
             const entry = {
+                defaultLocale: '',
+                translations: {},
                 id: path.split('/').at(-1),
                 model: 'posts',
                 data: { title: 'Deferred', image: 'asset' },
@@ -573,7 +575,13 @@ describe('native management AsyncData and mutation invalidation', () => {
                 const path = new URL(String(input)).pathname
                 requests.push(path)
                 if (path === '/manage/models') return Response.json(modelDescriptor)
-                const entry = { id: 'one', model: 'posts', data: { title: 'SSR', image: 'asset' } }
+                const entry = {
+                    defaultLocale: '',
+                    translations: {},
+                    id: 'one',
+                    model: 'posts',
+                    data: { title: 'SSR', image: 'asset' },
+                }
                 return Response.json(path === '/manage/entries' ? { items: [entry], total: 1 } : entry)
             },
             { serverFetch: true, serverRuntime: true },
@@ -657,7 +665,15 @@ describe('native management AsyncData and mutation invalidation', () => {
                 return descriptorReply.promise
             }
             const id = url.pathname.split('/').at(-1)!
-            const record = { id, model: 'posts', locale: '', version: 1, data: { slug: id, title: id, image: 'asset' } }
+            const record = {
+                defaultLocale: '',
+                translations: {},
+                id,
+                model: 'posts',
+                locale: '',
+                version: 1,
+                data: { slug: id, title: id, image: 'asset' },
+            }
             return Response.json(
                 url.pathname === '/manage/entries' ? { items: [record], total: 1, limit: 50, offset: 0 } : record,
             )
@@ -697,7 +713,12 @@ describe('native management AsyncData and mutation invalidation', () => {
                 }
                 return Response.json(modelDescriptor)
             }
-            return Response.json({ items: [{ id: 'one', model: 'posts', data: { title: actor.value } }], total: 1 })
+            return Response.json({
+                items: [
+                    { defaultLocale: '', translations: {}, id: 'one', model: 'posts', data: { title: actor.value } },
+                ],
+                total: 1,
+            })
         })
         const scope = Vue.effectScope()
         const state = scope.run(() => environment.helpers.modelList('posts', { authScope: actor }))!
@@ -733,7 +754,7 @@ describe('native management AsyncData and mutation invalidation', () => {
         expect(models).toBe(1)
         scope.stop()
     })
-    it('uses only explicit management locales while public helpers keep reactive i18n defaults', async () => {
+    it('uses reactive i18n defaults for management and public helpers with explicit overrides', async () => {
         const urls: URL[] = []
         const { app, helpers } = await nativeEnvironment(
             async (input) => {
@@ -741,6 +762,8 @@ describe('native management AsyncData and mutation invalidation', () => {
                 urls.push(url)
                 if (url.pathname === '/manage/models') return Response.json(modelDescriptor)
                 const entry = {
+                    defaultLocale: '',
+                    translations: {},
                     id: 'one',
                     model: 'posts',
                     locale: url.searchParams.get('locale') ?? '',
@@ -769,13 +792,13 @@ describe('native management AsyncData and mutation invalidation', () => {
         expect((states.list.data.value as { items: unknown[] }).items).toHaveLength(1)
         expect(
             urls.filter((url) => url.pathname === '/manage/entries').map((url) => url.searchParams.get('locale')),
-        ).toEqual([null, 'ja'])
+        ).toEqual(['ja'])
         expect(urls.find((url) => url.pathname === '/manage/entries/one')?.searchParams.get('locale')).toBeNull()
         expect(urls.find((url) => url.pathname === '/content/posts')?.searchParams.get('locale')).toBe('ja')
         const managementCount = urls.filter((url) => url.pathname.startsWith('/manage/')).length
         app.$i18n.locale.value = 'en'
         await flush()
-        expect(urls.filter((url) => url.pathname.startsWith('/manage/'))).toHaveLength(managementCount)
+        expect(urls.filter((url) => url.pathname.startsWith('/manage/')).length).toBeGreaterThan(managementCount)
         expect(
             urls
                 .filter((url) => url.pathname === '/content/posts')
@@ -804,6 +827,8 @@ describe('native management AsyncData and mutation invalidation', () => {
         app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'models', null, null, null])] =
             modelDescriptor
         app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'entry', 'posts', 'one', null])] = {
+            defaultLocale: '',
+            translations: {},
             id: 'one',
             model: 'posts',
             locale: '',
@@ -857,6 +882,8 @@ describe('native management AsyncData and mutation invalidation', () => {
         const started = Promise.withResolvers<void>()
         let slowSignal: AbortSignal | undefined
         const record = (entryId: string) => ({
+            defaultLocale: '',
+            translations: {},
             id: entryId,
             model: 'posts',
             locale: '',

@@ -1,4 +1,6 @@
+import { stripRuntimeImports } from './nuxt-native-runtime'
 import { stripTypeScriptTypes } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { ref, toValue } from 'vue'
 
@@ -8,7 +10,6 @@ import {
     type SiteAdminClient,
     type PublicEntry,
 } from '../packages/site-admin/src/client'
-import { siteAdminNuxtBatchTransportTemplate } from '../packages/site-admin/src/nuxt/client-templates'
 
 interface ResolvedRequest {
     name: string
@@ -25,7 +26,7 @@ interface BatchHelpers {
     snapshot(
         requests: Record<
             string,
-            | { list: string; markdown?: 'full' | 'summary' }
+            | { list: string; markdown?: 'full' | 'summary'; page?: { limit: number; offset: number } }
             | { entry: string; id: string | ReturnType<typeof ref<string>> | (() => string) }
         >,
     ): ResolvedRequest[]
@@ -42,18 +43,47 @@ interface BatchHelpers {
     ): Promise<Record<string, BatchItem>>
 }
 
-// Execute only the generated bounded transport helpers. No factory or AsyncData/cache implementation is mocked.
-const source = stripTypeScriptTypes(siteAdminNuxtBatchTransportTemplate('/content')).replace(/^export /gmu, '')
+// Execute the production transport without instantiating AsyncData or mocking its cache.
+const source = stripRuntimeImports(
+    stripTypeScriptTypes(
+        readFileSync(new URL('../packages/site-admin/src/runtime/composables.ts', import.meta.url), 'utf8'),
+    ),
+)
+    .replace(/^export /gmu, '')
+    .replaceAll('import.meta.server', 'false')
 const initialize = new Function(
     'SiteAdminClientError',
     'toValue',
-    `${source}\nreturn { snapshot: siteAdminSnapshotBatchRequests, key: siteAdminBatchDataKey, resolve: siteAdminResolveBatch }`,
+    'defineUseFetchAddon',
+    `${source}; const api = createSiteAdminComposables({basePath:'/content',managementBase:'/manage'}, undefined, undefined); return { snapshot: api.siteAdminSnapshotBatchRequests, key: api.siteAdminBatchDataKey, resolve: api.siteAdminResolveBatch }`,
 ) as (...dependencies: unknown[]) => BatchHelpers
-const helpers = initialize(SiteAdminClientError, toValue)
+const helpers = initialize(SiteAdminClientError, toValue, (addon: unknown) => addon)
 
 const document = (model: string, id: string) => ({ data: { _siteAdmin: { id, model, slug: id }, title: id } })
 
 describe('generated public batch transport', () => {
+    it('includes a DB page in batch keys and preserves page metadata', async () => {
+        const client = createSiteAdminClient({
+            fetch: async (input) => {
+                const url = new URL(String(input), 'http://localhost')
+                expect(url.searchParams.get('limit')).toBe('1')
+                expect(url.searchParams.get('offset')).toBe('1')
+                expect(url.searchParams.get('locale')).toBe('ja')
+                expect(url.searchParams.get('markdown')).toBe('summary')
+                return Response.json({ items: [document('posts', 'second')], total: 2, limit: 1, offset: 1 })
+            },
+        })
+        const first = helpers.snapshot({ posts: { list: 'posts', page: { limit: 1, offset: 0 }, markdown: 'summary' } })
+        const second = helpers.snapshot({
+            posts: { list: 'posts', page: { limit: 1, offset: 1 }, markdown: 'summary' },
+        })
+        expect(helpers.key({}, first, 'ja')).not.toBe(helpers.key({}, second, 'ja'))
+        const result = await helpers.resolve(client, second, 'ja', new AbortController().signal)
+        expect(result.posts).toMatchObject({
+            error: null,
+            data: { items: [{ id: 'second' }], total: 2, limit: 1, offset: 1 },
+        })
+    })
     it('captures list summary mode in transport and native keys without changing full/detail requests', async () => {
         const modes: Array<string | null> = []
         const client = createSiteAdminClient({

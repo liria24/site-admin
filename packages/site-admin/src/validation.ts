@@ -7,6 +7,7 @@ import type { AnyField, AssetInput, FieldRecord } from './fields'
 import type { SiteAdminIssue } from './errors'
 
 export interface IndexedReference {
+    locale?: string
     id: string
     path: string
     position: number

@@ -1,10 +1,25 @@
 import { readFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { createRequire, stripTypeScriptTypes } from 'node:module'
 import { dirname, join } from 'node:path'
 import { createError } from 'h3'
 import * as Vue from 'vue'
 
 const requireNuxt = createRequire(import.meta.resolve('nuxt/package.json'))
+const { parse } = createRequire(import.meta.resolve('@vue/compiler-sfc'))('@babel/parser') as {
+    parse(
+        this: void,
+        source: string,
+        options: { sourceType: 'module'; errorRecovery: boolean },
+    ): { program: { body: Array<{ type: string; start: number | null; end: number | null }> } }
+}
+export const stripRuntimeImports = (source: string): string => {
+    const imports = parse(source, { sourceType: 'module', errorRecovery: true }).program.body.filter(
+        (node) => node.type === 'ImportDeclaration',
+    )
+    for (const node of imports.reverse()) source = source.slice(0, node.start!) + source.slice(node.end!)
+    return source
+}
 const root = dirname(requireNuxt.resolve('nuxt/package.json'))
 export const readNuxtSource = (path: string) => readFile(join(root, 'dist/app', path), 'utf8')
 const plain = (source: string) => source.replace(/^import .*$/gmu, '').replace(/^export .*$/gmu, '')
@@ -19,7 +34,21 @@ export const nativeRuntimeSource = (source: string, { serverRuntime = false, asy
 }
 
 export const generatedRuntimeSource = (source: string, { serverFetch = false, asyncData = false } = {}) => {
-    const script = stripTypeScriptTypes(source).replace(/^import .*$/gmu, '')
+    if (source.includes('createSiteAdminComposables(')) {
+        const runtime = readFileSync(
+            new URL('../packages/site-admin/src/runtime/composables.ts', import.meta.url),
+            'utf8',
+        )
+        source =
+            'function defineUseFetchAddon(addon) { return addon }\n' +
+            runtime +
+            '\n' +
+            source.replace(
+                'createUseFetch(siteAdminAiFetchOptions)',
+                "(typeof createUseFetch === 'function' ? createUseFetch(siteAdminAiFetchOptions) : undefined)",
+            )
+    }
+    const script = stripRuntimeImports(stripTypeScriptTypes(source))
     return (asyncData ? script.replace(/^export const siteAdminAsyncData = createUseAsyncData\(\)\s*$/gmu, '') : script)
         .replace(/^export /gmu, '')
         .replaceAll('import.meta.server', String(serverFetch))

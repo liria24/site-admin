@@ -101,6 +101,7 @@ void [title, copy, assetUrl, first, total, one, name]
                     '@liria24/site-admin/internal/form': [resolve('packages/site-admin/src/form.ts')],
                     '@liria24/site-admin/internal/model': [resolve('packages/site-admin/src/model.ts')],
                     '#build/site-admin/client': [join(directory, 'client.ts')],
+                    '#app/*': [resolve('node_modules/nuxt/dist/app/*')],
                     '#app': [resolve('node_modules/nuxt/dist/app/index.d.ts')],
                     '#app/composables/asyncData': [resolve('node_modules/nuxt/dist/app/composables/asyncData.d.ts')],
                 },

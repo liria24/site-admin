@@ -3,6 +3,7 @@ import type { AnyField, FieldRecord } from './fields'
 import { resolveSiteAdminAssets } from './assets-config'
 
 export interface FieldDescriptor {
+    i18n?: boolean
     accept?: readonly string[]
     default?: unknown
     description?: string
@@ -37,12 +38,14 @@ export interface ModelDescriptor {
 }
 
 export interface SiteAdminDescriptor {
+    i18n?: { defaultLocale: string; locales: string[] }
     assets: false | { maxUploadSize?: number; separateDrafts: boolean; storage: string }
     models: Record<string, ModelDescriptor>
 }
 
 const describeField = (field: AnyField): FieldDescriptor => {
     const descriptor: FieldDescriptor = {
+        ...(field.i18n ? { i18n: true } : {}),
         kind: field.kind,
         required: field.required ?? false,
         serverValidation: field.validate !== undefined,

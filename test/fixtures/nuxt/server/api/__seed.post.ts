@@ -11,16 +11,10 @@ export default defineEventHandler(async (event) => {
                 title: 'Hello',
                 body: '---\nprivate: FULL_SSR_FRONTMATTER\n---\nNative summary\n\n<!-- more -->\n\nFULL_SSR_BODY_SENTINEL',
             },
-            locale: 'en',
-            translationGroup: 'hello',
-        })
-        const ja = await admin.createEntry('posts', {
-            data: { slug: 'こんにちは', description: '日本語の説明', title: 'こんにちは' },
-            locale: 'ja',
-            translationGroup: 'hello',
+            defaultLocale: 'en',
+            translations: { ja: { slug: 'こんにちは', description: '日本語の説明', title: 'こんにちは' } },
         })
         await admin.publishEntry(en.id, { expectedVersion: en.version })
-        await admin.publishEntry(ja.id, { expectedVersion: ja.version })
         await admin.createEntry('links', {
             data: { slug: 'external', destination: 'https://example.com/destination', title: 'External' },
         })

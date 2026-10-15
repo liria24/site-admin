@@ -1,17 +1,17 @@
 import type { ParserOptions, Node } from 'comark'
-import summary from 'comark/plugins/summary'
 import type { SiteAdminConfig } from '../config'
 import { markdownAssets, type AssetUrlResolver } from './assets'
 import { paragraphSummary } from './summary'
 
-export const markdownPlugins = (
+export const markdownPlugins = async (
     options: SiteAdminConfig['markdown'],
     resolve: AssetUrlResolver,
-): NonNullable<ParserOptions['plugins']> => {
+): Promise<NonNullable<ParserOptions['plugins']>> => {
     const assets = markdownAssets(resolve)
     const configured = options?.plugins ?? []
     const plugins: Array<NonNullable<ParserOptions['plugins']>[number]> = [assets, ...configured]
     if (options?.summary?.enabled !== false) {
+        const { default: summary } = await import('comark/plugins/summary')
         plugins.push(summary({ delimiter: options?.summary?.delimiter ?? '<!-- more -->' }))
         plugins.push({
             name: 'site-admin-summary-fallback',

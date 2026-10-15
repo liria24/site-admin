@@ -13,8 +13,6 @@ import {
     addTypeTemplate,
     createResolver,
     defineNuxtModule,
-    hasNuxtModule,
-    installModule,
     tryResolveModule,
     directoryToURL,
 } from 'nuxt/kit'
@@ -22,12 +20,9 @@ import type { Nuxt } from 'nuxt/schema'
 import type { AppSession } from '@nuxtjs/better-auth'
 import type { RequestEvent } from 'nuxt/server'
 import { transformNitroCloudflareRequest } from './runtime/nitro2'
+import { siteAdminModuleDependencies } from './nuxt/dependencies'
 import { stopNitroDevReloadOnClose } from './nuxt/dev-close'
-import {
-    siteAdminFilesModuleDependencies,
-    resolveSiteAdminFilesSource,
-    allowGeneratedFilesConfig,
-} from './nuxt/files-source'
+import { resolveSiteAdminFilesSource, allowGeneratedFilesConfig } from './nuxt/files-source'
 import type { NitroConfig } from 'nitropack/types'
 import { createJiti } from 'jiti'
 import type { ModuleOptions as NuxtLLMsOptions } from 'nuxt-llms'
@@ -57,6 +52,7 @@ export interface ModuleOptions {
     devtools: boolean
     enabled: boolean
     i18n: boolean
+    markdown: boolean
     llms: boolean
     ogImage: boolean
     robots: boolean
@@ -118,6 +114,7 @@ const defaults: ModuleOptions = {
     devtools: true,
     enabled: true,
     i18n: true,
+    markdown: true,
     llms: true,
     ogImage: true,
     robots: true,
@@ -148,20 +145,15 @@ const resolvePeer = async (name: string, nuxt: Nuxt): Promise<string> => {
     return candidate
 }
 
+const hasAssets = (field: AnyField): boolean =>
+    ['image', 'images', 'file'].includes(field.kind) ||
+    (field.kind === 'object' && Object.values(field.fields).some(hasAssets)) ||
+    (field.kind === 'array' && hasAssets(field.item))
+
 const hasMarkdown = (field: AnyField): boolean =>
     field.kind === 'markdown' ||
     (field.kind === 'object' && Object.values(field.fields).some(hasMarkdown)) ||
     (field.kind === 'array' && hasMarkdown(field.item))
-
-const installOnce = async (name: string, nuxt: Nuxt, options: Record<string, unknown> = {}): Promise<void> => {
-    if (hasNuxtModule(name, nuxt)) return
-    const candidate = await resolvePeer(name, nuxt)
-    // Dynamically installed SEO modules do not pass through Nuxt's moduleDependencies graph.
-    if (['nuxt-schema-org', 'nuxt-seo-utils', '@nuxtjs/sitemap', '@nuxtjs/robots', 'nuxt-og-image'].includes(name)) {
-        await installOnce('nuxt-site-config', nuxt)
-    }
-    await installModule(candidate, options, nuxt)
-}
 
 const localeOptions = (nuxt: Nuxt): { defaultLocale?: string; strategy: string; supported: string[] } => {
     const i18n = (
@@ -183,7 +175,7 @@ const localeOptions = (nuxt: Nuxt): { defaultLocale?: string; strategy: string; 
 const accessControl = (config: SiteAdminConfig) => {
     const modelActions = ['create', 'delete', 'publish', 'prune', 'readDraft', 'restore', 'schedule', 'sort', 'update']
     const assetActions = ['delete', 'gc', 'read', 'upload']
-    const systemActions = ['diagnostics', 'publishDue']
+    const systemActions = ['diagnostics', 'publishDue', 'rebuildSearch']
     const resources = {
         ...Object.fromEntries(Object.keys(config.models).map((name) => [`siteAdmin:model:${name}`, modelActions])),
         'siteAdmin:assets': assetActions,
@@ -268,7 +260,7 @@ export function createDatabase(event) {
 export default defineNuxtModule<ModuleConfig>({
     meta: moduleMeta,
     defaults,
-    moduleDependencies: siteAdminFilesModuleDependencies,
+    moduleDependencies: siteAdminModuleDependencies,
     async setup(input, nuxt) {
         // Nuxt merges defaults before setup; the public input type allows nested partial options.
         const options = input as ModuleOptions
@@ -309,19 +301,16 @@ export default defineNuxtModule<ModuleConfig>({
                 }
             }
         }
-        if (options.i18n) await installOnce('@nuxtjs/i18n', nuxt)
-        if (options.schemaOrg) await installOnce('nuxt-schema-org', nuxt)
+
         if (options.llms) {
-            await installOnce('nuxt-llms', nuxt)
-            nuxt.hook('prerender:routes', ({ routes }) => {
-                routes.delete('/llms.txt')
-                routes.delete('/llms-full.txt')
+            nuxt.hook('modules:done', () => {
+                // Native LLMS adds routes through Kit after this module's setup.
+                nuxt.hook('prerender:routes', ({ routes }) => {
+                    routes.delete('/llms.txt')
+                    routes.delete('/llms-full.txt')
+                })
             })
         }
-        if (options.seo) await installOnce('nuxt-seo-utils', nuxt)
-        if (options.sitemap) await installOnce('@nuxtjs/sitemap', nuxt)
-        if (options.robots) await installOnce('@nuxtjs/robots', nuxt)
-        if (options.ogImage) await installOnce('nuxt-og-image', nuxt)
 
         const publicLocales = options.i18n ? localeOptions(nuxt) : { strategy: 'no_prefix', supported: [] }
 
@@ -339,6 +328,7 @@ export default defineNuxtModule<ModuleConfig>({
         // Nuxt 4.6's renderer subpaths must be bundled so Nitro replaces their build stubs.
         ;(nitro.externals.inline ??= []).push(
             '@liria24/site-admin',
+            normalize(createResolver(import.meta.url).resolve('.')),
             'nuxt/internal',
             resolve(nuxt.options.buildDir, 'site-admin'),
             ...(options.auth ? [resolve(nuxt.options.buildDir, 'better-auth/database.mjs')] : []),
@@ -369,8 +359,15 @@ export default defineNuxtModule<ModuleConfig>({
             })
             const inputConfig = await jiti.import<SiteAdminConfigInput>(configPath, { default: true })
             domainConfig = resolveSiteAdminConfig(inputConfig, environments)
-            if (Object.values(domainConfig.models).some((model) => Object.values(model.fields).some(hasMarkdown)))
+            if (Object.values(domainConfig.models).some((model) => Object.values(model.fields).some(hasMarkdown))) {
+                if (!options.markdown) throw new Error('[site-admin] Enable markdown for Markdown fields.')
                 await resolvePeer('comark', nuxt)
+            }
+            const fields = Object.values(domainConfig.models).flatMap((model) => Object.values(model.fields))
+            if (fields.some((field) => field.i18n) && (!options.i18n || !publicLocales.supported.length))
+                throw new Error('[site-admin] Translated fields require i18n and configured Nuxt i18n locales.')
+            if ((nuxt.options as unknown as { files?: unknown }).files === false && fields.some(hasAssets))
+                throw new Error('[site-admin] Enable Files for asset fields.')
             // An existing standalone Files config owns all physical storage settings.
             // Otherwise the SDK reads the common config through its existing filename option.
             const filesInput =
@@ -414,7 +411,7 @@ export default defineNuxtModule<ModuleConfig>({
                         }
                     })
                 }
-                await installOnce('@nuxtjs/better-auth', nuxt)
+
                 nuxt.hook('nitro:config', (nativeConfig) => {
                     const config = nativeConfig as NitroConfig
                     config.esbuild ??= {}
@@ -470,7 +467,7 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
                 await resolvePeer('files-sdk', nuxt)
                 // Optional dependency defaults cover configured module entries. Dynamic installs
                 // need the same resolved single filename passed through the SDK's public option.
-                await installOnce('nuxt-files-sdk', nuxt, { config: filesPath })
+
                 nuxt.hook('nitro:config', (nativeConfig) => {
                     const config = nativeConfig as NitroConfig
                     config.esbuild ??= {}
@@ -520,6 +517,7 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
             filename: 'site-admin/client.ts',
             getContents: () =>
                 siteAdminNuxtClientTemplate({
+                    ...(publicLocales.defaultLocale ? { defaultLocale: publicLocales.defaultLocale } : {}),
                     basePath: options.client.basePath,
                     managementBase: options.server.managementBase,
                     i18n: options.i18n,
@@ -563,19 +561,14 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
                 },
                 { nuxt: true, nitro: true, node: false },
             )
-            const formPeer = await tryResolveModule(
-                '@tanstack/vue-form',
-                [nuxt.options.rootDir, ...nuxt.options.modulesDir.map((dir) => resolve(dir, '..'))].map(directoryToURL),
-            )
-            if (formPeer) {
-                const formTemplate = addTemplate({
-                    filename: 'site-admin/form.ts',
-                    getContents: () => siteAdminNuxtFormTemplate(),
-                    write: true,
-                })
-                addImports({ from: formTemplate.dst, name: 'useEntryForm' })
-            }
+            const formTemplate = addTemplate({
+                filename: 'site-admin/form.ts',
+                getContents: () => siteAdminNuxtFormTemplate(),
+                write: true,
+            })
+            addImports({ from: formTemplate.dst, name: 'useEntryForm' })
         }
+
         if (!options.server.enabled || !domainConfig || !configPath) return
         const locales = publicLocales
         const nuxtSite = (nuxt.options as typeof nuxt.options & { site?: { name?: string; url?: string } }).site
@@ -628,6 +621,7 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
             publishDue: 'publish-due',
             assetGC: 'asset-gc',
             syncAssets: 'sync-assets',
+            rebuildSearch: 'rebuild-search',
         } as const
         for (const [key, name] of Object.entries(taskPaths)) {
             const task = `site-admin:${name}`

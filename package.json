@@ -34,7 +34,6 @@
         "@nuxtjs/robots": "^7.0.2",
         "@nuxtjs/sitemap": "^9.1.0",
         "@takumi-rs/core": "^2.16.2",
-        "@tanstack/vue-form": "2.0.0-alpha.2",
         "@types/node": "^26.6.5",
         "@vue/compiler-sfc": "3.6.0-rc.11",
         "ai": "7.0.141",
@@ -71,6 +70,7 @@
         "zod": "^4.6.7"
     },
     "overrides": {
+        "auth": "1.7.9",
         "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
         "vitest": "5.0.4",
         "vue": "3.6.0-rc.11"

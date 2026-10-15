@@ -4,6 +4,7 @@ import type { SiteAdmin } from '../packages/site-admin/src/server'
 
 const runtime = (tasks: SiteAdminTaskRuntime['tasks'] = {}) => {
     const admin = {
+        rebuildSearch: vi.fn(async () => ({ indexed: 1 })),
         publishDue: vi.fn<SiteAdmin['publishDue']>(async () => ({ published: ['entry'], failed: [] })),
         runAssetGC: vi.fn<SiteAdmin['runAssetGC']>(async () => ({ deleted: ['orphan'], failed: [] })),
         syncAssetCopies: vi.fn<SiteAdmin['syncAssetCopies']>(async () => ({

@@ -1,4 +1,4 @@
-import { getCurrentScope, ref, shallowRef, toValue, type MaybeRefOrGetter } from 'vue'
+import { prepareAdminEntry } from './entry-preparation'
 import {
     SiteAdminClientError,
     type ManagementListOptions,
@@ -7,92 +7,202 @@ import {
     type SiteAdminManagementModels,
     type SiteAdminNamedAiActions,
     type SiteAdminReferencesOptions,
+    type SiteAdminCreateEntryInput,
 } from './client'
-import { createSiteAdminModel, type EntryPrepareContext } from './model'
-import { presentSiteAdminData, siteAdminAsset } from './management-assets'
+import type { EntryPrepareContext } from './model'
+import { presentAdminValue, siteAdminAsset } from './management-assets'
+import type { ModelDescriptor } from './descriptor'
+import type { TranslationInput } from './i18n'
 
 type Target = { id: string; version: number }
-type ModelsShape<Models> = { [Name in keyof Models]: Record<string, unknown> }
+type Shape<Models> = { [Name in keyof Models]: Record<string, unknown> }
+type NameOf<Models> = Extract<keyof Models, string>
+type Input<Data> = { data?: Partial<Data>; translations?: TranslationInput<Data>; defaultLocale?: string }
 
-/** Nuxt's imperative API uses the same serialization and preparation as resources. */
-export const createAdminClient = <Models extends ModelsShape<Models> = SiteAdminManagementModels>(
+/** Imperative operations have no Vue lifetime or reactive state. */
+export const createAdminClient = <Models extends Shape<Models> = SiteAdminManagementModels>(
     client: SiteAdminManagementClient<Models>,
     prepare?: (context: EntryPrepareContext) => void | Promise<void>,
-    identity: MaybeRefOrGetter<string> = 'request',
+    identity: () => string = () => 'request',
 ) => {
-    const owner = getCurrentScope()
-    const descriptors = () => client.models()
-    const present = async <Data extends Record<string, unknown>>(entry: SiteAdminEntry<Data>) => {
-        const scope = toValue(identity)
-        const descriptor = (await descriptors()).models[entry.model]
-        if (scope !== toValue(identity)) throw new DOMException('Authentication changed.', 'AbortError')
-        if (!descriptor) throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', 'Model is unavailable.', 403)
-        return { ...entry, data: presentSiteAdminData<Data>(descriptor, entry.data, client.assetUrl) }
+    let cached: { scope: string; value: ReturnType<typeof client.models> } | undefined
+    const descriptors = () => {
+        const scope = identity()
+        if (cached?.scope !== scope) {
+            const value = client.models()
+            cached = { scope, value }
+            void value.catch(() => {
+                if (cached?.value === value) cached = undefined
+            })
+        }
+        return cached.value
     }
-    const resource = async (model: string, target?: Target) => {
-        const scope = toValue(identity)
+    const describe = async (model: string): Promise<ModelDescriptor> => {
+        const scope = identity()
         const descriptor = (await descriptors()).models[model]
+        if (scope !== identity()) throw new DOMException('Authentication changed.', 'AbortError')
         if (!descriptor) throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', 'Model is unavailable.', 403)
-        const entry = target ? await client.getEntry(target.id) : null
-        if (scope !== toValue(identity)) throw new DOMException('Authentication changed.', 'AbortError')
-        if (entry && (entry.version !== target!.version || entry.model !== model))
+        return descriptor
+    }
+    const present = <Value extends object>(entry: Value, descriptor: ModelDescriptor) =>
+        presentAdminValue(descriptor, entry, client.assetUrl)
+    const target = async <Name extends NameOf<Models>>(model: Name, selected: Target) => {
+        const scope = identity()
+        const [descriptor, entry] = await Promise.all([describe(model), client.getEntry<Models[Name]>(selected.id)])
+        if (scope !== identity()) throw new DOMException('Authentication changed.', 'AbortError')
+        if (entry.model !== model || entry.version !== selected.version)
             throw new SiteAdminClientError('SITE_ADMIN_CONFLICT', 'Reload the current entry before saving.', 409)
-        if (owner && !owner.active) throw new DOMException('Scope disposed.', 'AbortError')
-        const create = () =>
-            createSiteAdminModel<Record<string, unknown>>(
-                { data: shallowRef(entry), status: ref('success'), error: shallowRef(), refresh: async () => {} },
-                {
-                    model,
-                    descriptor: shallowRef(descriptor),
-                    id: ref(target?.id ?? null),
-                    identity: () => toValue(identity) + ':' + model + ':' + (target?.id ?? 'new'),
-                    locale: undefined,
-                    client: client as unknown as SiteAdminManagementClient<Record<string, Record<string, unknown>>>,
-                    drafts: {},
-                    ...(prepare ? { prepare } : {}),
-                },
-            )
-        return owner ? owner.run(create)! : create()
+        return { descriptor, entry }
     }
-    const selected = async (target: Target) => ({ entry: await client.getEntry(target.id), target })
-    const action = async (target: Target) => {
-        const { entry } = await selected(target)
-        return resource(entry.model, target)
+    const candidate = async <Name extends NameOf<Models>>(
+        model: Name,
+        descriptor: ModelDescriptor,
+        operation: EntryPrepareContext['operation'],
+        input: Input<Models[Name]>,
+        entry?: SiteAdminEntry<Models[Name]>,
+    ) => {
+        const scope = identity()
+        return prepareAdminEntry({
+            model,
+            descriptor,
+            operation,
+            input,
+            ...(entry ? { entry } : {}),
+            defaultLocale:
+                entry?.defaultLocale ?? input.defaultLocale ?? (await descriptors()).i18n?.defaultLocale ?? '',
+            assetUrl: client.assetUrl,
+            signal: new AbortController().signal,
+            ...(prepare ? { prepare } : {}),
+            guard: () => {
+                if (scope !== identity()) throw new DOMException('Authentication changed.', 'AbortError')
+            },
+            resource: {
+                display: (value) => ({
+                    title: String(value[descriptor.displayFields?.title ?? 'title'] ?? ''),
+                    description: String(value[descriptor.displayFields?.description ?? 'description'] ?? ''),
+                    image: undefined,
+                }),
+            },
+        })
     }
+
     return {
         entries: {
-            list: async <Name extends Extract<keyof Models, string>>(model: Name, options?: ManagementListOptions) => {
-                const page = await client.listEntries(model, options)
-                return { ...page, items: await Promise.all(page.items.map(present)) }
+            list: async <Name extends NameOf<Models>>(model: Name, options?: ManagementListOptions) => {
+                const [page, descriptor] = await Promise.all([client.listEntries(model, options), describe(model)])
+                return { ...page, items: page.items.map((entry) => present(entry, descriptor)) }
             },
-            get: async (id: string) => present(await client.getEntry(id)),
-            create: async <Name extends Extract<keyof Models, string>>(model: Name, value: Models[Name]) =>
-                (await resource(model)).save(value),
-            update: async (target: Target, value: Record<string, unknown>) => (await action(target)).save(value),
-            remove: async (target: Target) => (await action(target)).remove(),
-            publish: async (target: Target, value?: Record<string, unknown>) =>
-                (await action(target)).publish(undefined, value),
-            unpublish: async (target: Target) => (await action(target)).unpublish(),
-            schedule: async (target: Target, at: string, value?: Record<string, unknown>) =>
-                (await action(target)).schedule(at, undefined, value),
-            cancelSchedule: async (target: Target) => (await action(target)).cancelSchedule(),
-            reorder: async <Name extends Extract<keyof Models, string>>(
+            get: async <Name extends NameOf<Models>>(model: Name, id: string) => {
+                const [entry, descriptor] = await Promise.all([client.getEntry<Models[Name]>(id), describe(model)])
+                if (entry.model !== model)
+                    throw new SiteAdminClientError('SITE_ADMIN_ENTRY_NOT_FOUND', 'Entry not found.', 404)
+                return present(entry, descriptor)
+            },
+            create: async <Name extends NameOf<Models>>(
                 model: Name,
-                entries: SiteAdminEntry<Models[Name]>[],
-            ) => (await resource(model)).reorder(entries),
-            references: (id: string, options: SiteAdminReferencesOptions) => client.referencesTo(id, options),
+                input: SiteAdminCreateEntryInput<Models[Name]>,
+            ) => {
+                const descriptor = await describe(model)
+                return present(
+                    await client.createEntry(model, {
+                        ...input,
+                        ...(await candidate(model, descriptor, 'save', input)),
+                    }),
+                    descriptor,
+                )
+            },
+            update: async <Name extends NameOf<Models>>(model: Name, selected: Target, input: Input<Models[Name]>) => {
+                const { descriptor, entry } = await target(model, selected)
+                return present(
+                    await client.updateEntry<Models[Name]>(selected.id, {
+                        ...(await candidate(model, descriptor, 'save', input, entry)),
+                        expectedVersion: selected.version,
+                    }),
+                    descriptor,
+                )
+            },
+            publish: async <Name extends NameOf<Models>>(
+                model: Name,
+                selected: Target,
+                input: Input<Models[Name]> = {},
+            ) => {
+                const { descriptor, entry } = await target(model, selected)
+                return present(
+                    await client.publishEntry<Models[Name]>(selected.id, {
+                        expectedVersion: selected.version,
+                        draft: await candidate(model, descriptor, 'publish', input, entry),
+                    }),
+                    descriptor,
+                )
+            },
+            schedule: async <Name extends NameOf<Models>>(
+                model: Name,
+                selected: Target,
+                input: Input<Models[Name]> & { at: Date | string },
+            ) => {
+                const at = new Date(input.at)
+                if (!Number.isFinite(at.getTime()) || at.getTime() <= Date.now())
+                    throw new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Choose a future publication time.', 400)
+                const { descriptor, entry } = await target(model, selected)
+                return present(
+                    await client.schedulePublish<Models[Name]>(selected.id, {
+                        expectedVersion: selected.version,
+                        at: at.toISOString(),
+                        draft: await candidate(model, descriptor, 'schedule', input, entry),
+                    }),
+                    descriptor,
+                )
+            },
+            remove: async <Name extends NameOf<Models>>(model: Name, selected: Target) => {
+                await target(model, selected)
+                return client.deleteEntry(selected.id, { expectedVersion: selected.version })
+            },
+            unpublish: async <Name extends NameOf<Models>>(model: Name, selected: Target) => {
+                const { descriptor } = await target(model, selected)
+                return present(
+                    await client.unpublishEntry<Models[Name]>(selected.id, { expectedVersion: selected.version }),
+                    descriptor,
+                )
+            },
+            cancelSchedule: async <Name extends NameOf<Models>>(model: Name, selected: Target) => {
+                const { descriptor } = await target(model, selected)
+                return present(
+                    await client.cancelScheduledPublish<Models[Name]>(selected.id, {
+                        expectedVersion: selected.version,
+                    }),
+                    descriptor,
+                )
+            },
+            reorder: <Name extends NameOf<Models>>(model: Name, entries: SiteAdminEntry<Models[Name]>[]) =>
+                client.setSortOrders(
+                    model,
+                    entries.map((entry, index) => ({ id: entry.id, expectedVersion: entry.version, sortOrder: index })),
+                ),
+            references: async <Name extends NameOf<Models>>(
+                model: Name,
+                id: string,
+                options: SiteAdminReferencesOptions,
+            ) => {
+                const entry = await client.getEntry(id)
+                if (entry.model !== model)
+                    throw new SiteAdminClientError('SITE_ADMIN_ENTRY_NOT_FOUND', 'Entry not found.', 404)
+                return client.referencesTo(id, options)
+            },
         },
         revisions: {
-            list: async (id: string) => {
-                const entry = await client.getEntry(id)
-                const descriptor = (await descriptors()).models[entry.model]
-                if (!descriptor) throw new SiteAdminClientError('SITE_ADMIN_FORBIDDEN', 'Model is unavailable.', 403)
-                return (await client.listRevisions(id)).map((revision) => ({
-                    ...revision,
-                    data: presentSiteAdminData<Models[keyof Models]>(descriptor, revision.data, client.assetUrl),
-                }))
+            list: async <Name extends NameOf<Models>>(model: Name, id: string) => {
+                const descriptor = await describe(model)
+                return (await client.listRevisions<Models[Name]>(id)).map((revision) => present(revision, descriptor))
             },
-            restore: async (target: Target, revisionId: string) => (await action(target)).restore(revisionId),
+            restore: async <Name extends NameOf<Models>>(model: Name, selected: Target, revisionId: string) => {
+                const { descriptor } = await target(model, selected)
+                return present(
+                    await client.restoreRevision<Models[Name]>(selected.id, revisionId, {
+                        expectedVersion: selected.version,
+                    }),
+                    descriptor,
+                )
+            },
         },
         assets: {
             upload: async (file: File) => siteAdminAsset(await client.uploadAsset(file), client.assetUrl),

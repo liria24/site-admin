@@ -79,13 +79,13 @@ const checkModels = async () => {
   await useContent('missing')
   // @ts-expect-error The public field type is inferred without consumer generics.
   const invalidTitle: number = data.value![0]!.data.title
-  await client.entries.create('posts', { title: 'Typed' })
+  await client.entries.create('posts', { data: { title: 'Typed' } })
   // @ts-expect-error Unknown management model.
   await client.entries.create('missing', {})
   // @ts-expect-error Required model field is missing.
   await client.entries.create('posts', {})
   // @ts-expect-error The management field type is inferred.
-  await client.entries.create('posts', { title: 123 })
+  await client.entries.create('posts', { data: { title: 123 } })
   const entry = (await client.entries.list('posts')).items[0]!
   const resource = await useAdminEntry('posts', entry.id)
   const { form } = useEntryForm(resource)

@@ -303,7 +303,10 @@ it('keeps originals private and synchronizes all publication, revision, history,
     const autoAsset = await admin.uploadAsset({ body: 'auto', filename: 'auto.txt' })
     let auto = await admin.createEntry('auto', { data: { attachment: autoAsset.id } })
     expect((await publicFiles.list()).items.length).toBe(1)
-    auto = await admin.updateEntry(auto.id, { expectedVersion: auto.version, data: { slug: auto.data.slug } })
+    auto = await admin.updateEntry(auto.id, {
+        expectedVersion: auto.version,
+        data: { slug: auto.data.slug, attachment: null },
+    })
     expect((await publicFiles.list()).items.length).toBe(0)
     await admin.createEntry('private', { data: { attachment: autoAsset.id } })
     expect((await publicFiles.list()).items.length).toBe(0)

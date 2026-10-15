@@ -158,11 +158,11 @@ test.each(['before', 'after'] as const)(
     },
 )
 
-test('optional Files defaults never install or activate Files by themselves', async () => {
+test('enables the Files dependency without a duplicate application module registration', async () => {
     const root = await fixture()
     const { nuxt, source } = await start(root, 'before', 'function', { installFiles: false })
     expect(source).toBe(resolve(root, 'site-admin.config.ts'))
-    expect(hasNuxtModule('nuxt-files-sdk', nuxt)).toBe(false)
+    expect(hasNuxtModule('nuxt-files-sdk', nuxt)).toBe(true)
 })
 
 test('optional Files defaults preserve an explicitly disabled Files module', async () => {

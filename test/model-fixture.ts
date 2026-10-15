@@ -36,6 +36,8 @@ export const modelEntry = (
     model: 'posts',
     data,
     locale: '',
+    defaultLocale: '',
+    translations: {},
     createdAt: '',
     updatedAt: '',
     currentRevisionId: 'revision',
@@ -45,7 +47,6 @@ export const modelEntry = (
     scheduledAt: null,
     scheduledRevisionId: null,
     sortOrder: null,
-    translationGroup: id,
 })
 export const modelFixture = (
     request: typeof fetch,
@@ -54,6 +55,7 @@ export const modelFixture = (
     options: {
         model: string
         descriptor: ModelDescriptor
+        defaultLocale?: string
         prepare?: (context: EntryPrepareContext) => Promise<void>
     } = { model: 'posts', descriptor: formDescriptor },
 ) => {
@@ -71,6 +73,7 @@ export const modelFixture = (
     })
     const actions = createSiteAdminModel(state, {
         model: options.model,
+        ...(options.defaultLocale ? { defaultLocale: options.defaultLocale } : {}),
         id,
         identity,
         descriptor: shallowRef(options.descriptor),

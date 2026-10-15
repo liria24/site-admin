@@ -45,9 +45,7 @@ export async function searchProbe(request: Request, binding: AnyD1Database, sche
         const unchanged =
             before === JSON.stringify(await storage.revisions(entry.id)) &&
             (await core.getEntry(entry.id)).data.title === title
-        const sizes = await database.query(
-            "SELECT length(CAST(key AS BLOB))+length(CAST(value AS BLOB)) AS bytes FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'",
-        )
+        const sizes = await database.query('SELECT length(CAST(value AS BLOB)) AS bytes FROM site_admin_search')
         await core.deleteEntry(entry.id, { expectedVersion: entry.version })
         return Response.json({ counts, unchanged, sizes, rejected, status: response.status })
     }
@@ -57,7 +55,7 @@ export async function searchProbe(request: Request, binding: AnyD1Database, sche
         )
         await database.atomic([
             {
-                sql: "INSERT INTO site_admin_entries(id,model,translation_group,version,created_at,updated_at) SELECT json_extract(value,'$.id'),'posts',json_extract(value,'$.id'),1,'2026-10-09','2026-10-09' FROM json_each(?)",
+                sql: "INSERT INTO site_admin_entries(id,model,default_locale,version,created_at,updated_at) SELECT json_extract(value,'$.id'),'posts','',1,'2026-10-09','2026-10-09' FROM json_each(?)",
                 params: [candidates],
             },
             {
@@ -75,6 +73,7 @@ export async function searchProbe(request: Request, binding: AnyD1Database, sche
         ])
         return Response.json({ seeded: 257 })
     }
+    if (path === '/search-cold/rebuild') return Response.json(await database.bind(config).rebuildSearch())
     if (path === '/search-cold/state') {
         const heads = await database.query("SELECT * FROM site_admin_entries WHERE id LIKE 'cold-probe-%' ORDER BY id")
         const revisions = await database.query(

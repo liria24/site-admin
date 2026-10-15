@@ -283,13 +283,17 @@ describe('public entry SEO payload', () => {
                 assets: { storage: 'content' },
                 models: {
                     pages: {
-                        fields: { slug: text(), title: text(), cover: image() },
-                        localized: true,
+                        fields: {
+                            slug: text({ i18n: true }),
+                            title: text({ i18n: true }),
+                            cover: image({ i18n: true }),
+                        },
+
                         route: '/pages/:slug',
                     },
                     secrets: {
                         fields: { slug: text(), title: text() },
-                        localized: true,
+
                         public: false,
                         publishing: false,
                         route: '/secrets/:slug',
@@ -306,33 +310,25 @@ describe('public entry SEO payload', () => {
             },
             site: { url: 'https://example.com' },
         })
+        const unavailableAsset = await admin.uploadAsset({ body: png, filename: 'unavailable.png' })
         const en = await admin.createEntry('pages', {
-            locale: 'en',
-            translationGroup: 'home',
+            defaultLocale: 'en',
             data: { slug: 'home', title: 'English' },
+            translations: {
+                ja: { slug: 'ホーム', title: '日本語' },
+                de: { slug: 'unavailable', title: 'German', cover: unavailableAsset.id },
+            },
         })
-        const ja = await admin.createEntry('pages', {
-            locale: 'ja',
-            translationGroup: 'home',
-            data: { slug: 'ホーム', title: '日本語' },
-        })
-        await admin.createEntry('pages', {
-            locale: 'fr',
-            translationGroup: 'home',
-            data: { slug: 'draft', title: 'French draft' },
+        const ja = en
+        const published = await admin.publishEntry(en.id, { expectedVersion: en.version })
+        await admin.updateEntry(en.id, {
+            expectedVersion: published.version,
+            translations: { fr: { title: 'French draft' } },
         })
         await admin.createEntry('secrets', {
+            defaultLocale: 'de',
             data: { slug: 'private-german', title: 'Private German' },
-            locale: 'de',
-            translationGroup: 'home',
         })
-        const unavailableAsset = await admin.uploadAsset({ body: png, filename: 'unavailable.png' })
-        const de = await admin.createEntry('pages', {
-            locale: 'de',
-            translationGroup: 'home',
-            data: { slug: 'unavailable', title: 'German', cover: unavailableAsset.id },
-        })
-        for (const draft of [en, ja, de]) await admin.publishEntry(draft.id, { expectedVersion: draft.version })
         await db.prepare("UPDATE site_admin_assets SET state = 'deleting' WHERE id = ?").bind(unavailableAsset.id).run()
         const projected = await admin.getPublicEntry('pages', ja.id, 'ja')
         expect(projected?.path).toBe('/translated/ja/pages/%E3%83%9B%E3%83%BC%E3%83%A0')
@@ -357,11 +353,11 @@ describe('public entry SEO payload', () => {
         expect(JSON.stringify(projected)).not.toMatch(/French draft|Private German|unavailable/u)
     })
 
-    it('bounds localized sibling queries to D1 limits across more than 100 translation groups', async () => {
+    it('bounds sparse translation loading to D1 limits across more than 100 original entries', async () => {
         const config = defineSiteAdminConfig({
             models: {
-                pages: { fields: { slug: text(), title: text() }, localized: true, route: '/pages/:slug' },
-                secrets: { fields: { slug: text(), title: text() }, localized: true, public: false, publishing: false },
+                pages: { fields: { slug: text({ i18n: true }), title: text({ i18n: true }) }, route: '/pages/:slug' },
+                secrets: { fields: { slug: text(), title: text() }, public: false, publishing: false },
             },
         })
         const db = database()
@@ -378,24 +374,21 @@ describe('public entry SEO payload', () => {
             site: { url: 'https://example.com' },
         })
         for (let index = 0; index < 101; index++) {
-            for (const locale of ['en', 'ja']) {
-                const entry = await admin.createEntry('pages', {
-                    locale,
-                    translationGroup: `group-${index}`,
-                    data: { slug: `${locale}-${index}`, title: `${locale} ${index}` },
+            const entry = await admin.createEntry('pages', {
+                defaultLocale: 'en',
+                data: { slug: 'en-' + index, title: 'en ' + index },
+                translations: { ja: { slug: 'ja-' + index, title: 'ja ' + index } },
+            })
+            const published = await admin.publishEntry(entry.id, { expectedVersion: entry.version })
+            if (index === 100)
+                await admin.updateEntry(entry.id, {
+                    expectedVersion: published.version,
+                    translations: { fr: { title: 'French draft' } },
                 })
-                await admin.publishEntry(entry.id, { expectedVersion: entry.version })
-            }
         }
-        await admin.createEntry('pages', {
-            locale: 'fr',
-            translationGroup: 'group-100',
-            data: { slug: 'draft', title: 'French draft' },
-        })
         await admin.createEntry('secrets', {
+            defaultLocale: 'fr',
             data: { slug: 'private-french', title: 'Private French' },
-            locale: 'fr',
-            translationGroup: 'group-100',
         })
         const native = (await db.getInstance()) as DatabaseSync
         const prepare = native.prepare.bind(native)

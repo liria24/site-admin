@@ -43,10 +43,11 @@ export default defineNuxtRouteMiddleware(async (to) => {
 }
 
 export const siteAdminNuxtMetadataTemplate = (
-    options: Pick<ModuleOptions, 'seo' | 'ogImage' | 'schemaOrg'>,
+    options: Pick<ModuleOptions, 'seo' | 'ogImage' | 'schemaOrg'> & { i18n?: boolean },
 ): string => {
     const imports = ['defineNuxtPlugin', 'useState', 'useRoute', 'computed']
     if (options.seo) imports.push('useHead')
+    if (options.i18n) imports.push('useSetI18nParams', 'watch')
     if (options.schemaOrg) imports.push('useSchemaOrg')
     return `import { ${imports.join(', ')} } from '#imports'
 ${options.seo || options.ogImage ? "import { useSiteAdminSeoMetadata } from '#build/site-admin/seo'" : ''}
@@ -55,6 +56,12 @@ export default defineNuxtPlugin(() => {
   const resolved = useState('site-admin-route', () => null)
   const current = useRoute()
   const route = computed(() => resolved.value?.path === current.path ? resolved.value : null)
+  ${
+      options.i18n
+          ? `const setI18nParams = useSetI18nParams()
+  watch(() => route.value?.entry?.localeParams, params => setI18nParams(params ?? {}), { immediate: true })`
+          : ''
+  }
   ${options.seo || options.ogImage ? 'useSiteAdminSeoMetadata(() => route.value?.entry?.seo)' : ''}
   ${options.seo ? 'useHead(() => ({ htmlAttrs: route.value?.entry?.locale ? { lang: route.value.entry.locale } : {} }))' : ''}
   ${

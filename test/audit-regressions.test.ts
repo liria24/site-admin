@@ -221,7 +221,11 @@ it('evicts public snapshots and routes after 64 locale keys without a locale whi
     })
     await migrateTestDatabase(database, config)
     const storage = (await testAdapter(database, config)).bind(config)
-    const admin = createSiteAdmin({ config, database: { bind: () => storage } })
+    const admin = createSiteAdmin({
+        config,
+        database: { bind: () => storage },
+        locales: { defaultLocale: 'locale-0', supported: Array.from({ length: 65 }, (_, i) => 'locale-' + i) },
+    })
     const first = await admin.content('posts', 'locale-0')
     for (let i = 1; i <= 64; i++) await admin.content('posts', `locale-${i}`)
     expect(await admin.content('posts', 'locale-0')).not.toBe(first)

@@ -16,7 +16,10 @@ import { SiteAdminError } from '../errors'
 import { searchQuery } from '../storage'
 import { queryRows, runAtomic } from './drizzle-database'
 import { revisionSource } from './drizzle-tables'
-import { searchKey, searchPrefix, searchScope, searchText, searchParts, searchPredicate } from './sqlite-search'
+import { projectStoredFields } from '../stored-data'
+import { createSiteAdminDescriptor } from '../descriptor'
+import { translatedRouteFields } from '../i18n'
+import { searchRecords, searchPredicate } from './sqlite-search'
 
 const placeholders = (count: number) => Array.from({ length: count }, () => '?').join(',')
 const decodeObject = (value: string): Record<string, unknown> => {
@@ -25,29 +28,36 @@ const decodeObject = (value: string): Record<string, unknown> => {
         throw new SiteAdminError('SITE_ADMIN_SCHEMA_INCOMPATIBLE', 'Stored revision data is not an object.')
     return result as Record<string, unknown>
 }
-const entryColumns = `e.id, e.model, e.locale, e.translation_group AS translationGroup, e.current_revision_id AS currentRevisionId,
+const translationColumns =
+    "COALESCE((SELECT json_group_object(t.locale,json(t.data)) FROM site_admin_translations t WHERE t.revision_id=r.id),'{}') AS translations"
+const entryColumns = `e.id, e.model, e.default_locale AS defaultLocale, e.current_revision_id AS currentRevisionId,
     e.published_revision_id AS publishedRevisionId, e.scheduled_revision_id AS scheduledRevisionId, e.scheduled_at AS scheduledAt,
     e.sort_order AS sortOrder, e.version, e.created_at AS createdAt, e.updated_at AS updatedAt, e.published_at AS publishedAt,
-    r.id AS revisionId, r.data`
-const publishedColumns = `e.id, e.model, e.locale, e.published_at AS publishedAt, e.translation_group AS translationGroup, r.id AS revisionId, r.data`
+    r.id AS revisionId, r.data, ${translationColumns}`
+const publishedColumns = `e.id, e.model, e.default_locale AS defaultLocale, e.published_at AS publishedAt, r.id AS revisionId, r.data, ${translationColumns}`
 const assetColumns = `id, storage, key, content_type AS contentType, size, checksum, metadata, state,
     operation_token AS operationToken, lease_expires_at AS leaseExpiresAt, created_at AS createdAt, updated_at AS updatedAt`
-type StoredEntry = Omit<EntryRecord, 'data'> & { data: string }
-type StoredRevision = Omit<RevisionRecord, 'data'> & { data: string }
-type StoredPublished = Omit<StoragePublishedEntry, 'data'> & { data: string }
+type StoredEntry = Omit<EntryRecord, 'data' | 'translations'> & { data: string; translations: string }
+type StoredRevision = Omit<RevisionRecord, 'data' | 'translations'> & { data: string; translations: string }
+type StoredPublished = Omit<StoragePublishedEntry, 'data' | 'translations'> & { data: string; translations: string }
 type StoredAsset = Omit<AssetRecord, 'metadata'> & { metadata: string }
 const entry = (row: StoredEntry): EntryRecord => ({
     ...row,
     data: decodeObject(row.data),
+    translations: JSON.parse(row.translations),
     version: Number(row.version),
+    locale: row.defaultLocale,
 })
 const revision = (row: StoredRevision): RevisionRecord => ({
     ...row,
     data: decodeObject(row.data),
+    translations: JSON.parse(row.translations),
 })
 const published = (row: StoredPublished): StoragePublishedEntry => ({
     ...row,
+    locale: row.defaultLocale,
     data: decodeObject(row.data),
+    translations: JSON.parse(row.translations),
 })
 const asset = (row: StoredAsset): AssetRecord => ({
     ...row,
@@ -71,6 +81,31 @@ export const sqliteStorage = (
     insertRevisionData: (model: string, id: string, data: Record<string, unknown>) => AtomicStatement,
 ): StorageContent & StorageAssets => {
     const source = revisionSource(config)
+    const routeFields = Object.fromEntries(
+        Object.entries(config.models).map(([name, definition]) => [name, translatedRouteFields(definition)]),
+    )
+    const selectedPublishedColumns = (locale?: string) =>
+        locale === undefined
+            ? publishedColumns
+            : publishedColumns.replace('t.revision_id=r.id', 't.revision_id=r.id AND t.locale=?')
+    const fingerprints = Object.fromEntries(
+        Object.entries(createSiteAdminDescriptor(config).models).map(([model, definition]) => [
+            model,
+            JSON.stringify(definition.fields),
+        ]),
+    )
+    const recordsFor = (
+        model: string,
+        data: Record<string, unknown>,
+        locale: string,
+        translations: import('../i18n').Translations,
+    ) => {
+        const fields = config.models[model]!.fields
+        return [locale, ...Object.keys(translations)].flatMap((language) => [
+            { locale: language, part: -1, value: fingerprints[model]! },
+            ...searchRecords(projectStoredFields(fields, { ...data, ...translations[language] }), language, {}),
+        ])
+    }
     const rows = <Row extends object>(sql: string, params: DatabaseValue[] = []) =>
         queryRows<Row>(database, sql, params)
     const row = async <Row extends object>(sql: string, params: DatabaseValue[] = []) =>
@@ -152,122 +187,48 @@ export const sqliteStorage = (
             clauses.push('e.model IN (SELECT value FROM json_each(?))')
             params.push(JSON.stringify(models))
         }
-        if (filter.locale !== undefined) {
-            clauses.push('e.locale=?')
-            params.push(filter.locale)
-        }
         if (filter.q) {
             const q = filter.q
-            const data = searchPredicate('search_data', q)
+            const data = searchPredicate(q)
             clauses.push(data.sql)
-            params.push(...data.params)
+            params.push(filter.locale ?? '', data.length, q)
         }
         return { sql: clauses.join(' AND '), params }
     }
-    let scopePromise: Promise<string> | undefined
-    const scope = () => (scopePromise ??= searchScope(source))
-    const searchJoins = ` LEFT JOIN site_admin_meta search_data ON search_data.key='${searchPrefix}'||hex(r.id)||':'||?||':data'`
     const contentFrom = `FROM site_admin_entries e JOIN ${source} r ON r.id=e.current_revision_id`
-    const missingSearch = (filter: StorageEntryFilter, fingerprint: string) => {
-        const where = entryFilter({ ...filter, q: '' })
-        return {
-            from: `${contentFrom}${searchJoins} WHERE ${where.sql} AND search_data.key IS NULL`,
-            params: [fingerprint, ...where.params],
-        }
-    }
-    const populateSearch = async (filter: StorageEntryFilter, fingerprint: string, budget: { remaining: number }) => {
-        const missing = missingSearch(filter, fingerprint)
-        // Old schemas need no DDL or history rewrite. Each bounded batch is resumable and idempotent.
-        // Count every native statement and bound decoded text, including an individually large head.
-        while (budget.remaining >= 3) {
-            budget.remaining--
-            const candidates = await rows<{ id: string; bytes: number }>(
-                `SELECT r.id,length(CAST(r.data AS BLOB)) AS bytes ${missing.from} LIMIT 32`,
-                missing.params,
-            )
-            if (!candidates.length) return
-            const ids: string[] = []
-            let bytes = 0
-            for (const candidate of candidates) {
-                if (ids.length && bytes + Number(candidate.bytes) > 1_048_576) break
-                ids.push(candidate.id)
-                bytes += Number(candidate.bytes)
-            }
-            budget.remaining--
-            const values = await rows<{ id: string; data: string }>(
-                `SELECT r.id,r.data FROM ${source} r WHERE r.id IN (SELECT value FROM json_each(?))`,
-                [JSON.stringify(ids)],
-            )
-            const prepared = values.map((candidate) => {
-                const text = searchText(decodeObject(candidate.data))
-                return { id: candidate.id, text, parts: searchParts(text) }
-            })
-            if (!prepared.length) continue
-            {
-                const parts: Array<{ id: string; part: string; value: string }> = []
-                for (const candidate of prepared) {
-                    if (Math.ceil((parts.length + candidate.parts.length) / 32) > budget.remaining) break
-                    parts.push(...candidate.parts.map((part) => ({ id: candidate.id, ...part })))
-                }
-                if (!parts.length) {
-                    budget.remaining = 0
-                    return
-                }
-                const statements: AtomicStatement[] = []
-                for (let offset = 0; offset < parts.length; offset += 32) {
-                    const batch = parts.slice(offset, offset + 32)
-                    statements.push({
-                        sql: `WITH candidates(id,part,value) AS (VALUES ${batch.map(() => '(?,?,?)').join(',')}) INSERT INTO site_admin_meta(key,value)
-                            SELECT '${searchPrefix}'||hex(c.id)||':'||?||':'||c.part,c.value FROM candidates c JOIN site_admin_revisions r ON r.id=c.id WHERE 1 ON CONFLICT(key) DO NOTHING`,
-                        params: [...batch.flatMap((part) => [part.id, part.part, part.value]), fingerprint],
-                    })
-                }
-                budget.remaining -= statements.length
-                await execute(statements)
-            }
-        }
-        budget.remaining = 0
-    }
     const readContent = async (
         filter: StorageEntryFilter,
         statements: (from: string, params: DatabaseValue[]) => AtomicStatement[],
     ) => {
         const q = searchQuery(filter.q)
         filter = { ...filter, ...(q === undefined ? {} : { q }) }
-        const fingerprint = filter.q ? await scope() : undefined
         const where = entryFilter(filter)
-        const from = `${contentFrom}${fingerprint ? searchJoins : ''} WHERE ${where.sql}`
-        const params = [...(fingerprint ? [fingerprint] : []), ...where.params]
-        const budget = { remaining: 24 }
-        for (let attempt = 0; attempt < 3; attempt++) {
-            if (fingerprint) await populateSearch(filter, fingerprint, budget)
-            const missing = fingerprint ? missingSearch(filter, fingerprint) : undefined
-            const result = await execute(
-                [
-                    ...(missing
-                        ? [{ sql: `SELECT COUNT(*) AS missing ${missing.from}`, params: missing.params, query: true }]
-                        : []),
-                    ...statements(from, params),
-                ],
-                'read',
-            )
-            // A writer using a different projection can install a new head during backfill.
-            // Check completeness and count/page in the same native snapshot; never silently omit it.
-            if (!missing) return result
-            const remaining = Number((result[0]!.rows[0] as { missing: number }).missing)
-            if (remaining === 0) return result.slice(1)
-            if (!budget.remaining)
-                throw new SiteAdminError(
-                    'SITE_ADMIN_SEARCH_PREPARING',
-                    'Search metadata is still being prepared; retry the search.',
-                    undefined,
-                    remaining,
-                )
-        }
-        throw new SiteAdminError(
-            'SITE_ADMIN_STORAGE_UNAVAILABLE',
-            'Entries changed while preparing search metadata; retry the search.',
+        const checks: AtomicStatement[] = q
+            ? [
+                  {
+                      sql: `SELECT 1 FROM site_admin_entries e JOIN json_each(?) fingerprint ON fingerprint.key=e.model
+                WHERE e.model IN (SELECT value FROM json_each(?)) AND (
+                  NOT EXISTS (SELECT 1 FROM site_admin_search s WHERE s.revision_id=e.current_revision_id AND s.locale=e.default_locale AND s.part=-1 AND s.value=fingerprint.value)
+                  OR EXISTS (SELECT 1 FROM site_admin_translations t WHERE t.revision_id=e.current_revision_id AND NOT EXISTS
+                    (SELECT 1 FROM site_admin_search s WHERE s.revision_id=t.revision_id AND s.locale=t.locale AND s.part=-1 AND s.value=fingerprint.value))) LIMIT 1`,
+                      params: [
+                          JSON.stringify(fingerprints),
+                          JSON.stringify(filter.models ?? Object.keys(config.models)),
+                      ],
+                      query: true,
+                  },
+              ]
+            : []
+        const result = await execute(
+            [...checks, ...statements(`${contentFrom} WHERE ${where.sql}`, where.params)],
+            'read',
         )
+        if (q && result.shift()!.rows.length)
+            throw new SiteAdminError(
+                'SITE_ADMIN_MIGRATION_REQUIRED',
+                'Rebuild the search index explicitly before searching.',
+            )
+        return result
     }
     const leaseValue = (lease: StorageAssetSyncLease) => `${lease.expiresAt}|${lease.id}`
     const copyGuard = (guard?: StorageAssetCopyGuard) => {
@@ -315,7 +276,7 @@ export const sqliteStorage = (
         },
         readRevision: async (id, entryId) => {
             const value = await row<StoredRevision>(
-                `SELECT id,entry_id AS entryId,actor_id AS actorId,created_at AS createdAt,data FROM ${source} WHERE id=?${entryId === undefined ? '' : ' AND entry_id=?'}`,
+                `SELECT r.id,r.entry_id AS entryId,r.actor_id AS actorId,r.created_at AS createdAt,r.data,${translationColumns} FROM ${source} r WHERE r.id=?${entryId === undefined ? '' : ' AND entry_id=?'}`,
                 entryId === undefined ? [id] : [id, entryId],
             )
             return value && revision(value)
@@ -323,7 +284,7 @@ export const sqliteStorage = (
         revisions: async (entryId) =>
             (
                 await rows<StoredRevision>(
-                    `SELECT id,entry_id AS entryId,actor_id AS actorId,created_at AS createdAt,data FROM ${source} WHERE entry_id=? ORDER BY created_at DESC`,
+                    `SELECT r.id,r.entry_id AS entryId,r.actor_id AS actorId,r.created_at AS createdAt,r.data,${translationColumns} FROM ${source} r WHERE entry_id=? ORDER BY created_at DESC`,
                     [entryId],
                 )
             ).map(revision),
@@ -343,10 +304,6 @@ export const sqliteStorage = (
                     sql: `DELETE FROM ${table} WHERE revision_id IN (SELECT value FROM json_each(?)) AND ${protectedRevision(`${table}.revision_id`)}`,
                     params: [JSON.stringify(candidates), entryId],
                 })),
-                {
-                    sql: `DELETE FROM site_admin_meta WHERE key IN (SELECT m.key FROM site_admin_revisions r JOIN site_admin_meta m ON m.key>='${searchPrefix}'||hex(r.id)||':' AND m.key<'${searchPrefix}'||hex(r.id)||':~' WHERE r.entry_id=? AND r.id IN (SELECT value FROM json_each(?)) AND ${protectedRevision('r.id')})`,
-                    params: [entryId, JSON.stringify(candidates), entryId],
-                },
                 {
                     sql: `DELETE FROM site_admin_revisions AS r WHERE entry_id=? AND id IN (SELECT value FROM json_each(?)) AND ${protectedRevision('r.id')} RETURNING id`,
                     params: [entryId, JSON.stringify(candidates), entryId],
@@ -392,14 +349,7 @@ export const sqliteStorage = (
                 clauses.push('e.model=?')
                 params.push(filter.model)
             }
-            if (filter.locale !== undefined) {
-                clauses.push('e.locale=?')
-                params.push(filter.locale)
-            }
-            for (const [column, values] of [
-                ['e.id', filter.ids],
-                ['e.translation_group', filter.translationGroups],
-            ] as const) {
+            for (const [column, values] of [['e.id', filter.ids]] as const) {
                 if (values === undefined) continue
                 if (!values.length) return []
                 clauses.push(`${column} IN (SELECT value FROM json_each(?))`)
@@ -407,10 +357,84 @@ export const sqliteStorage = (
             }
             return (
                 await rows<StoredPublished>(
-                    `SELECT ${publishedColumns} FROM site_admin_entries e JOIN ${source} r ON r.id=e.published_revision_id WHERE ${clauses.join(' AND ')} ORDER BY e.sort_order IS NULL,e.sort_order,e.published_at DESC,e.id`,
-                    params,
+                    `SELECT ${selectedPublishedColumns(filter.locale)} FROM site_admin_entries e JOIN ${source} r ON r.id=e.published_revision_id WHERE ${clauses.join(' AND ')} ORDER BY e.sort_order IS NULL,e.sort_order,e.published_at DESC,e.id`,
+                    [...(filter.locale === undefined ? [] : [filter.locale]), ...params],
                 )
             ).map(published)
+        },
+        pagePublished: async (filter, page) => {
+            const from = `FROM site_admin_entries e JOIN ${source} r ON r.id=e.published_revision_id WHERE e.model=? AND e.published_revision_id IS NOT NULL AND e.published_at IS NOT NULL`
+            const result = await execute(
+                [
+                    { sql: `SELECT COUNT(*) AS total ${from}`, params: [filter.model], query: true },
+                    {
+                        sql: `SELECT ${selectedPublishedColumns(filter.locale)} ${from} ORDER BY e.sort_order IS NULL,e.sort_order,e.published_at DESC,e.id LIMIT ? OFFSET ?`,
+                        params: [
+                            ...(filter.locale === undefined ? [] : [filter.locale]),
+                            filter.model,
+                            page.limit,
+                            page.offset,
+                        ],
+                        query: true,
+                    },
+                ],
+                'read',
+            )
+            return {
+                items: (result[1]!.rows as StoredPublished[]).map(published),
+                total: Number((result[0]!.rows[0] as { total: number }).total),
+            }
+        },
+        publicTranslations: async (ids) => {
+            if (!ids.length) return []
+            const values = await rows<{
+                entryId: string
+                locale: string
+                data: string
+                assets: string
+                relations: string
+            }>(
+                `SELECT e.id AS entryId,t.locale,
+                COALESCE((SELECT json_group_object(j.key,j.value) FROM json_each(t.data) j WHERE j.key IN (SELECT value FROM json_each(json_extract(?, '$.'||e.model)))),'{}') AS data,
+                COALESCE((SELECT json_group_array(json_object('id',a.asset_id,'path',a.field_path,'position',a.position)) FROM site_admin_asset_refs a WHERE a.revision_id=t.revision_id AND a.locale=t.locale),'[]') AS assets,
+                COALESCE((SELECT json_group_array(json_object('id',rel.target_entry_id,'path',rel.field_path,'position',rel.position)) FROM site_admin_relations rel WHERE rel.revision_id=t.revision_id AND rel.locale=t.locale),'[]') AS relations
+                FROM site_admin_entries e JOIN site_admin_translations t ON t.revision_id=e.published_revision_id WHERE e.id IN (SELECT value FROM json_each(?))`,
+                [JSON.stringify(routeFields), JSON.stringify(ids)],
+            )
+            return values.map((value) => ({
+                ...value,
+                data: decodeObject(value.data),
+                assets: JSON.parse(value.assets),
+                relations: JSON.parse(value.relations),
+            }))
+        },
+        rebuildSearch: async () => {
+            let after = '',
+                indexed = 0
+            while (true) {
+                const candidates = await rows<StoredRevision & { defaultLocale: string; model: string }>(
+                    `SELECT r.id,r.data,e.model,e.default_locale AS defaultLocale,${translationColumns} FROM ${source} r JOIN site_admin_entries e ON e.id=r.entry_id WHERE r.id>? ORDER BY r.id LIMIT 8`,
+                    [after],
+                )
+                if (!candidates.length) return { indexed }
+                for (const value of candidates) {
+                    const records = recordsFor(
+                        value.model,
+                        decodeObject(value.data),
+                        value.defaultLocale,
+                        JSON.parse(value.translations),
+                    )
+                    await execute([
+                        { sql: 'DELETE FROM site_admin_search WHERE revision_id=?', params: [value.id] },
+                        ...records.map((record) => ({
+                            sql: 'INSERT INTO site_admin_search(revision_id,locale,part,value) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM site_admin_revisions WHERE id=?) ON CONFLICT(revision_id,locale,part) DO UPDATE SET value=excluded.value',
+                            params: [value.id, record.locale, record.part, record.value, value.id],
+                        })),
+                    ])
+                    after = value.id
+                    indexed++
+                }
+            }
         },
         routes: async (filter = {}) => {
             const clauses: string[] = [],
@@ -478,12 +502,11 @@ export const sqliteStorage = (
                 const value = input.create
                 statements.push(
                     gated(
-                        'INSERT INTO site_admin_entries(id,model,locale,translation_group,current_revision_id,published_revision_id,scheduled_revision_id,scheduled_at,sort_order,version,created_at,updated_at,published_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?',
+                        'INSERT INTO site_admin_entries(id,model,default_locale,current_revision_id,published_revision_id,scheduled_revision_id,scheduled_at,sort_order,version,created_at,updated_at,published_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?',
                         [
                             value.id,
                             value.model,
-                            value.locale,
-                            value.translationGroup,
+                            value.defaultLocale,
                             value.currentRevisionId,
                             value.publishedRevisionId,
                             value.scheduledRevisionId,
@@ -513,35 +536,47 @@ export const sqliteStorage = (
                     sql: `${data.sql} AND ${guard.clause}`,
                     params: [...(data.params ?? []), ...guard.params],
                 })
-                const fingerprint = await scope()
-                const projected = Object.fromEntries(
-                    Object.keys(config.models[value.model]!.fields)
-                        .filter((name) => value.data[name] !== undefined && value.data[name] !== null)
-                        .map((name) => [name, value.data[name]]),
-                )
-                const text = searchText(projected)
-                const parts = searchParts(text)
-                for (let offset = 0; offset < parts.length; offset += 48) {
-                    const batch = parts.slice(offset, offset + 48)
+                for (const [locale, translation] of Object.entries(value.translations))
                     statements.push(
-                        gated(
-                            `INSERT INTO site_admin_meta(key,value) SELECT column1,column2 FROM (VALUES ${batch.map(() => '(?,?)').join(',')})`,
-                            batch.flatMap((part) => [searchKey(value.id, fingerprint, part.part), part.value]),
-                        ),
+                        gated('INSERT INTO site_admin_translations(revision_id,locale,data) SELECT ?,?,?', [
+                            value.id,
+                            locale,
+                            JSON.stringify(translation),
+                        ]),
                     )
-                }
+                const original =
+                    input.create?.id === value.entryId
+                        ? input.create
+                        : await row<{ defaultLocale: string }>(
+                              'SELECT default_locale AS defaultLocale FROM site_admin_entries WHERE id=?',
+                              [value.entryId],
+                          )
+                for (const record of recordsFor(
+                    value.model,
+                    value.data,
+                    original?.defaultLocale ?? '',
+                    value.translations,
+                ))
+                    statements.push(
+                        gated('INSERT INTO site_admin_search(revision_id,locale,part,value) SELECT ?,?,?,?', [
+                            value.id,
+                            record.locale,
+                            record.part,
+                            record.value,
+                        ]),
+                    )
                 for (const ref of value.relations)
                     statements.push(
                         gated(
-                            'INSERT INTO site_admin_relations(revision_id,field_path,target_entry_id,position,required) SELECT ?,?,?,?,?',
-                            [value.id, ref.path, ref.id, ref.position, Number(ref.required)],
+                            'INSERT INTO site_admin_relations(revision_id,locale,field_path,target_entry_id,position,required) SELECT ?,?,?,?,?,?',
+                            [value.id, ref.locale ?? '', ref.path, ref.id, ref.position, ref.required ? 1 : 0],
                         ),
                     )
                 for (const ref of value.assets)
                     statements.push(
                         gated(
-                            'INSERT INTO site_admin_asset_refs(revision_id,field_path,asset_id,position) SELECT ?,?,?,?',
-                            [value.id, ref.path, ref.id, ref.position],
+                            'INSERT INTO site_admin_asset_refs(revision_id,locale,field_path,asset_id,position) SELECT ?,?,?,?,?',
+                            [value.id, ref.locale ?? '', ref.path, ref.id, ref.position],
                         ),
                     )
             }
@@ -565,12 +600,22 @@ export const sqliteStorage = (
                     )
                 } else if (change.kind === 'retargetHistory')
                     statements.push({
-                        sql: `UPDATE site_admin_routes SET target_path=?,status=? WHERE entry_id=? AND kind='historical' AND ${guard.clause}`,
-                        params: [change.path, change.status, change.entryId, ...guard.params],
+                        sql: `UPDATE site_admin_routes SET target_path=?,status=? WHERE entry_id=? AND kind='historical' ${change.locale === undefined ? '' : 'AND locale=?'} AND ${guard.clause}`,
+                        params: [
+                            change.path,
+                            change.status,
+                            change.entryId,
+                            ...(change.locale === undefined ? [] : [change.locale]),
+                            ...guard.params,
+                        ],
                     })
                 else {
                     const clauses = ['entry_id=?'],
                         params: DatabaseValue[] = [change.entryId]
+                    if (change.locale !== undefined) {
+                        clauses.push('locale=?')
+                        params.push(change.locale)
+                    }
                     if (change.path !== undefined) {
                         clauses.push('path=?')
                         params.push(change.path)
@@ -587,10 +632,6 @@ export const sqliteStorage = (
                 }
             }
             if (input.delete) {
-                statements.push({
-                    sql: `DELETE FROM site_admin_meta WHERE key IN (SELECT m.key FROM site_admin_revisions r JOIN site_admin_meta m ON m.key>='${searchPrefix}'||hex(r.id)||':' AND m.key<'${searchPrefix}'||hex(r.id)||':~' WHERE r.entry_id=? AND ${guard.clause})`,
-                    params: [input.delete, ...guard.params],
-                })
                 statements.push(
                     ...['site_admin_asset_refs', 'site_admin_relations'].map((table) => ({
                         sql: `DELETE FROM ${table} WHERE revision_id IN (SELECT id FROM site_admin_revisions WHERE entry_id=?) AND ${guard.clause}`,
@@ -636,10 +677,7 @@ export const sqliteStorage = (
                         sql: `DELETE FROM ${table} WHERE revision_id IN (${unused}) AND ${guard.clause}`,
                         params: [id, ...guard.params],
                     })
-                statements.push({
-                    sql: `DELETE FROM site_admin_meta WHERE key IN (SELECT m.key FROM site_admin_revisions r JOIN site_admin_meta m ON m.key>='${searchPrefix}'||hex(r.id)||':' AND m.key<'${searchPrefix}'||hex(r.id)||':~' WHERE r.id IN (${unused})) AND ${guard.clause}`,
-                    params: [id, ...guard.params],
-                })
+                statements.push()
                 statements.push({
                     sql: `DELETE FROM site_admin_revisions WHERE id IN (${unused}) AND ${guard.clause}`,
                     params: [id, ...guard.params],

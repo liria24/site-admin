@@ -20,6 +20,8 @@ interface Client {
     batch?: (statements: Statement[]) => Promise<unknown[]>
 }
 
+const adapters = new WeakMap<object, WeakMap<object, DrizzleSiteAdminDatabase>>()
+
 /** Uses the application's Drizzle instance and its native SQLite/D1 transaction boundary. */
 export interface DrizzleSiteAdminDatabase extends SiteAdminDatabase {
     query(sql: string, params?: Primitive[]): Promise<unknown[]>
@@ -41,6 +43,8 @@ export function drizzleAdapter(
             'SITE_ADMIN_DATABASE_UNSUPPORTED',
             'Provide a Drizzle SQLite/D1 instance with a native transactional client.',
         )
+    const cached = adapters.get(client)?.get(options.schema)
+    if (cached) return cached
     const native = client
     const driver = (db.constructor as unknown as Record<symbol, string>)[entityKind]
     if (
@@ -75,7 +79,7 @@ export function drizzleAdapter(
             },
         }),
     }
-    return {
+    const adapter: DrizzleSiteAdminDatabase = {
         query: (sql, params) => queryRows(connection, sql, params),
         atomic: async (statements) => {
             try {
@@ -120,6 +124,10 @@ export function drizzleAdapter(
             }
         },
     }
+    let schemas = adapters.get(native)
+    if (!schemas) adapters.set(native, (schemas = new WeakMap()))
+    schemas.set(options.schema, adapter)
+    return adapter
 }
 
 /** Adapter-private native connection. Not part of the Core storage contract. */

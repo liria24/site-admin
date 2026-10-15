@@ -208,6 +208,7 @@ if (typeof useEntryForm !== 'function') throw new Error('form export missing')
         `import { defineNuxtConfig } from 'nuxt/config'
 export default defineNuxtConfig({
   modules: ['@liria24/site-admin/nuxt'],
+  ...{ files: false },
   i18n: { locales: ['en'], defaultLocale: 'en' },
   llms: { domain: 'http://localhost', title: 'Packed' },
 })
@@ -233,7 +234,7 @@ export default defineSiteAdminConfig({ authorization: { roles: { user: {} } }, m
     await writeFile(
         join(temporary, 'remote/nuxt.config.ts'),
         `import { defineNuxtConfig } from 'nuxt/config'
-export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], siteAdmin: { ${disabled}, client: { origin: ${JSON.stringify(remoteOrigin)} }, server: { enabled: false } } })
+export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], ...{ files: false }, siteAdmin: { ${disabled}, client: { origin: ${JSON.stringify(remoteOrigin)} }, server: { enabled: false } } })
 `,
     )
     await writeFile(
@@ -335,7 +336,7 @@ import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
 import { drizzleAdapter as authAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import * as schema from '../../schema'
 export default () => {
-  const db = drizzle('./.data/content.sqlite3', { relations: schema.authRelations })
+  const db = drizzle(${JSON.stringify(join(temporary, 'server/.data/content.sqlite3'))}, { relations: schema.authRelations })
   const database = drizzleAdapter(db, { schema })
   const authDatabase = authAdapter(db, { provider: 'sqlite', schema, usePlural: true, transaction: false })
   useServerHooks().hook('site-admin:database', (context) => { context.database = database; context.authDatabase = authDatabase })

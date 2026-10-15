@@ -44,6 +44,13 @@ const configuredModule = async (nuxt: Nuxt, name: string): Promise<ConfiguredMod
     return undefined
 }
 
+export const siteAdminModuleOptions = async (nuxt: Nuxt) => {
+    const configured = await configuredModule(nuxt, moduleMeta.name)
+    return configured?.module.getOptions
+        ? await configured.module.getOptions(configured.inline, nuxt)
+        : nuxt.options.siteAdmin
+}
+
 const topLevelFiles = (nuxt: Nuxt): { config?: unknown } | undefined =>
     (nuxt.options as typeof nuxt.options & { files?: { config?: unknown } }).files
 
@@ -57,7 +64,7 @@ const configFilename = (value: unknown, owner: string): string => {
     return value
 }
 
-/** Register a fallback before any module setups; optional dependencies never install Files by themselves. */
+/** Register the enabled Files integration and its fallback before module setup. */
 export const siteAdminFilesModuleDependencies = async (nuxt: Nuxt): Promise<ModuleDependencies> => {
     // Nuxt merges dependency defaults into config keys; preserve its explicit module opt-out.
     if ((nuxt.options as typeof nuxt.options & { files?: unknown }).files === false) return {}
@@ -67,7 +74,7 @@ export const siteAdminFilesModuleDependencies = async (nuxt: Nuxt): Promise<Modu
         : (nuxt.options as typeof nuxt.options & { siteAdmin?: { configFile?: string } }).siteAdmin
     if (ownOptions && 'enabled' in ownOptions && ownOptions.enabled === false) return {}
     const configFile = configFilename(ownOptions?.configFile ?? './site-admin.config.ts', 'Site Admin')
-    return { 'nuxt-files-sdk': { optional: true, defaults: { config: fallbackSource(nuxt, configFile) } } }
+    return { 'nuxt-files-sdk': { defaults: { config: fallbackSource(nuxt, configFile) } } }
 }
 
 /** Resolve exactly one effective Files filename, preserving explicit native inline and top-level options. */

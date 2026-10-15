@@ -6,11 +6,12 @@ export interface SiteAdminTaskOptions {
     publishDue?: boolean | string
     assetGC?: boolean | string
     syncAssets?: boolean | string
+    rebuildSearch?: boolean
 }
 
 export type SiteAdminTaskName = keyof SiteAdminTaskOptions
 
-type TaskSiteAdmin = Pick<SiteAdmin, 'publishDue' | 'runAssetGC' | 'syncAssetCopies'>
+type TaskSiteAdmin = Pick<SiteAdmin, 'publishDue' | 'runAssetGC' | 'syncAssetCopies' | 'rebuildSearch'>
 
 export interface SiteAdminTaskRuntime {
     tasks?: SiteAdminTaskOptions
@@ -32,6 +33,8 @@ export const runSiteAdminTask = async (
             return admin.publishDue()
         case 'assetGC':
             return admin.runAssetGC()
+        case 'rebuildSearch':
+            return admin.rebuildSearch()
         case 'syncAssets':
             return admin.syncAssetCopies()
     }

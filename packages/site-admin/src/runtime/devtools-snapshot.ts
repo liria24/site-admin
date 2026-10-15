@@ -32,7 +32,7 @@ export default defineEventHandler(async (event) => {
                 name,
                 {
                     ...model,
-                    localized: siteAdmin.config.models[name]?.localized ?? false,
+                    localized: Object.values(siteAdmin.config.models[name]?.fields ?? {}).some((field) => field.i18n),
                     fields: fields(model.fields),
                 },
             ]),

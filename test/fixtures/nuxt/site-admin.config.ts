@@ -55,13 +55,22 @@ export default defineSiteAdminConfig({
     },
     models: {
         links: {
-            fields: { slug: text(), destination: url({ required: true }), title: text({ required: true }) },
+            fields: {
+                slug: text({ i18n: true }),
+                destination: url({ required: true }),
+                title: text({ required: true, i18n: true }),
+            },
             publishing: false,
             route: { path: '/go/:slug', redirect: 'destination' },
         },
         posts: {
-            fields: { slug: text(), description: text(), title: text({ required: true }), body: markdown() },
-            localized: true,
+            fields: {
+                slug: text({ i18n: true }),
+                description: text({ i18n: true }),
+                title: text({ required: true, i18n: true }),
+                body: markdown({ i18n: true }),
+            },
+
             displayFields: { description: 'description', title: 'title' },
             route: '/posts/:slug',
         },

@@ -160,6 +160,7 @@ void [awaitable, title, nodes, summary, invalidSummary, transformedTitle, titleL
                     '@liria24/site-admin': [resolve('packages/site-admin/src/index.ts')],
                     '@liria24/site-admin/internal/*': [resolve('packages/site-admin/src/*')],
                     '@liria24/site-admin/internal/client': [resolve('packages/site-admin/src/client.ts')],
+                    '#app/*': [resolve('node_modules/nuxt/dist/app/*')],
                     '#app': [resolve('node_modules/nuxt/dist/app/index.d.ts')],
                     '#app/composables/asyncData': [resolve('node_modules/nuxt/dist/app/composables/asyncData.d.ts')],
                     vue: [resolve('node_modules/vue/dist/vue.d.ts')],

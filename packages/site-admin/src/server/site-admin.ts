@@ -1,6 +1,6 @@
+import { prepareTranslations } from './translations'
 import type { ComarkContent, ContentFile } from 'comark-content'
 import { createMarkdownContent } from '../markdown/content'
-import { resolveMarkdownSource } from '../markdown/assets'
 import {
     astText,
     cleanText,
@@ -11,9 +11,9 @@ import {
 } from '../markdown/document'
 import { addRoute, createRouter, findRoute, type RouterContext } from 'rou3'
 import type { SiteAdminStorage } from '../adapter'
-import { prepareUpload, safeFilename, detectedMime } from './upload'
+import { PublicProjector, readPublicSnapshot } from './public-content'
+import { AssetManager, durationMilliseconds } from './assets'
 import { resolveSiteAdminAssets } from '../assets-config'
-import type { Files } from 'files-sdk'
 
 import type {
     ModelDefinition,
@@ -25,8 +25,9 @@ import type {
 import { createSiteAdminDescriptor, type SiteAdminDescriptor } from '../descriptor'
 import { SiteAdminError, type SiteAdminIssue } from '../errors'
 import { searchQuery } from '../storage'
+import { resolveTranslation, type Translations, type TranslationInput } from '../i18n'
 import { createSiteAdminRouteResolver, serializeSiteAdminSeo, type SiteAdminRouteResolver } from '../seo'
-import type { AnyField, AssetInput, FieldRecord } from '../fields'
+import type { AnyField } from '../fields'
 import {
     applyFieldDefaults,
     collectReferences,
@@ -42,20 +43,14 @@ import type {
     StorageRevisionCandidate,
     StorageContentCommit,
     StorageCondition,
-    StorageAssetCopy,
-    StorageAssetCopyGuard,
     StorageEntryFilter,
 } from '../storage'
 import { entryPath, modelRouteOptions, routeRedirect } from './routes'
 import type {
-    AssetRecord,
-    AssetSyncResult,
-    DownloadedAsset,
     EntryInput,
     EntryRecord,
     IncomingReference,
     PublicEntry,
-    PublicEntrySeo,
     PublishDueResult,
     PublishEntryInput,
     RevisionRecord,
@@ -64,6 +59,7 @@ import type {
     SiteAdminOptions,
     UpdateEntryInput,
     UploadAssetInput,
+    AssetRecord,
 } from './types'
 
 type EntryRow = EntryRecord
@@ -79,13 +75,6 @@ interface LLMSEntry {
     href: string
     title: string
 }
-
-interface ProjectionBudget {
-    alternates?: Map<string, Array<{ locale: string; path: string }>>
-    nodes: number
-}
-
-type AssetCopy = StorageAssetCopy
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -107,19 +96,15 @@ const safeId = (value: string, label: string): string => {
 const mimeMatches = (value: string, accepted: readonly string[]): boolean =>
     accepted.some((entry) => entry === value || (entry.endsWith('/*') && value.startsWith(entry.slice(0, -1))))
 
-const durationMilliseconds = (value: number): number => {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || !Number.isFinite(value * 1000))
-        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Asset durations must be finite non-negative seconds.')
-    return value * 1000
-}
-
 export class SiteAdmin<Context = unknown> {
+    readonly #assets: AssetManager<Context>
     readonly #storage: SiteAdminStorage
     readonly diagnostics: SiteAdminDiagnostic[] = []
     readonly #options: SiteAdminOptions<Context>
     readonly #descriptor: SiteAdminDescriptor
     readonly #resolveRouteRule: SiteAdminRouteResolver
     readonly #content = new Map<string, { content: ComarkContent; generation: number }>()
+    readonly #projection: PublicProjector<Context>
     readonly #parsedContent = new Map<string, { file: ContentFile; generation: number }>()
     readonly #routes = new Map<string, { generation: number; router: RouterContext<RouteRow> }>()
     #initializer: Promise<void> | undefined
@@ -157,6 +142,13 @@ export class SiteAdmin<Context = unknown> {
         if (Object.hasOwn(options.config.authorization?.roles ?? {}, 'admin'))
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'The built-in admin role cannot be overridden.')
         this.#options = options
+        this.#projection = new PublicProjector(options)
+        this.#assets = new AssetManager(
+            options,
+            this.#storage,
+            () => this.initialize(),
+            (ids) => this.#publishedAssetIds(ids),
+        )
         this.#resolveRouteRule = createSiteAdminRouteResolver(options.config.routeRules)
         this.#descriptor = createSiteAdminDescriptor(options.config)
     }
@@ -166,7 +158,17 @@ export class SiteAdmin<Context = unknown> {
     }
 
     get descriptor(): SiteAdminDescriptor {
-        return structuredClone(this.#descriptor)
+        return {
+            ...structuredClone(this.#descriptor),
+            ...(this.#options.locales?.defaultLocale
+                ? {
+                      i18n: {
+                          defaultLocale: this.#options.locales.defaultLocale,
+                          locales: [...(this.#options.locales.supported ?? [])],
+                      },
+                  }
+                : {}),
+        }
     }
 
     descriptorFor(actor: import('./types').SiteAdminActor): SiteAdminDescriptor {
@@ -240,7 +242,7 @@ export class SiteAdmin<Context = unknown> {
                 'Migrate existing Asset copies before changing the storage mode.',
             )
         if (assets?.separateDrafts === true) {
-            await this.#assetStores()
+            await this.#assets.assertStores()
             if (await this.#storage.hasLegacyAssetOriginals())
                 throw new SiteAdminError(
                     'SITE_ADMIN_MIGRATION_REQUIRED',
@@ -251,7 +253,7 @@ export class SiteAdmin<Context = unknown> {
 
         await this.#reconcileRoutes()
         if (assets?.separateDrafts === true) {
-            const sync = await this.#syncAssetCopies()
+            const sync = await this.#assets.sync()
             if (sync.failed.length)
                 this.diagnostics.push({
                     code: 'SITE_ADMIN_ASSET_SYNC_FAILED',
@@ -269,6 +271,8 @@ export class SiteAdmin<Context = unknown> {
             for (const [fieldName, field] of Object.entries(definition.fields)) {
                 safeId(fieldName, `Field name in model "${modelName}"`)
                 this.#validateFieldConfig(field)
+                if (field.i18n && !this.#options.locales?.supported?.length)
+                    throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Enable i18n before using translated fields.')
             }
             const route = modelRouteOptions(definition)
             if (route?.redirect) {
@@ -294,7 +298,9 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    #validateFieldConfig(field: AnyField): void {
+    #validateFieldConfig(field: AnyField, nested = false): void {
+        if (nested && field.i18n)
+            throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Only top-level fields can be translated.')
         if (field.kind === 'relation' && !Object.hasOwn(this.config.models, field.model)) {
             throw new SiteAdminError(
                 'SITE_ADMIN_INVALID_INPUT',
@@ -304,10 +310,10 @@ export class SiteAdmin<Context = unknown> {
         if (field.kind === 'object') {
             for (const [name, child] of Object.entries(field.fields)) {
                 safeId(name, 'Nested field name')
-                this.#validateFieldConfig(child)
+                this.#validateFieldConfig(child, true)
             }
         }
-        if (field.kind === 'array') this.#validateFieldConfig(field.item)
+        if (field.kind === 'array') this.#validateFieldConfig(field.item, true)
     }
 
     #model(name: string): ModelDefinition {
@@ -322,7 +328,10 @@ export class SiteAdmin<Context = unknown> {
     }
 
     #locale(definition: ModelDefinition, locale?: string): string {
-        if (!definition.localized) return ''
+        if (!this.#options.locales?.supported?.length) {
+            if (locale) throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'i18n is disabled.')
+            return ''
+        }
         const normalized = locale || this.#options.locales?.defaultLocale
         if (!normalized) {
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'A locale is required for localized content.')
@@ -333,25 +342,37 @@ export class SiteAdmin<Context = unknown> {
         return normalized
     }
 
+    #readLocale(definition: ModelDefinition, locale?: string): string | undefined {
+        return locale === undefined ? undefined : this.#locale(definition, locale)
+    }
+
     #localizedPath(definition: ModelDefinition, path: string, locale: string): string {
-        return definition.localized && this.#options.locales?.localizePath
-            ? this.#options.locales.localizePath(path, locale)
-            : path
+        return this.#options.locales?.localizePath ? this.#options.locales.localizePath(path, locale) : path
     }
 
     #entryRow(id: string): Promise<EntryRecord | undefined> {
         return this.#storage.readEntry(id)
     }
 
-    async #requiredEntry(id: string): Promise<EntryRow> {
+    async #requiredEntry(id: string, loaded?: EntryRecord): Promise<EntryRow> {
+        if (loaded) {
+            if (loaded.id !== id)
+                throw new SiteAdminError(
+                    'SITE_ADMIN_INVALID_INPUT',
+                    'The loaded entry does not match the requested ID.',
+                )
+            return loaded
+        }
         const row = await this.#entryRow(id)
         if (!row) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `Entry "${id}" does not exist.`)
         return row
     }
 
-    async getEntry(id: string): Promise<EntryRecord> {
+    async getEntry(id: string, locale?: string): Promise<EntryRecord> {
         await this.initialize()
-        return this.#requiredEntry(id)
+        const entry = await this.#requiredEntry(id)
+        if (locale) this.#locale(this.#model(entry.model), locale)
+        return resolveTranslation(entry, locale)
     }
 
     async listEntries(modelName?: string): Promise<EntryRecord[]> {
@@ -367,12 +388,13 @@ export class SiteAdmin<Context = unknown> {
         searchQuery(filter.q)
         await this.initialize()
         for (const model of filter.models ?? []) this.#model(model)
-        return this.#storage.pageEntries(filter, page)
+        const result = await this.#storage.pageEntries(filter, page)
+        return { ...result, items: result.items.map((entry) => resolveTranslation(entry, filter.locale)) }
     }
 
-    async listRevisions(entryId: string): Promise<RevisionRecord[]> {
+    async listRevisions(entryId: string, loaded?: EntryRecord): Promise<RevisionRecord[]> {
         await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
+        const entry = await this.#requiredEntry(entryId, loaded)
         this.#assertFeature(entry.model, 'revisions')
         return this.#storage.revisions(entryId)
     }
@@ -380,9 +402,10 @@ export class SiteAdmin<Context = unknown> {
     async referencesTo(
         entryId: string,
         options: { field?: string; from?: string; view: 'current' | 'published' },
+        loaded?: EntryRecord,
     ): Promise<IncomingReference[]> {
         await this.initialize()
-        await this.#requiredEntry(entryId)
+        await this.#requiredEntry(entryId, loaded)
         if (options.from) this.#model(options.from)
         if (options.view !== 'current' && options.view !== 'published')
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'view must be current or published.')
@@ -393,51 +416,33 @@ export class SiteAdmin<Context = unknown> {
         entryId: string,
         revisionId: string,
         input: { actorId?: string; expectedVersion: number },
+        loaded?: EntryRecord,
     ): Promise<EntryRecord> {
         await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
-        const definition = this.#model(entry.model)
+        const entry = await this.#requiredEntry(entryId, loaded)
         this.#assertFeature(entry.model, 'revisions')
         const revision = await this.#revision(revisionId, entryId)
-        const prepared = await this.#prepareRevision(definition, revision)
-        const restoredRevisionId = this.#id()
-        const time = this.#now()
-        await this.#commit({
-            conditions: [
-                this.#guard(entryId, input.expectedVersion),
-                ...this.#referenceGuard(definition, prepared, false),
-            ],
-            revisions: [
-                this.#revisionCandidate({
-                    ...(input.actorId ? { actorId: input.actorId } : {}),
-                    ...prepared,
-                    entryId,
-                    model: entry.model,
-                    revisionId: restoredRevisionId,
-
-                    time,
-                }),
-            ],
-            updates: [{ id: entryId, patch: { currentRevisionId: restoredRevisionId, updatedAt: time } }],
-        })
-
-        await this.#afterCommit({
-            ...(input.actorId ? { actorId: input.actorId } : {}),
-            entryId,
-            model: entry.model,
-            revisionId: restoredRevisionId,
-            type: 'restore',
-        })
-        return this.getEntry(entryId)
+        return this.#updateEntry(
+            entry,
+            {
+                ...input,
+                data: projectStoredFields(this.#model(entry.model).fields, revision.data),
+                translations: {
+                    ...Object.fromEntries(Object.keys(entry.translations).map((locale) => [locale, null])),
+                    ...revision.translations,
+                },
+            },
+            'restore',
+        )
     }
 
-    async pruneRevisions(entryId: string, retain: number): Promise<{ deleted: string[] }> {
+    async pruneRevisions(entryId: string, retain: number, loaded?: EntryRecord): Promise<{ deleted: string[] }> {
         await this.initialize()
-        await this.#requiredEntry(entryId)
+        await this.#requiredEntry(entryId, loaded)
         if (!Number.isInteger(retain) || retain < 0) {
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"retain" must be a non-negative integer.')
         }
-        this.#assertFeature((await this.#requiredEntry(entryId)).model, 'revisions')
+        this.#assertFeature((await this.#requiredEntry(entryId, loaded)).model, 'revisions')
         const candidates = (await this.#storage.revisionIds(entryId)).slice(retain)
         return { deleted: await this.#storage.pruneRevisions(entryId, candidates) }
     }
@@ -463,12 +468,36 @@ export class SiteAdmin<Context = unknown> {
         return { data: validated.data, ...references }
     }
 
-    async #prepareRevision(
+    async #prepareSnapshot(
         definition: ModelDefinition,
-        revision: RevisionRow,
-    ): Promise<{ assets: IndexedReference[]; data: Record<string, unknown>; relations: IndexedReference[] }> {
+        data: Record<string, unknown>,
+        defaultLocale: string,
+        input: TranslationInput = {},
+        previous: Translations = {},
+        defaults = false,
+    ) {
+        const original = await this.#prepareData(definition, data, defaults)
+        const translations = await prepareTranslations(
+            definition,
+            original.data,
+            defaultLocale,
+            this.#options.locales?.supported ?? [],
+            input,
+            previous,
+        )
+        const assets = original.assets.map((ref) => ({ ...ref, locale: defaultLocale }))
+        const relations = original.relations.map((ref) => ({ ...ref, locale: defaultLocale }))
+        for (const [locale, override] of Object.entries(translations)) {
+            const prepared = await this.#prepareData(definition, { ...original.data, ...override }, false)
+            assets.push(...prepared.assets.map((ref) => ({ ...ref, locale })))
+            relations.push(...prepared.relations.map((ref) => ({ ...ref, locale })))
+        }
+        return { data: original.data, translations, assets, relations }
+    }
+
+    async #prepareRevision(definition: ModelDefinition, revision: RevisionRow, defaultLocale: string) {
         const stored = projectStoredFields(definition.fields, revision.data)
-        const prepared = await this.#prepareData(definition, stored, false)
+        const prepared = await this.#prepareSnapshot(definition, stored, defaultLocale, revision.translations)
         if (stableJson(prepared.data) !== stableJson(stored)) {
             throw new SiteAdminError(
                 'SITE_ADMIN_SCHEMA_MIGRATION_REQUIRED',
@@ -557,6 +586,7 @@ export class SiteAdmin<Context = unknown> {
 
     #revisionCandidate(input: {
         actorId?: string
+        translations?: Translations
         assets: IndexedReference[]
         data: Record<string, unknown>
         entryId: string
@@ -572,7 +602,7 @@ export class SiteAdmin<Context = unknown> {
             actorId: input.actorId ?? null,
             createdAt: input.time,
             data: input.data,
-
+            translations: input.translations ?? {},
             model: input.model,
             assets: input.assets,
             relations: input.relations.map((reference) => {
@@ -582,11 +612,39 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    async #currentRoute(entryId: string): Promise<RouteRow | undefined> {
-        return (await this.#storage.routes({ entryId, kinds: ['page', 'redirect'] }))[0]
+    async #currentRoute(entryId: string, locale: string): Promise<RouteRow | undefined> {
+        return (await this.#storage.routes({ entryId, kinds: ['page', 'redirect'], locales: [locale] }))[0]
     }
 
     async #routeChanges(input: {
+        data: Record<string, unknown>
+        translations?: Translations
+        definition: ModelDefinition
+        entryId: string
+        modelName: string
+        locale: string
+        revisionId: string
+        time: string
+    }): Promise<StorageRouteChange[]> {
+        const translations = input.translations ?? {}
+        const locales = [input.locale, ...Object.keys(translations)]
+        const changes: StorageRouteChange[] = []
+        const previous = await this.#storage.routes({ entryId: input.entryId, kinds: ['page', 'redirect'] })
+        for (const route of previous)
+            if (!locales.includes(route.locale))
+                changes.push({ kind: 'remove', entryId: input.entryId, locale: route.locale })
+        for (const locale of locales)
+            changes.push(
+                ...(await this.#localeRouteChanges({
+                    ...input,
+                    locale,
+                    data: { ...input.data, ...translations[locale] },
+                })),
+            )
+        return changes
+    }
+
+    async #localeRouteChanges(input: {
         data: Record<string, unknown>
         definition: ModelDefinition
         entryId: string
@@ -597,7 +655,7 @@ export class SiteAdmin<Context = unknown> {
         time: string
     }): Promise<StorageRouteChange[]> {
         const redirect = routeRedirect(input.definition, input.data)
-        const current = await this.#currentRoute(input.entryId)
+        const current = await this.#currentRoute(input.entryId, input.locale)
         const basePath =
             this.#options.routing?.enabled === false ||
             (redirect && this.#options.routing?.redirects === false) ||
@@ -612,8 +670,8 @@ export class SiteAdmin<Context = unknown> {
         const path = basePath === null ? null : this.#localizedPath(input.definition, basePath, input.locale)
         const status = this.config.modelDefaults?.historicalRedirectStatus ?? 301
         const changes: StorageRouteChange[] = [
-            { kind: 'retargetHistory', entryId: input.entryId, path, status },
-            { kind: 'remove', entryId: input.entryId, kinds: ['page', 'redirect'] },
+            { kind: 'retargetHistory', entryId: input.entryId, path, status, locale: input.locale },
+            { kind: 'remove', entryId: input.entryId, kinds: ['page', 'redirect'], locale: input.locale },
         ]
         if (!path) return changes
         changes.push({ kind: 'remove', entryId: input.entryId, path })
@@ -699,6 +757,7 @@ export class SiteAdmin<Context = unknown> {
                 statements.push(
                     ...(await this.#routeChanges({
                         data,
+                        translations: row.translations,
                         definition,
                         entryId: row.id,
                         locale: row.locale,
@@ -742,7 +801,14 @@ export class SiteAdmin<Context = unknown> {
     }
 
     async #afterCommit(event: SiteAdminLifecycleEvent, publicGraphChanged = false): Promise<void> {
-        const result = publicGraphChanged ? await this.#syncAssetCopies() : { copied: [], deleted: [], failed: [] }
+        let failed = false
+        if (publicGraphChanged) {
+            try {
+                failed = (await this.#assets.sync()).failed.length > 0
+            } catch {
+                failed = true
+            }
+        }
         if (this.#options.afterCommit) {
             try {
                 await this.#options.afterCommit(event)
@@ -753,23 +819,29 @@ export class SiteAdmin<Context = unknown> {
                 })
             }
         }
-        this.#assertAssetSync(result)
-    }
-
-    #assertAssetSync(result: AssetSyncResult): void {
-        if (result.failed.length)
-            throw new SiteAdminError(
+        if (failed) {
+            const error = new SiteAdminError(
                 'SITE_ADMIN_STORAGE_UNAVAILABLE',
-                'The entry was saved, but Asset copies need retry through publishDue or Asset GC.',
+                'The entry was saved; retry Asset synchronization only.',
             )
+            error.committed = true
+            error.receipt = {
+                id: event.entryId,
+                model: event.model,
+                version: event.version!,
+                ...(event.type === 'delete' ? { deleted: true } : {}),
+            }
+            error.effects = { assets: 'pending' }
+            throw error
+        }
     }
 
     async createEntry(modelName: string, input: EntryInput): Promise<EntryRecord> {
         await this.initialize()
         const definition = this.#model(modelName)
-        const locale = this.#locale(definition, input.locale)
+        const locale = this.#locale(definition, input.defaultLocale)
         const id = safeId(input.id ?? this.#id(), 'Entry ID')
-        const prepared = await this.#prepareData(definition, input.data, true)
+        const prepared = await this.#prepareSnapshot(definition, input.data, locale, input.translations, {}, true)
         const revisionId = this.#id()
         const time = this.#now()
         const published = definition.publishing === false
@@ -780,8 +852,7 @@ export class SiteAdmin<Context = unknown> {
             create: {
                 id,
                 model: modelName,
-                locale,
-                translationGroup: input.translationGroup ?? id,
+                defaultLocale: locale,
                 sortOrder: input.sortOrder ?? null,
                 version: 1,
                 createdAt: time,
@@ -806,6 +877,7 @@ export class SiteAdmin<Context = unknown> {
             routes: published
                 ? await this.#routeChanges({
                       data: prepared.data,
+                      translations: prepared.translations,
                       definition,
                       entryId: id,
                       modelName,
@@ -824,17 +896,29 @@ export class SiteAdmin<Context = unknown> {
                 model: modelName,
                 revisionId,
                 type: 'create',
+                version: 1,
             },
             publicGraphChanged,
         )
         return this.getEntry(id)
     }
 
-    async updateEntry(entryId: string, input: UpdateEntryInput): Promise<EntryRecord> {
+    async updateEntry(entryId: string, input: UpdateEntryInput, loaded?: EntryRecord): Promise<EntryRecord> {
         await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
+        const entry = await this.#requiredEntry(entryId, loaded)
+        return this.#updateEntry(entry, input, 'update')
+    }
+
+    async #updateEntry(entry: EntryRecord, input: UpdateEntryInput, type: 'update' | 'restore'): Promise<EntryRecord> {
+        const entryId = entry.id
         const definition = this.#model(entry.model)
-        const prepared = await this.#prepareData(definition, input.data, false)
+        const prepared = await this.#prepareSnapshot(
+            definition,
+            { ...projectStoredFields(definition.fields, entry.data), ...input.data },
+            entry.defaultLocale,
+            input.translations,
+            entry.translations,
+        )
         const revisionId = this.#id(),
             time = this.#now(),
             published = definition.publishing === false
@@ -859,10 +943,11 @@ export class SiteAdmin<Context = unknown> {
             routes: published
                 ? await this.#routeChanges({
                       data: prepared.data,
+                      translations: prepared.translations,
                       definition,
                       entryId,
                       modelName: entry.model,
-                      locale: entry.locale,
+                      locale: entry.defaultLocale,
                       revisionId,
 
                       time,
@@ -886,7 +971,8 @@ export class SiteAdmin<Context = unknown> {
                 entryId,
                 model: entry.model,
                 revisionId,
-                type: 'update',
+                type,
+                version: input.expectedVersion + 1,
             },
             publicGraphChanged,
         )
@@ -923,7 +1009,7 @@ export class SiteAdmin<Context = unknown> {
         const budget = { nodes: 1 }
         for (const reference of references) {
             const target = graph.get(reference.id)
-            if (target) this.#projectPublished(target, graph, new Set([entryId]), budget)
+            if (target) this.#projection.project(target, graph, new Set([entryId]), budget)
         }
     }
 
@@ -931,15 +1017,26 @@ export class SiteAdmin<Context = unknown> {
         const definition = this.#model(entry.model)
         if (input.draft !== undefined && input.revisionId !== undefined)
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'draft and revisionId are mutually exclusive.')
-        if (input.draft !== undefined && (!isObject(input.draft) || !isObject(input.draft.data)))
+        if (
+            input.draft !== undefined &&
+            (!isObject(input.draft) ||
+                (input.draft.data !== undefined && !isObject(input.draft.data)) ||
+                (!Object.hasOwn(input.draft, 'data') && !Object.hasOwn(input.draft, 'translations')))
+        )
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Publish draft must contain data.')
         const revision = input.draft
             ? undefined
             : await this.#revision(input.revisionId ?? entry.currentRevisionId, entry.id)
         const prepared = input.draft
-            ? await this.#prepareData(definition, input.draft.data, false)
+            ? await this.#prepareSnapshot(
+                  definition,
+                  { ...projectStoredFields(definition.fields, entry.data), ...input.draft.data },
+                  entry.defaultLocale,
+                  input.draft.translations,
+                  entry.translations,
+              )
             : publishing
-              ? await this.#prepareRevision(definition, revision!)
+              ? await this.#prepareRevision(definition, revision!, entry.defaultLocale)
               : undefined
         const revisionId = revision?.id ?? this.#id()
         if (publishing) await this.#assertPublishableRelations(definition, prepared!.relations, entry.id)
@@ -971,14 +1068,16 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    async publishEntry(entryId: string, input: PublishEntryInput): Promise<EntryRecord> {
-        this.#assertFeature((await this.getEntry(entryId)).model, 'publishing')
-        return this.#publishEntry(entryId, input, true)
+    async publishEntry(entryId: string, input: PublishEntryInput, loaded?: EntryRecord): Promise<EntryRecord> {
+        await this.initialize()
+        const entry = await this.#requiredEntry(entryId, loaded)
+        this.#assertFeature(entry.model, 'publishing')
+        return this.#publishEntry(entry, input, true)
     }
 
-    async #publishEntry(entryId: string, input: PublishEntryInput, synchronize: boolean): Promise<EntryRecord> {
+    async #publishEntry(entry: EntryRecord, input: PublishEntryInput, synchronize: boolean): Promise<EntryRecord> {
         await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
+        const entryId = entry.id
         const candidate = await this.#publicationCandidate(entry, input, true)
         const { definition, prepared, revisionId, time, conditions, revisions } = candidate
         await this.#commit({
@@ -986,6 +1085,7 @@ export class SiteAdmin<Context = unknown> {
             revisions,
             routes: await this.#routeChanges({
                 data: prepared!.data,
+                translations: prepared!.translations,
                 definition,
                 entryId,
                 modelName: entry.model,
@@ -1016,6 +1116,7 @@ export class SiteAdmin<Context = unknown> {
                 model: entry.model,
                 revisionId,
                 type: 'publish',
+                version: input.expectedVersion + 1,
             },
             synchronize && definition.public !== false,
         )
@@ -1052,9 +1153,13 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    async unpublishEntry(entryId: string, input: { actorId?: string; expectedVersion: number }): Promise<EntryRecord> {
+    async unpublishEntry(
+        entryId: string,
+        input: { actorId?: string; expectedVersion: number },
+        loaded?: EntryRecord,
+    ): Promise<EntryRecord> {
         await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
+        const entry = await this.#requiredEntry(entryId, loaded)
         this.#assertFeature(entry.model, 'publishing')
         await this.#assertCanUnpublish(entryId)
         const publicGraphChanged = Boolean(this.#publicModel(entry.model) && entry.publishedRevisionId)
@@ -1076,15 +1181,25 @@ export class SiteAdmin<Context = unknown> {
             ],
         })
         await this.#afterCommit(
-            { ...(input.actorId ? { actorId: input.actorId } : {}), entryId, model: entry.model, type: 'unpublish' },
+            {
+                ...(input.actorId ? { actorId: input.actorId } : {}),
+                entryId,
+                model: entry.model,
+                version: input.expectedVersion + 1,
+                type: 'unpublish',
+            },
             publicGraphChanged,
         )
         return this.getEntry(entryId)
     }
 
-    async schedulePublish(entryId: string, input: PublishEntryInput & { at: Date | string }): Promise<EntryRecord> {
+    async schedulePublish(
+        entryId: string,
+        input: PublishEntryInput & { at: Date | string },
+        loaded?: EntryRecord,
+    ): Promise<EntryRecord> {
         await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
+        const entry = await this.#requiredEntry(entryId, loaded)
         this.#assertFeature(entry.model, 'scheduling')
         const at = input.at instanceof Date ? input.at : new Date(input.at)
         if (!Number.isFinite(at.getTime()) || at.getTime() <= this.#date().getTime())
@@ -1118,13 +1233,18 @@ export class SiteAdmin<Context = unknown> {
             model: entry.model,
             revisionId,
             type: 'schedule',
+            version: input.expectedVersion + 1,
         })
         return this.getEntry(entryId)
     }
 
-    async cancelScheduledPublish(entryId: string, input: { expectedVersion: number }): Promise<EntryRecord> {
+    async cancelScheduledPublish(
+        entryId: string,
+        input: { expectedVersion: number },
+        loaded?: EntryRecord,
+    ): Promise<EntryRecord> {
         await this.initialize()
-        this.#assertFeature((await this.#requiredEntry(entryId)).model, 'scheduling')
+        this.#assertFeature((await this.#requiredEntry(entryId, loaded)).model, 'scheduling')
         await this.#commit({
             conditions: [this.#guard(entryId, input.expectedVersion)],
             updates: [{ id: entryId, patch: { scheduledRevisionId: null, scheduledAt: null, updatedAt: this.#now() } }],
@@ -1141,7 +1261,7 @@ export class SiteAdmin<Context = unknown> {
             try {
                 this.#assertFeature((await this.#requiredEntry(entry.id)).model, 'scheduling')
                 await this.#publishEntry(
-                    entry.id,
+                    await this.#requiredEntry(entry.id),
                     {
                         expectedVersion: Number(entry.version),
                         revisionId: entry.revisionId,
@@ -1156,7 +1276,7 @@ export class SiteAdmin<Context = unknown> {
                 })
             }
         }
-        if (this.config.assets?.separateDrafts === true) result.assets = await this.#syncAssetCopies()
+        if (this.config.assets?.separateDrafts === true) result.assets = await this.#assets.sync()
         return result
     }
 
@@ -1212,9 +1332,13 @@ export class SiteAdmin<Context = unknown> {
         return Promise.all(items.map((item) => this.getEntry(item.id)))
     }
 
-    async deleteEntry(entryId: string, input: { actorId?: string; expectedVersion: number }): Promise<void> {
+    async deleteEntry(
+        entryId: string,
+        input: { actorId?: string; expectedVersion: number },
+        loaded?: EntryRecord,
+    ): Promise<void> {
         await this.initialize()
-        const entry = await this.#requiredEntry(entryId)
+        const entry = await this.#requiredEntry(entryId, loaded)
         const publicGraphChanged = Boolean(this.#publicModel(entry.model) && entry.publishedRevisionId)
         if (await this.#storage.hasRetainedRelations(entryId))
             throw new SiteAdminError('SITE_ADMIN_RELATION_BLOCKED', 'Retained revisions still reference this entry.')
@@ -1225,7 +1349,13 @@ export class SiteAdmin<Context = unknown> {
             publicGeneration: publicGraphChanged,
         })
         await this.#afterCommit(
-            { ...(input.actorId ? { actorId: input.actorId } : {}), entryId, model: entry.model, type: 'delete' },
+            {
+                ...(input.actorId ? { actorId: input.actorId } : {}),
+                entryId,
+                model: entry.model,
+                version: input.expectedVersion + 1,
+                type: 'delete',
+            },
             publicGraphChanged,
         )
     }
@@ -1256,7 +1386,11 @@ export class SiteAdmin<Context = unknown> {
         })
     }
 
-    async #publicSnapshot(roots: PublishedRow[]): Promise<Map<string, PublishedRow>> {
+    async #publicSnapshot(
+        roots: PublishedRow[],
+        requestedLocale?: string,
+        indexed?: Map<string, ReturnType<typeof collectReferences>>,
+    ): Promise<Map<string, PublishedRow>> {
         const candidates = new Map<string, PublishedRow>()
         const references = new Map<string, ReturnType<typeof collectReferences>>()
         const assetIds = new Set<string>()
@@ -1275,14 +1409,16 @@ export class SiteAdmin<Context = unknown> {
                 const stored = projectStoredFields(definition.fields, row.data)
                 const validated = await validateModelData(definition, stored)
                 if (!validated.data || stableJson(validated.data) !== stableJson(stored)) continue
-                const found = collectReferences(definition.fields, stored)
+                const found = indexed?.get(row.id) ?? collectReferences(definition.fields, stored)
                 candidates.set(row.id, row)
                 references.set(row.id, found)
                 for (const reference of found.relations) if (!candidates.has(reference.id)) nextIds.add(reference.id)
                 for (const reference of found.assets) assetIds.add(reference.id)
             }
             if (nextIds.size === 0) break
-            frontier = await this.#publishedRows(undefined, [...nextIds])
+            frontier = (await this.#publishedRows(undefined, [...nextIds], requestedLocale)).map((row) =>
+                resolveTranslation(row, requestedLocale ?? roots[0]?.locale),
+            )
         }
         const readyAssets = new Set<string>()
         if (assetIds.size > 0) {
@@ -1310,225 +1446,80 @@ export class SiteAdmin<Context = unknown> {
         return candidates
     }
 
-    async #publicEntryGraph(roots: PublishedRow[]): Promise<Map<string, PublishedRow>> {
-        const groups = new Map<string, Set<string>>()
-        for (const row of roots) {
-            if (!this.#publicModel(row.model)?.localized) continue
-            const modelGroups = groups.get(row.model) ?? new Set<string>()
-            modelGroups.add(row.translationGroup)
-            groups.set(row.model, modelGroups)
-        }
-        const rows = new Map(roots.map((row) => [row.id, row]))
-        for (const [model, translationGroups] of groups) {
-            const alternates = await this.#storage.published({ model, translationGroups: [...translationGroups] })
-            for (const row of alternates) rows.set(row.id, row)
-        }
-
-        return this.#publicSnapshot([...rows.values()])
-    }
-
-    #publishedPath(row: PublishedRow): string | null {
-        const definition = this.#publicModel(row.model)
-        if (!definition) return null
-        const redirect = routeRedirect(definition, row.data)
-        const basePath =
-            this.#options.routing?.enabled === false || (redirect && this.#options.routing?.redirects === false)
-                ? null
-                : entryPath(row.model, definition, row, this.#apiBases())
-        return basePath === null ? null : this.#localizedPath(definition, basePath, row.locale)
-    }
-
-    #seoUrl(value: string): string | undefined {
-        try {
-            const url = new URL(value, this.#options.site?.url ?? 'http://site-admin.local')
-            if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
-            return this.#options.site?.url || /^[a-z][a-z\d+.-]*:/iu.test(value) ? url.href : value
-        } catch {
-            return undefined
-        }
-    }
-
-    #entrySeo(definition: ModelDefinition, entry: PublicEntry): PublicEntrySeo {
-        const model = typeof definition.seo === 'function' ? definition.seo(structuredClone(entry)) : definition.seo
-        const result = serializeSiteAdminSeo(model)
-        const text = (keys: Array<string | undefined>): string | undefined =>
-            keys
-                .map((key) => (key && typeof entry.data[key] === 'string' ? cleanText(entry.data[key]) : ''))
-                .find(Boolean)
-        const title = text([definition.displayFields?.title, 'title', 'name'])
-        const description = entryDescription(definition, entry.data).text
-        if (title !== undefined) result.title = title
-        if (description !== undefined) result.description = description
-        if (entry.path) result.canonical = entry.path
-        if (entry.alternates) result.alternates = entry.alternates
-        if (result.image !== false && !isObject(result.image)) {
-            const imageKeys = [
-                definition.displayFields?.image,
-                ...Object.entries(definition.fields)
-                    .filter(([, field]) => field.kind === 'image' || field.kind === 'images')
-                    .map(([name]) => name),
-            ]
-            for (const key of imageKeys) {
-                const value = key ? entry.data[key] : undefined
-                const image = Array.isArray(value) ? value[0] : value
-                if (isObject(image) && typeof image.url === 'string') {
-                    result.image = image.url
-                    break
-                }
+    async #publicEntryGraph(roots: PublishedRow[], requestedLocale?: string): Promise<Map<string, PublishedRow>> {
+        const graph = await this.#publicSnapshot(roots, requestedLocale)
+        const candidates = [...graph.values()]
+        const metadata = this.#options.locales?.supported?.length
+            ? await this.#storage.publicTranslations([...graph.keys()])
+            : []
+        for (const row of candidates) {
+            const routes = metadata.filter((value) => value.entryId === row.id)
+            row.translations = {
+                ...Object.fromEntries(routes.map((value) => [value.locale, value.data])),
+                ...row.translations,
             }
         }
-        if (typeof result.image === 'string') {
-            const image = this.#seoUrl(result.image)
-            if (image === undefined) delete result.image
-            else result.image = image
+        for (const row of candidates) this.#projection.availableLocales.set(row, new Set())
+        const locales = new Set(candidates.flatMap((row) => [row.defaultLocale, ...Object.keys(row.translations)]))
+        for (const locale of locales) {
+            const variants = candidates.filter(
+                (row) => row.defaultLocale === locale || Object.hasOwn(row.translations, locale),
+            )
+            const indexed = new Map(
+                metadata
+                    .filter((value) => value.locale === locale)
+                    .map((value) => [
+                        value.entryId,
+                        {
+                            assets: value.assets.filter((ref) =>
+                                fieldAtPath(this.config.models[graph.get(value.entryId)!.model]!.fields, ref.path),
+                            ),
+                            relations: value.relations.filter((ref) =>
+                                fieldAtPath(this.config.models[graph.get(value.entryId)!.model]!.fields, ref.path),
+                            ),
+                        },
+                    ]),
+            )
+            const safe = await this.#publicSnapshot(
+                variants.map((row) => resolveTranslation(row, locale)),
+                locale,
+                indexed,
+            )
+            for (const row of variants) if (safe.has(row.id)) this.#projection.availableLocales.get(row)!.add(locale)
         }
-        if (result.canonical !== undefined) {
-            const canonical = this.#seoUrl(result.canonical)
-            if (canonical === undefined) delete result.canonical
-            else result.canonical = canonical
-        }
-        if (result.alternates)
-            result.alternates = result.alternates.flatMap((alternate) => {
-                const path = this.#seoUrl(alternate.path)
-                return path ? [{ locale: alternate.locale, path }] : []
-            })
-        return result
+        return graph
     }
 
-    #assetUrl(id: string): string {
-        return `${this.#publicBase()}/_assets/${encodeURIComponent(id)}`
-    }
-
-    #publicAsset(value: AssetInput): Record<string, unknown> {
-        const reference = typeof value === 'string' ? { id: value } : { ...value }
-        return {
-            ...reference,
-            url: this.#assetUrl(reference.id),
-        }
-    }
-
-    #hydrateField(
-        field: AnyField,
-        value: unknown,
-        graph: Map<string, PublishedRow>,
-        trail: Set<string>,
-        budget: ProjectionBudget,
-        markdownSource: boolean,
-    ): unknown {
-        if (value === undefined || value === null) return value
-        switch (field.kind) {
-            case 'relation': {
-                if (typeof value !== 'string') return null
-                const target = graph.get(value)
-                if (!target) return null
-                // Related entries remain public projections; markdown-fields only parses this model's schema.
-                return this.#projectPublished(target, graph, trail, budget)
-            }
-            case 'file':
-            case 'image':
-                return this.#publicAsset(value as AssetInput)
-            case 'images':
-                return Array.isArray(value) ? value.map((item) => this.#publicAsset(item as AssetInput)) : []
-            case 'object':
-                return this.#hydrateFields(
-                    field.fields,
-                    typeof value === 'object' && value !== null && !Array.isArray(value)
-                        ? (value as Record<string, unknown>)
-                        : {},
-                    graph,
-                    trail,
-                    budget,
-                    markdownSource,
-                )
-            case 'array':
-                return Array.isArray(value)
-                    ? value.map((item) => this.#hydrateField(field.item, item, graph, trail, budget, markdownSource))
-                    : []
-            case 'markdown':
-                return typeof value === 'string' && !markdownSource
-                    ? resolveMarkdownSource(value, (id) => this.#assetUrl(id))
-                    : value
-            default:
-                return value
-        }
-    }
-
-    #hydrateFields(
-        fields: FieldRecord,
-        data: Record<string, unknown>,
-        graph: Map<string, PublishedRow>,
-        trail: Set<string>,
-        budget: ProjectionBudget,
-        markdownSource: boolean,
-    ): Record<string, unknown> {
-        return Object.fromEntries(
-            Object.entries(fields).map(([name, field]) => [
-                name,
-                this.#hydrateField(field, data[name], graph, trail, budget, markdownSource),
-            ]),
-        )
-    }
-
-    #projectPublished(
-        row: PublishedRow,
-        graph: Map<string, PublishedRow>,
-        parentTrail = new Set<string>(),
-        budget: ProjectionBudget = { nodes: 0 },
+    async #projectRoots(
+        rows: PublishedRow[],
+        requestedLocale?: string,
         markdownSource = false,
-    ): PublicEntry {
-        if (parentTrail.size > 16 || ++budget.nodes > 10_000)
-            throw new SiteAdminError(
-                'SITE_ADMIN_RELATION_LIMIT',
-                'Public relations exceed depth 16 or 10,000 projected nodes.',
-            )
-        const definition = this.#publicModel(row.model)
-        if (!definition) throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${row.model}" is private.`)
-        const path = this.#publishedPath(row)
-        if (parentTrail.has(row.id)) {
-            return {
-                data: {},
-                id: row.id,
-                locale: row.locale,
-                model: row.model,
-                path,
-                publishedAt: row.publishedAt,
-                revisionId: row.revisionId,
-            }
+    ): Promise<PublicEntry[]> {
+        const groups = new Map<string, PublishedRow[]>()
+        for (const row of rows) {
+            const group = groups.get(row.locale) ?? []
+            group.push(row)
+            groups.set(row.locale, group)
         }
-        const trail = new Set(parentTrail).add(row.id)
-        const entry: PublicEntry = {
-            data: this.#hydrateFields(definition.fields, row.data, graph, trail, budget, markdownSource),
-            id: row.id,
-            locale: row.locale,
-            model: row.model,
-            path,
-            publishedAt: row.publishedAt,
-            revisionId: row.revisionId,
+        const projected = new Map<string, PublicEntry>()
+        const budget = { nodes: 0 }
+        for (const [locale, roots] of groups) {
+            const graph = await this.#publicEntryGraph(roots, requestedLocale ?? locale)
+            for (const row of roots)
+                if (graph.has(row.id))
+                    projected.set(row.id, this.#projection.project(row, graph, new Set(), budget, markdownSource))
         }
-        if (definition.localized && path) {
-            // A transient projection index keeps large localized lists linear, without another content cache.
-            if (!budget.alternates) {
-                budget.alternates = new Map()
-                for (const alternate of graph.values()) {
-                    if (!this.#publicModel(alternate.model)?.localized) continue
-                    const alternatePath = this.#publishedPath(alternate)
-                    if (!alternatePath) continue
-                    const key = `${alternate.model}\0${alternate.translationGroup}`
-                    const alternates = budget.alternates.get(key) ?? []
-                    alternates.push({ locale: alternate.locale, path: alternatePath })
-                    budget.alternates.set(key, alternates)
-                }
-            }
-            entry.alternates = (budget.alternates.get(`${row.model}\0${row.translationGroup}`) ?? []).map(
-                (alternate) => ({ ...alternate }),
-            )
-        }
-        entry.seo = this.#entrySeo(definition, entry)
-        return entry
+        return rows.flatMap((row) => (projected.has(row.id) ? [projected.get(row.id)!] : []))
     }
 
     async listPublicEntries(modelName: string, locale?: string): Promise<PublicEntry[]> {
-        return this.#listPublicEntries(modelName, locale)
+        await this.initialize()
+        return readPublicSnapshot(
+            () => this.publicGeneration(),
+            async () => {
+                return this.#listPublicEntries(modelName, locale)
+            },
+        )
     }
 
     async #listPublicEntries(modelName: string, locale?: string, markdownSource = false): Promise<PublicEntry[]> {
@@ -1536,31 +1527,124 @@ export class SiteAdmin<Context = unknown> {
         const definition = this.#model(modelName)
         if (definition.public === false)
             throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${modelName}" is private.`)
-        const normalizedLocale = this.#locale(definition, locale)
-        const rows = await this.#publishedRows(modelName, undefined, normalizedLocale)
-        const graph = await this.#publicEntryGraph(rows)
-        const budget = { nodes: 0 }
-        return rows
-            .filter((row) => graph.has(row.id))
-            .map((row) => this.#projectPublished(row, graph, new Set(), budget, markdownSource))
+        const normalizedLocale = this.#readLocale(definition, locale)
+        const roots: PublishedRow[] = []
+        for (let offset = 0; ; offset += 100) {
+            const page = await this.#storage.pagePublished(
+                { model: modelName, locale: normalizedLocale ?? '' },
+                { limit: 100, offset },
+            )
+            roots.push(...page.items)
+            if (offset + page.items.length >= page.total) break
+        }
+        const rows = roots.map((row) => resolveTranslation(row, normalizedLocale))
+        return this.#projectRoots(rows, normalizedLocale, markdownSource)
     }
 
-    async getPublicEntry(modelName: string, id: string, locale?: string): Promise<PublicEntry | null> {
+    async getPublicEntry(
+        modelName: string,
+        id: string,
+        locale?: string,
+        markdownSource = false,
+    ): Promise<PublicEntry | null> {
+        await this.initialize()
+        return readPublicSnapshot(
+            () => this.publicGeneration(),
+            () => this.#publicEntry(modelName, id, locale, markdownSource),
+        )
+    }
+
+    async #publicEntry(
+        modelName: string,
+        id: string,
+        locale?: string,
+        markdownSource = false,
+    ): Promise<PublicEntry | null> {
         await this.initialize()
         const definition = this.#model(modelName)
         if (definition.public === false)
             throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${modelName}" is private.`)
-        const normalizedLocale = this.#locale(definition, locale)
-        const row = (await this.#storage.published({ model: modelName, locale: normalizedLocale, ids: [id] }))[0]
+        const normalizedLocale = this.#readLocale(definition, locale)
+        const original = (
+            await this.#storage.published({ model: modelName, ids: [id], locale: normalizedLocale ?? '' })
+        )[0]
+        const row = original && resolveTranslation(original, normalizedLocale)
 
         if (!row) return null
-        const graph = await this.#publicEntryGraph([row])
-        return graph.has(row.id) ? this.#projectPublished(row, graph) : null
+        const graph = await this.#publicEntryGraph([row], normalizedLocale ?? row.locale)
+        return graph.has(row.id) ? this.#projection.project(row, graph, new Set(), { nodes: 0 }, markdownSource) : null
+    }
+
+    async rebuildSearch(): Promise<{ indexed: number }> {
+        await this.initialize()
+        return this.#storage.rebuildSearch()
     }
 
     async publicGeneration(): Promise<number> {
         await this.initialize()
-        return this.#storage.publicGeneration()
+        const generation = await this.#storage.publicGeneration()
+        this.#projection.generation = generation
+        return generation
+    }
+
+    async contentDocument(modelName: string, id: string, locale?: string): Promise<ContentFile | null> {
+        await this.initialize()
+        return readPublicSnapshot(
+            () => this.publicGeneration(),
+            async (generation) => {
+                const entry = await this.#publicEntry(modelName, id, locale, true)
+                if (!entry) return null
+                const key = id + '\0' + entry.locale
+                const cached = this.#parsedContent.get(key)
+                if (cached?.generation === generation) return structuredClone(cached.file)
+                const content = await createMarkdownContent(
+                    modelName,
+                    this.#model(modelName),
+                    [entry],
+                    this.config.markdown,
+                    (assetId) => this.#projection.assetUrl(assetId),
+                )
+                this.#prepareContent(content, this.#model(modelName), generation)
+                return (await content.get(id + '.json')) ?? null
+            },
+        )
+    }
+
+    async contentPage(modelName: string, page: { limit: number; offset: number }, locale?: string) {
+        await this.initialize()
+        return readPublicSnapshot(
+            () => this.publicGeneration(),
+            async (generation) => {
+                if (
+                    !Number.isSafeInteger(page.limit) ||
+                    page.limit < 1 ||
+                    page.limit > 100 ||
+                    !Number.isSafeInteger(page.offset) ||
+                    page.offset < 0
+                )
+                    throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'limit must be 1–100 and offset non-negative.')
+                const definition = this.#model(modelName)
+                if (definition.public === false) throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', 'Model is private.')
+                const normalized = this.#readLocale(definition, locale)
+                const result = await this.#storage.pagePublished({ model: modelName, locale: normalized ?? '' }, page)
+                const roots = result.items.map((row) => resolveTranslation(row, normalized))
+                const entries = await this.#projectRoots(roots, normalized, true)
+                const content = await createMarkdownContent(
+                    modelName,
+                    definition,
+                    entries,
+                    this.config.markdown,
+                    (id) => this.#projection.assetUrl(id),
+                    (id) => {
+                        const entry = entries.find((item) => item.id === id)!
+                        const cached = this.#parsedContent.get(id + '\0' + entry.locale)
+                        return cached?.generation === generation ? structuredClone(cached.file) : undefined
+                    },
+                )
+                this.#prepareContent(content, definition, generation)
+                return { items: await content.list(), total: result.total, ...page }
+            },
+        )
     }
 
     async content(modelName: string, locale?: string): Promise<ComarkContent> {
@@ -1568,27 +1652,35 @@ export class SiteAdmin<Context = unknown> {
         const definition = this.#model(modelName)
         if (definition.public === false)
             throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Model "${modelName}" is private.`)
-        const normalizedLocale = this.#locale(definition, locale)
-        const generation = await this.publicGeneration()
+        const normalizedLocale = this.#readLocale(definition, locale)
+        const initialGeneration = await this.publicGeneration()
         const cacheKey = `${modelName}\0${normalizedLocale}`
         const cached = this.#content.get(cacheKey)
-        if (cached?.generation === generation) return cached.content
-        const entries = await this.#listPublicEntries(modelName, normalizedLocale, true)
-        const content = createMarkdownContent(
-            modelName,
-            definition,
-            entries,
-            this.config.markdown,
-            (id) => this.#assetUrl(id),
-            (id) => {
-                const parsed = this.#parsedContent.get(id)
-                return parsed?.generation === generation ? structuredClone(parsed.file) : undefined
+        if (cached?.generation === initialGeneration) return cached.content
+        return readPublicSnapshot(
+            () => this.publicGeneration(),
+            async (generation) => {
+                const entries = await this.#listPublicEntries(modelName, normalizedLocale, true)
+                const content = await createMarkdownContent(
+                    modelName,
+                    definition,
+                    entries,
+                    this.config.markdown,
+                    (id) => this.#projection.assetUrl(id),
+                    (id) => {
+                        const parsed = this.#parsedContent.get(
+                            id + '\0' + entries.find((entry) => entry.id === id)!.locale,
+                        )
+                        return parsed?.generation === generation ? structuredClone(parsed.file) : undefined
+                    },
+                )
+                this.#prepareContent(content, definition, generation)
+                this.#content.set(cacheKey, { content, generation })
+                if (this.#content.size > 64) this.#content.delete(this.#content.keys().next().value!)
+                return content
             },
+            initialGeneration,
         )
-        this.#prepareContent(content, definition, generation)
-        this.#content.set(cacheKey, { content, generation })
-        if (this.#content.size > 64) this.#content.delete(this.#content.keys().next().value!)
-        return content
     }
 
     #prepareContent(content: ComarkContent, definition: ModelDefinition, generation: number): void {
@@ -1599,7 +1691,10 @@ export class SiteAdmin<Context = unknown> {
             if (isObject(metadata) && description !== undefined)
                 metadata.seo = { ...serializeSiteAdminSeo(metadata.seo), description }
             if (isObject(metadata) && typeof metadata.id === 'string') {
-                this.#parsedContent.set(metadata.id, { file: structuredClone(file), generation })
+                this.#parsedContent.set(metadata.id + '\0' + String(metadata.locale ?? ''), {
+                    file: structuredClone(file),
+                    generation,
+                })
                 if (this.#parsedContent.size > 256) this.#parsedContent.delete(this.#parsedContent.keys().next().value!)
             }
         })
@@ -1610,8 +1705,9 @@ export class SiteAdmin<Context = unknown> {
         locale?: string,
     ): Promise<{ entry: PublicEntry; kind: 'page' } | { kind: 'redirect'; status: number; target: string } | null> {
         await this.initialize()
-        const normalizedLocale = locale || this.#options.locales?.defaultLocale || ''
+        const normalizedLocale = locale ?? '*'
         if (
+            normalizedLocale !== '*' &&
             normalizedLocale &&
             this.#options.locales?.supported &&
             !this.#options.locales.supported.includes(normalizedLocale)
@@ -1621,9 +1717,9 @@ export class SiteAdmin<Context = unknown> {
         const cached = this.#routes.get(normalizedLocale)
         if (cached?.generation !== generation) {
             const router = createRouter<RouteRow>()
-            const routes = (await this.#storage.routes({ locales: [normalizedLocale, ''] })).sort(
-                (left, right) => Number(left.locale === '') - Number(right.locale === ''),
-            )
+            const routes = (
+                await this.#storage.routes(normalizedLocale === '*' ? {} : { locales: [normalizedLocale, ''] })
+            ).sort((left, right) => Number(left.locale === '') - Number(right.locale === ''))
 
             for (const route of routes) addRoute(router, 'GET', route.path, route)
             this.#routes.set(normalizedLocale, { generation, router })
@@ -1634,27 +1730,27 @@ export class SiteAdmin<Context = unknown> {
         if (!match) return null
         const route = match.data
         const rows = await this.#publishedRows(undefined, [route.entryId])
-        const entry = rows[0]
+        const entry = rows[0] && resolveTranslation(rows[0], route.locale)
         if (!entry) return null
         const graph = await this.#publicEntryGraph([entry])
         if (!graph.has(entry.id)) return null
         if (route.kind === 'page') {
             const budget = { nodes: 0 }
-            const projected = this.#projectPublished(entry, graph, new Set(), budget)
+            const projected = this.#projection.project(entry, graph, new Set(), budget)
             const definition = this.#model(entry.model)
-            let parsed = this.#parsedContent.get(entry.id)
+            let parsed = this.#parsedContent.get(entry.id + '\0' + entry.locale)
             if (parsed?.generation !== generation) {
                 // Parse the already-projected route entry; no second database fetch.
-                const content = createMarkdownContent(
+                const content = await createMarkdownContent(
                     entry.model,
                     definition,
-                    [this.#projectPublished(entry, graph, new Set(), { nodes: 0 }, true)],
+                    [this.#projection.project(entry, graph, new Set(), { nodes: 0 }, true)],
                     this.config.markdown,
-                    (id) => this.#assetUrl(id),
+                    (id) => this.#projection.assetUrl(id),
                 )
                 this.#prepareContent(content, definition, generation)
                 await content.get(`${entry.id}.json`)
-                parsed = this.#parsedContent.get(entry.id)
+                parsed = this.#parsedContent.get(entry.id + '\0' + entry.locale)
             }
             const metadata = parsed?.file.data['_siteAdmin']
             if (isObject(metadata)) projected.seo = serializeSiteAdminSeo(metadata.seo)
@@ -1727,7 +1823,7 @@ export class SiteAdmin<Context = unknown> {
             if (definition.public === false || !definition.route) continue
             const route = modelRouteOptions(definition)
             if (route?.redirect) continue
-            const locales = definition.localized
+            const locales = this.#options.locales?.supported?.length
                 ? (this.#options.locales?.supported ?? [this.#locale(definition)])
                 : ['']
             for (const locale of locales) {
@@ -1735,7 +1831,7 @@ export class SiteAdmin<Context = unknown> {
                 for (const item of items) {
                     if (!isObject(item.data)) continue
                     const metadata = item.data['_siteAdmin']
-                    if (!isObject(metadata)) continue
+                    if (!isObject(metadata) || metadata.locale !== locale) continue
                     const path = metadata.path
                     if (typeof path !== 'string') continue
                     if ((this.#resolveRouteRule(path).llms ?? route?.llms) === false) continue
@@ -1781,384 +1877,48 @@ export class SiteAdmin<Context = unknown> {
         return `${lines.join('\n')}\n`
     }
 
-    async uploadAsset(input: UploadAssetInput): Promise<AssetRecord> {
-        await this.initialize()
-        const assets = this.config.assets
-        if (!assets || !this.#options.getFiles) {
-            throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
-        }
-        const storage = assets.separateDrafts === true ? 'draft' : assets.storage!
-        const files = await this.#options.getFiles(storage)
-        const upload = await prepareUpload(input, assets.maxUploadSize)
-        const id = this.#id()
-        const key = `site-admin/${id}/${safeFilename(input.filename)}`
-        const contentType = detectedMime(upload.prefix)
-        const time = this.#now()
-        const token = this.#id()
-        const lease = this.#leaseExpiresAt()
-        const abort = new AbortController()
-        let pumping: Promise<void> | undefined
-        try {
-            await this.#storage.insertAsset({
-                id,
-                storage,
-                key,
-                contentType,
-                size: upload.size,
-                checksum: null,
-                metadata: input.metadata ?? {},
-                state: 'uploading',
-                operationToken: token,
-                leaseExpiresAt: lease,
-                createdAt: time,
-                updatedAt: time,
-            })
-
-            // R2 needs a known-length stream, preserved by the Workers native transform.
-            const FixedLength = (
-                globalThis as typeof globalThis & {
-                    FixedLengthStream?: new (size: number) => TransformStream<Uint8Array, Uint8Array>
-                }
-            ).FixedLengthStream
-            let body = upload.stream
-            if (FixedLength) {
-                const fixed = new FixedLength(upload.size)
-                pumping = upload.stream.pipeTo(fixed.writable, { signal: abort.signal })
-                void pumping.catch(() => {})
-                body = fixed.readable
-            }
-            const result = await files.upload(key, body, { contentType })
-            await pumping
-            const hash = upload.checksum()
-            if (Number(result.size) !== upload.size)
-                throw new Error('Stored upload size does not match the request body.')
-            this.#assertStorageChange(
-                await this.#storage.finishAssetUpload(
-                    id,
-                    token,
-                    { contentType, size: result.size, checksum: hash },
-                    this.#now(),
-                ),
-            )
-        } catch (error) {
-            abort.abort(error)
-            await upload.cancel(error).catch(() => {})
-            await pumping?.catch(() => {})
-            try {
-                if (await files.exists(key)) await files.delete(key)
-            } catch {}
-            await this.#storage.finishAssetUpload(id, token, undefined, this.#now())
-
-            throw error
-        }
-        return this.getAsset(id)
+    uploadAsset(input: UploadAssetInput) {
+        return this.#assets.uploadAsset(input)
+    }
+    getAsset(id: string) {
+        return this.#assets.getAsset(id)
+    }
+    downloadAsset(id: string, published = true) {
+        return this.#assets.downloadAsset(id, published)
+    }
+    deleteAsset(id: string) {
+        return this.#assets.deleteAsset(id)
+    }
+    runAssetGC() {
+        return this.#assets.runAssetGC()
+    }
+    syncAssetCopies() {
+        return this.#assets.syncAssetCopies()
     }
 
-    async getAsset(id: string): Promise<AssetRecord> {
-        await this.initialize()
-        const row = await this.#storage.readAsset(id)
-        if (!row) throw new SiteAdminError('SITE_ADMIN_ENTRY_NOT_FOUND', `Asset "${id}" does not exist.`)
-        return row
-    }
-
-    async downloadAsset(id: string, publicOnly = true): Promise<DownloadedAsset> {
-        await this.initialize()
-        const asset = await this.getAsset(id)
-        if (asset.state !== 'ready') {
-            throw new SiteAdminError('SITE_ADMIN_ASSET_NOT_READY', `Asset "${id}" is not ready.`)
-        }
-        if (publicOnly) {
-            const rows = await this.#publishedRows(undefined, await this.#storage.publishedAssetSources(id))
-
-            const graph = await this.#publicSnapshot(rows)
-            if (!rows.some((row) => graph.has(row.id))) {
-                throw new SiteAdminError('SITE_ADMIN_NOT_PUBLIC', `Asset "${id}" is not public.`)
-            }
-        }
-        if (!this.#options.getFiles) {
-            throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
-        }
-        if (publicOnly && this.config.assets?.separateDrafts === true) {
-            const copy = (await this.#assetCopies()).find(
-                ({ copy: record }) => record.assetId === id && record.state === 'ready',
-            )?.copy
-            if (!copy) throw new SiteAdminError('SITE_ADMIN_ASSET_NOT_READY', 'The public Asset copy needs retry.')
-            const files = await this.#options.getFiles(copy.storage)
-            return { asset, file: await files.download(copy.key, { as: 'stream' }) }
-        }
-        const files = await this.#options.getFiles(asset.storage)
-        return { asset, file: await files.download(asset.key, { as: 'stream' }) }
-    }
-
-    async deleteAsset(id: string): Promise<void> {
-        await this.initialize()
-        const asset = await this.getAsset(id)
-        if (await this.#storage.hasAssetReferences(id))
-            throw new SiteAdminError('SITE_ADMIN_ASSET_IN_USE', 'A retained revision still uses this Asset.')
-
-        const sync = await this.#syncAssetCopies()
-        if (sync.failed.length)
-            throw new SiteAdminError(
-                'SITE_ADMIN_STORAGE_UNAVAILABLE',
-                'Retry Asset copy cleanup before deleting its original.',
-            )
-        const token = await this.#claimAsset(id)
-        await this.#deleteClaimedAsset(asset, token)
-    }
-
-    async #claimAsset(id: string): Promise<string> {
-        const token = this.#id()
-        const now = this.#now()
-        this.#assertStorageChange(await this.#storage.claimAssetDeletion(id, token, this.#leaseExpiresAt(), now))
-
-        return token
-    }
-
-    async #deleteClaimedAsset(asset: AssetRecord, token: string): Promise<void> {
-        try {
-            if (!this.#options.getFiles) {
-                throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
-            }
-            const files = await this.#options.getFiles(asset.storage)
-            if (await files.exists(asset.key)) await files.delete(asset.key)
-            this.#assertStorageChange(await this.#storage.finishAssetDeletion(asset.id, token, true, this.#now()))
-        } catch (error) {
-            await this.#storage.finishAssetDeletion(asset.id, token, false, this.#now())
-
-            throw error
-        }
-    }
-
-    async runAssetGC(): Promise<{ deleted: string[]; failed: Array<{ id: string; message: string }> }> {
-        await this.initialize()
-        if (!this.config.assets) return { deleted: [], failed: [] }
-        const sync = await this.#syncAssetCopies()
-        if (sync.failed.length) return { deleted: [], failed: sync.failed }
-        const grace = durationMilliseconds(this.config.assets.cleanup?.minimumAge ?? 60 * 60 * 24)
-        const cutoff = new Date(this.#date().getTime() - grace).toISOString()
-        const candidates = await this.#storage.assetGCCandidates(cutoff, this.#now())
-
-        const result: { deleted: string[]; failed: Array<{ id: string; message: string }> } = {
-            deleted: [],
-            failed: [],
-        }
-        for (const row of candidates) {
-            const asset = row
-            try {
-                const token = await this.#claimAsset(asset.id)
-                await this.#deleteClaimedAsset(asset, token)
-                result.deleted.push(asset.id)
-            } catch (error) {
-                result.failed.push({
-                    id: asset.id,
-                    message: error instanceof Error ? error.message : 'Asset deletion failed.',
-                })
-            }
-        }
-        return result
-    }
-
-    async #assetStores(): Promise<{ draft: Files; public: Files }> {
-        const assets = this.config.assets
-        if (!assets || !assets.storage || assets.storage === 'draft' || !this.#options.getFiles)
-            throw new SiteAdminError(
-                'SITE_ADMIN_STORAGE_UNAVAILABLE',
-                'separateDrafts requires private draft and distinct public storage.',
-            )
-        try {
-            const draft = await this.#options.getFiles('draft')
-            const publicFiles = await this.#options.getFiles(assets.storage)
-            if (!draft || !publicFiles || draft === publicFiles) throw new Error('Storage must be distinct.')
-            const sameBinding =
-                draft.adapter.name === 'r2-binding' &&
-                publicFiles.adapter.name === 'r2-binding' &&
-                draft.raw === publicFiles.raw
-            const sameRoot =
-                draft.adapter.name === 'fs' &&
-                publicFiles.adapter.name === 'fs' &&
-                isObject(draft.raw) &&
-                isObject(publicFiles.raw) &&
-                draft.raw.root === publicFiles.raw.root
-            if (draft.adapter === publicFiles.adapter || sameBinding || sameRoot)
-                throw new Error('Storage backends must be distinct.')
-            return { draft, public: publicFiles }
-        } catch {
-            throw new SiteAdminError(
-                'SITE_ADMIN_STORAGE_UNAVAILABLE',
-                'Configure private Files SDK draft storage and distinct public storage.',
-            )
-        }
-    }
-
-    async #assetCopies(): Promise<Array<{ ledger: string; copy: AssetCopy }>> {
-        return this.#storage.assetCopies()
-    }
-
-    async #desiredAssetCopies(): Promise<Set<string>> {
-        const graph = await this.#publicSnapshot(await this.#publishedRows())
+    async #publishedAssetIds(entryIds?: string[]): Promise<Set<string>> {
+        const roots = await this.#publishedRows(undefined, entryIds)
         const ids = new Set<string>()
-        for (const row of graph.values()) {
-            const definition = this.#publicModel(row.model)
-            if (definition)
-                for (const reference of collectReferences(definition.fields, row.data).assets) ids.add(reference.id)
+        const locales = new Set(roots.flatMap((row) => [row.defaultLocale, ...Object.keys(row.translations)]))
+        for (const locale of locales) {
+            const variants = roots.filter(
+                (row) => row.defaultLocale === locale || Object.hasOwn(row.translations, locale),
+            )
+            const graph = await this.#publicSnapshot(
+                variants.map((row) => resolveTranslation(row, locale)),
+                locale,
+            )
+            for (const row of graph.values()) {
+                const definition = this.#publicModel(row.model)
+                if (definition)
+                    for (const reference of collectReferences(definition.fields, row.data).assets) ids.add(reference.id)
+            }
         }
         return ids
     }
 
-    #assertStorageChange(changed: boolean): void {
-        if (!changed)
-            throw new SiteAdminError('SITE_ADMIN_CONFLICT', 'The record changed before this mutation committed.')
-    }
-
-    async #retireAssetCopy(ledger: string, copy: AssetCopy, guard?: StorageAssetCopyGuard): Promise<void> {
-        // Keep tombstones for late storage writes; GC retries deletion.
-        this.#assertStorageChange(await this.#storage.updateAssetCopy(ledger, { ...copy, state: 'retired' }, guard))
-        if (!this.#options.getFiles)
-            throw new SiteAdminError('SITE_ADMIN_STORAGE_UNAVAILABLE', 'Asset storage is not configured.')
-        const files = await this.#options.getFiles(copy.storage)
-        if (await files.exists(copy.key)) await files.delete(copy.key)
-    }
-
-    async syncAssetCopies(): Promise<AssetSyncResult> {
-        await this.initialize()
-        return this.#syncAssetCopies()
-    }
-
-    async #syncAssetCopies(): Promise<AssetSyncResult> {
-        const result: AssetSyncResult = { copied: [], deleted: [], failed: [] }
-        if (this.config.assets?.separateDrafts !== true) return result
-        // ponytail: one DB lease serializes copy I/O; use per-Asset leases if publication throughput requires it.
-        const lease = { expiresAt: this.#leaseExpiresAt(), id: this.#id() }
-        const owner = (): StorageAssetCopyGuard => ({ lease, now: this.#now() })
-        const generation = () => this.#storage.publicGeneration()
-        try {
-            this.#assertStorageChange(await this.#storage.claimAssetSync(lease, this.#now()))
-        } catch {
-            result.failed.push({
-                id: '*',
-                message: 'Asset synchronization is busy; retry through publishDue or Asset GC.',
-            })
-            return result
-        }
-        try {
-            const stores = await this.#assetStores()
-            const startGeneration = await generation()
-            const desired = await this.#desiredAssetCopies()
-            const copies = await this.#assetCopies()
-            for (const { ledger, copy } of copies) {
-                if (copy.state === 'ready' && desired.has(copy.assetId)) continue
-                try {
-                    await this.#retireAssetCopy(ledger, copy, owner())
-                    result.deleted.push(copy.assetId)
-                } catch (error) {
-                    result.failed.push({
-                        id: copy.assetId,
-                        message: error instanceof Error ? error.message : 'Public copy deletion failed.',
-                    })
-                }
-            }
-            for (const id of desired) {
-                if (copies.some(({ copy }) => copy.assetId === id && copy.state === 'ready')) continue
-                const token = this.#id()
-                const ledger = `${id}:${token}`
-                const copy: AssetCopy = {
-                    assetId: id,
-                    key: `site-admin/public/${id}/${token}`,
-                    state: 'copying',
-                    storage: this.config.assets.storage!,
-                }
-                const guard = owner()
-                let recorded = false
-                try {
-                    this.#assertStorageChange(await this.#storage.createAssetCopy(ledger, copy, guard))
-                    recorded = true
-                    const asset = (await this.#storage.assets({ ids: [id], storage: 'draft', state: 'ready' }))[0]
-
-                    if (!asset)
-                        throw new SiteAdminError('SITE_ADMIN_ASSET_NOT_READY', 'The original Asset is not ready.')
-                    const file = await stores.draft.download(asset.key, { as: 'stream' })
-                    const upload = await prepareUpload({
-                        body: file.stream(),
-                        filename: asset.key,
-                        size: Number(asset.size),
-                    })
-                    const abort = new AbortController()
-                    let pumping: Promise<void> | undefined
-                    try {
-                        const FixedLength = (
-                            globalThis as typeof globalThis & {
-                                FixedLengthStream?: new (size: number) => TransformStream<Uint8Array, Uint8Array>
-                            }
-                        ).FixedLengthStream
-                        let body = upload.stream
-                        if (FixedLength) {
-                            const fixed = new FixedLength(upload.size)
-                            pumping = body.pipeTo(fixed.writable, { signal: abort.signal })
-                            void pumping.catch(() => {})
-                            body = fixed.readable
-                        }
-                        const stored = await stores.public.upload(copy.key, body, { contentType: asset.contentType })
-                        await pumping
-                        if (
-                            Number(stored.size) !== upload.size ||
-                            (asset.checksum && upload.checksum() !== asset.checksum)
-                        )
-                            throw new Error('Public copy does not match its original.')
-                    } catch (error) {
-                        abort.abort(error)
-                        await upload.cancel(error).catch(() => {})
-                        await pumping?.catch(() => {})
-                        throw error
-                    }
-                    const currentGeneration = await generation()
-                    if (!(await this.#desiredAssetCopies()).has(id)) {
-                        await this.#retireAssetCopy(ledger, copy)
-                        result.deleted.push(id)
-                        continue
-                    }
-                    this.#assertStorageChange(
-                        await this.#storage.updateAssetCopy(
-                            ledger,
-                            { ...copy, state: 'ready' },
-                            { ...owner(), generation: currentGeneration },
-                        ),
-                    )
-
-                    result.copied.push(id)
-                } catch (error) {
-                    if (recorded) {
-                        try {
-                            await this.#retireAssetCopy(ledger, copy)
-                        } catch {
-                            /* The durable tombstone is retried by GC. */
-                        }
-                    }
-                    result.failed.push({ id, message: error instanceof Error ? error.message : 'Public copy failed.' })
-                }
-            }
-            if ((await generation()) !== startGeneration)
-                result.failed.push({
-                    id: '*',
-                    message: 'Publication changed during synchronization; retry through publishDue or Asset GC.',
-                })
-        } catch (error) {
-            result.failed.push({
-                id: '*',
-                message: error instanceof Error ? error.message : 'Asset synchronization failed.',
-            })
-        } finally {
-            await this.#storage.releaseAssetSync(lease)
-        }
-        return result
-    }
-
     #publicBase(): string {
         return (this.#options.publicBase ?? '/api/content').replace(/\/$/u, '')
-    }
-
-    #leaseExpiresAt(): string {
-        const duration = durationMilliseconds(this.config.assets?.operationLeaseSeconds ?? 60 * 15)
-        return new Date(this.#date().getTime() + duration).toISOString()
     }
 
     #apiBases(): string[] {

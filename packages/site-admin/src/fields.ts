@@ -13,6 +13,8 @@ export interface PublicAsset extends AssetValue {
 }
 
 export interface BaseFieldOptions<Value> {
+    /** Store locale overrides as children of the original entry's revision. */
+    i18n?: boolean
     default?: Value
     description?: string
     label?: string

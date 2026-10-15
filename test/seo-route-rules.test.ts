@@ -111,7 +111,7 @@ describe('shared route rules', () => {
                         fields: { slug: text(), title: text() },
                         route: { path: '/excluded/:slug', sitemap: false, llms: false },
                     },
-                    localized: { fields: { slug: text(), title: text() }, route: '/localized/:slug', localized: true },
+                    localized: { fields: { slug: text(), title: text() }, route: '/localized/:slug' },
                     routeLess: { fields: { slug: text(), title: text() }, publishing: false },
                     private: {
                         fields: { slug: text(), title: text() },
@@ -142,7 +142,7 @@ describe('shared route rules', () => {
             ['localized', 'japanese', 'ja'],
         ]) {
             const entry = await admin.createEntry(model!, {
-                ...(locale ? { locale } : {}),
+                ...(locale ? { defaultLocale: locale } : {}),
                 data: { slug: slug!, title: slug },
             })
             await admin.publishEntry(entry.id, { expectedVersion: entry.version })
@@ -162,6 +162,10 @@ describe('shared route rules', () => {
         ])
         const entry = (await admin.listPublicEntries('posts')).find((item) => item.data.slug === 'included')
         // Route SEO remains page-owned. No global or route configuration is baked into entry metadata.
-        expect(entry?.seo).toEqual({ title: 'included', canonical: '/posts/included' })
+        expect(entry?.seo).toEqual({
+            title: 'included',
+            canonical: '/posts/included',
+            alternates: [{ locale: 'en', path: '/posts/included' }],
+        })
     })
 })

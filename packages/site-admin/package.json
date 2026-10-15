@@ -113,7 +113,15 @@
         "./internal/runtime/management-handler": "./dist/runtime/management-handler.js",
         "./internal/runtime/ai-action-handler": "./dist/runtime/ai-action-handler.js",
         "./internal/runtime/devtools-snapshot": "./dist/runtime/devtools-snapshot.js",
-        "./internal/runtime/nitro2": "./dist/runtime/nitro2.js"
+        "./internal/runtime/nitro2": "./dist/runtime/nitro2.js",
+        "./internal/runtime/composables": {
+            "types": "./dist/runtime/composables.d.ts",
+            "import": "./dist/runtime/composables.js"
+        },
+        "./internal/runtime/tasks/rebuild-search": {
+            "types": "./dist/runtime/tasks/rebuild-search.d.ts",
+            "import": "./dist/runtime/tasks/rebuild-search.js"
+        }
     },
     "publishConfig": {
         "access": "public",
@@ -130,11 +138,13 @@
         "@nuxt/kit": "^4.6.1",
         "@nuxt/schema": "^4.6.1",
         "@standard-schema/spec": "^1.1.0",
+        "@tanstack/vue-form": "2.0.0-alpha.2",
         "comark-content": "^0.4.1",
         "devframe": "1.2.5",
         "h3": "^1.15.11",
         "jiti": "^2.7.0",
         "nitropack": "2.13.4",
+        "nypm": "^0.6.10",
         "pathe": "^2.0.3",
         "rou3": "^1.0.0"
     },
@@ -144,7 +154,6 @@
         "@nuxtjs/i18n": "^10.6.0",
         "@nuxtjs/robots": "^7.0.2",
         "@nuxtjs/sitemap": "^9.1.0",
-        "@tanstack/vue-form": "2.0.0-alpha.2",
         "ai": "^7.0.141",
         "better-auth": "^1.7.9",
         "comark": "^0.7.0",
@@ -162,9 +171,6 @@
     },
     "peerDependenciesMeta": {
         "@better-auth/drizzle-adapter": {
-            "optional": true
-        },
-        "@tanstack/vue-form": {
             "optional": true
         },
         "drizzle-kit": {

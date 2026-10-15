@@ -54,7 +54,7 @@ const setup = async (
             auth,
             ...(assets ? { assets } : {}),
             configFile: './test/fixtures/nuxt/site-admin.config.ts',
-            i18n: false,
+            i18n: true,
             seo: false,
             sitemap: false,
             robots: false,
@@ -68,6 +68,7 @@ const setup = async (
                 buildDir: resolve('/app/node_modules/.cache/nuxt/.nuxt'),
                 build: { templates: kit.templates },
                 modules: [],
+                i18n: { defaultLocale: 'ja', locales: ['ja', 'en'] },
                 files: { config: './test/fixtures/nuxt/files.config.ts' },
                 modulesDir: [],
                 alias: { '@liria24/site-admin': `${process.cwd()}/packages/site-admin/src/index.ts`, ...aliases },
@@ -103,19 +104,21 @@ describe('native Better Auth integration', () => {
         kit.publicConfig = {}
     })
 
-    it('requires app-owned modules and preserves their setup errors', async () => {
-        kit.has.mockReturnValue(false)
-        kit.resolve.mockResolvedValue(consumerModulePath)
+    it('delegates native dependency setup to Nuxt moduleDependencies', async () => {
         await setup(false)
-        expect(kit.install.mock.calls[0]?.[0]).toBe(consumerModulePath)
-        expect(kit.install.mock.calls.at(-1)?.[1]).toEqual({
-            config: resolve('test/fixtures/nuxt/files.config.ts'),
-        })
-        kit.resolve.mockResolvedValue(undefined)
-        await expect(setup(false)).rejects.toThrow('Install the peer dependency "nuxt-llms"')
-        kit.resolve.mockResolvedValue(consumerModulePath)
-        kit.install.mockRejectedValueOnce(new Error('consumer module failed'))
-        await expect(setup(false)).rejects.toThrow('consumer module failed')
+        expect(kit.install).not.toHaveBeenCalled()
+    })
+
+    it('removes database-backed LLMS prerenders after native module registration', async () => {
+        const hook = await setup(false)
+        const done = hook.mock.calls.find(([name]) => name === 'modules:done')?.[1] as () => void
+        done()
+        const filter = hook.mock.calls.find(([name]) => name === 'prerender:routes')?.[1] as (context: {
+            routes: Set<string>
+        }) => void
+        const routes = new Set(['/llms.txt', '/llms-full.txt', '/application-page'])
+        filter({ routes })
+        expect([...routes]).toEqual(['/application-page'])
     })
 
     it('registers matching server/client permissions and a request-scoped database provider', async () => {
