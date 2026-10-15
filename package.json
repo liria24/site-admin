@@ -16,7 +16,7 @@
         "unused": "knip && knip --production",
         "workspace:check": "sherif",
         "preview:package": "pkg-pr-new publish ./packages/site-admin --bun --no-compact --previewVersion --comment=update",
-        "package:check": "publint packages/site-admin && attw --pack packages/site-admin --profile esm-only",
+        "package:check": "publint packages/site-admin && attw --pack packages/site-admin --profile esm-only --exclude-entrypoints ./internal/runtime/composables",
         "test": "vp test run",
         "test:cloudflare": "node test/cloudflare-local.mjs && node test/native-stream.mjs cloudflare && node test/nuxt-d1.mjs",
         "test:nuxt": "vp test run --config vitest.nuxt.config.ts && node test/nuxt-build.mjs && node test/native-stream.mjs node",

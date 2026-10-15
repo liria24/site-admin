@@ -1,3 +1,5 @@
+// Nuxt's #app types must resolve in the consumer to retain its hook/plugin augmentations.
+// This suite checks that context-bound internal entrypoint in real Nuxt apps; attw checks standalone entries.
 import { spawn, spawnSync } from 'node:child_process'
 import { stopProcess as stop } from './stop-process.ts'
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'

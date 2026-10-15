@@ -324,8 +324,8 @@ export const verifyPublicDataConsumer = async (tarball, { browser = true } = {})
             'nuxt.config.ts',
             `import { defineNuxtConfig } from 'nuxt/config'
 export default defineNuxtConfig({
-  devtools: false, modules: ['@liria24/site-admin/nuxt'],
-  siteAdmin: { auth: false, i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false }, client: { basePath: '/content', origin: ${JSON.stringify(backendOrigin)} } },
+  devtools: false, ...{ files: false }, modules: ['@liria24/site-admin/nuxt'],
+  siteAdmin: { auth: false, ai: false, server: { enabled: false }, i18n: false, llms: false, ogImage: false, robots: false, schemaOrg: false, seo: false, sitemap: false, routing: { enabled: false }, client: { basePath: '/content', origin: ${JSON.stringify(backendOrigin)} } },
 })`,
         )
         await put(

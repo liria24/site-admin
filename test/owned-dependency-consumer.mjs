@@ -69,11 +69,19 @@ assert.throws(() => import.meta.resolve('@liria24/site-admin/dependency-aliases'
         // Exercise the complete semantic test backend through public packed types.
         const memorySource = (await readFile(new URL('./memory-storage.ts', import.meta.url), 'utf8'))
             .replaceAll('../packages/site-admin/src/config', '@liria24/site-admin')
+            .replaceAll('../packages/site-admin/src/i18n', './site-admin-i18n')
             .replaceAll('../packages/site-admin/src/adapter', '@liria24/site-admin/internal/adapter')
             .replaceAll('../packages/site-admin/src/server/types', '@liria24/site-admin/internal/server')
             .replaceAll('../packages/site-admin/src/errors', '@liria24/site-admin')
             .replaceAll('../packages/site-admin/src/storage', './site-admin-storage')
         await put('server/memory-storage.ts', memorySource)
+        await put(
+            'server/site-admin-i18n.ts',
+            (await readFile(new URL('../packages/site-admin/src/i18n.ts', import.meta.url), 'utf8')).replaceAll(
+                './config',
+                '@liria24/site-admin',
+            ),
+        )
         await put(
             'server/site-admin-storage.ts',
             (await readFile(new URL('../packages/site-admin/src/storage.ts', import.meta.url), 'utf8'))

@@ -9,8 +9,8 @@ import type {
 } from '../client'
 import { createAdminClient } from '../admin-client'
 import { useRequestFetch, useRequestURL, useState, useRoute } from '#app'
-import type { AsyncData, AsyncDataOptions, KeysOf, PickFrom } from 'nuxt/app'
-import type { NuxtApp, NuxtError } from 'nuxt/app'
+import type { AsyncData, AsyncDataOptions, KeysOf, PickFrom } from '#app'
+import type { NuxtApp, NuxtError } from '#app'
 import type { SiteAdminPublicModels, SiteAdminPublicSummaryModels } from '../client'
 import type { SiteAdminIssue } from '../index'
 import type {
@@ -27,20 +27,20 @@ import type { ModelDescriptor, SiteAdminDescriptor } from '../descriptor'
 import { clearNuxtData, refreshNuxtData, useNuxtApp } from '#app'
 import { defineUseFetchAddon } from '#app/composables/addons'
 import { hashKey } from '#app'
-import type { UseFetchOptions } from 'nuxt/app'
-import type { AsyncDataMiddleware } from 'nuxt/app'
+import type { UseFetchOptions } from '#app'
+import type { AsyncDataMiddleware } from '#app'
 import type { SiteAdminNamedAiActions } from '../client'
 import { computed, nextTick, toValue, watch, ref, shallowRef, type Ref, type MaybeRefOrGetter } from 'vue'
 import type { EntryPrepareContext } from '../model'
 
-declare module 'nuxt/app' {
+declare module '#app' {
     interface RuntimeNuxtHooks {
         'site-admin:entry:prepare': (context: EntryPrepareContext) => void | Promise<void>
     }
 }
 
-import type { UseAsyncData } from 'nuxt/app'
-import type { UseFetch, UseFetchAddon } from 'nuxt/app'
+import type { UseAsyncData } from '#app'
+import type { UseFetch, UseFetchAddon } from '#app'
 
 declare global {
     interface ImportMeta {
