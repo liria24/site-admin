@@ -1,3 +1,10 @@
+export interface IndexedReference {
+    locale?: string
+    id: string
+    path: string
+    position: number
+}
+
 import type { AssetRecord, EntryRecord, IncomingReference, RevisionRecord } from './server/types'
 import { SiteAdminError } from './errors'
 
@@ -125,8 +132,8 @@ export interface StorageContent {
             entryId: string
             locale: string
             data: Record<string, unknown>
-            assets: import('./validation').IndexedReference[]
-            relations: import('./validation').IndexedReference[]
+            assets: IndexedReference[]
+            relations: IndexedReference[]
         }>
     >
     rebuildSearch(): Promise<{ indexed: number }>

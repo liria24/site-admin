@@ -86,6 +86,7 @@ assert.throws(() => import.meta.resolve('@liria24/site-admin/dependency-aliases'
             'server/site-admin-storage.ts',
             (await readFile(new URL('../packages/site-admin/src/storage.ts', import.meta.url), 'utf8'))
                 .replaceAll('./server/types', '@liria24/site-admin/internal/server')
+                .replaceAll('./i18n', './site-admin-i18n')
                 .replaceAll('./errors', '@liria24/site-admin'),
         )
         await put(
