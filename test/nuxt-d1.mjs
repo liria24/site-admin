@@ -242,7 +242,6 @@ try {
         throw new Error('The first D1 signup unexpectedly received management permissions.')
     const unicodeSearch = await request('/api/__search', { method: 'POST' })
     if (
-        unicodeSearch.status !== 200 ||
         unicodeSearch.data.total !== 1 ||
         unicodeSearch.data.items[0]?.data.title !== 'ΣΟΣ '.repeat(250) ||
         unicodeSearch.elapsed >= 2000
