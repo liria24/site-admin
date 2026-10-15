@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createRequire, stripTypeScriptTypes } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -63,7 +64,11 @@ const initialize = (
         )
         return ['/generated.png']
     })
-    const source = siteAdminNuxtSeoTemplate({ ogImage, seo }).replace(/^import .*\n/gmu, '')
+    const source = (
+        readFileSync(new URL('../packages/site-admin/src/runtime/seo.ts', import.meta.url), 'utf8') +
+        '\n' +
+        siteAdminNuxtSeoTemplate({ ogImage, seo })
+    ).replace(/^import .*\n/gmu, '')
     const compiled = stripTypeScriptTypes(source).replace(/^export /gmu, '')
     const create = new Function(
         'useHead',

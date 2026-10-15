@@ -25,7 +25,6 @@
                 "src/runtime/*.ts!",
                 "src/server/index.ts!",
                 "src/nuxt/server.ts!",
-                "src/adapters/drizzle.ts!",
                 "src/devtools/{index,dock,client/app}.ts!",
                 "src/runtime/tasks/*.ts!",
                 "src/admin-client.ts!",

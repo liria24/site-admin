@@ -1,5 +1,6 @@
 import { SiteAdminError } from '../errors'
 import type { SiteAdmin } from '../server/site-admin'
+import { withSiteAdminContext } from './context'
 
 /** `true` enables manual runs; a cron string additionally enables its Nitro schedule. */
 export interface SiteAdminTaskOptions {
@@ -23,19 +24,20 @@ export const runSiteAdminTask = async (
     name: SiteAdminTaskName,
     runtime: SiteAdminTaskRuntime,
     platformContext?: object,
-) => {
-    const enabled = runtime.tasks?.[name]
-    if (enabled !== true && !(typeof enabled === 'string' && enabled.trim()))
-        throw new SiteAdminError('SITE_ADMIN_FORBIDDEN', `Site Admin task "${name}" is disabled.`)
-    const admin = await runtime.getSiteAdmin(undefined, platformContext)
-    switch (name) {
-        case 'publishDue':
-            return admin.publishDue()
-        case 'assetGC':
-            return admin.runAssetGC()
-        case 'rebuildSearch':
-            return admin.rebuildSearch()
-        case 'syncAssets':
-            return admin.syncAssetCopies()
-    }
-}
+) =>
+    withSiteAdminContext(platformContext, async () => {
+        const enabled = runtime.tasks?.[name]
+        if (enabled !== true && !(typeof enabled === 'string' && enabled.trim()))
+            throw new SiteAdminError('SITE_ADMIN_FORBIDDEN', `Site Admin task "${name}" is disabled.`)
+        const admin = await runtime.getSiteAdmin(undefined, platformContext)
+        switch (name) {
+            case 'publishDue':
+                return admin.publishDue()
+            case 'assetGC':
+                return admin.runAssetGC()
+            case 'rebuildSearch':
+                return admin.rebuildSearch()
+            case 'syncAssets':
+                return admin.syncAssetCopies()
+        }
+    })

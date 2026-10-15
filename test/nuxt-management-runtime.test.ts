@@ -8,7 +8,7 @@ import {
 } from './nuxt-native-runtime'
 import { modelEntry as modelRecord } from './model-fixture'
 import { createError } from 'h3'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as Vue from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import {
@@ -32,6 +32,15 @@ interface State {
     refresh(options?: { cachedData?: unknown; signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
 }
 interface Helpers {
+    useAdminForm(
+        model: string,
+        options?: Record<string, unknown>,
+    ): Promise<
+        ReturnType<typeof useEntryForm<Record<string, unknown>>> & {
+            status: State['status']
+            refresh: State['refresh']
+        }
+    >
     siteAdminManagementKey(
         connection: import('../packages/site-admin/src/client').SiteAdminManagementClientOptions,
         scope: string,
@@ -124,6 +133,7 @@ const nativeEnvironment = async (
     let requestFetches = 0
     const states = new Map<string, Vue.Ref<unknown>>()
     const dependencies = {
+        useEntryForm,
         createSiteAdminModel,
         siteAdminModelError,
         useRoute: () => ({ path: '/' }),
@@ -158,7 +168,7 @@ const nativeEnvironment = async (
     }
     const helpers = new Function(
         ...Object.keys(dependencies),
-        `${generated}; return { ${aiActions ? 'useAi,' : ''} siteAdminAttachAsyncData, modelList: useAdminEntries, modelEntry: useAdminEntry, publicEntry: (model, id, opts) => useContent(model, { ...opts, id }), publicList: useContent, publicBatch: useContent, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminReadModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
+        `${generated}; return { ${aiActions ? 'useAi,' : ''} useAdminForm, siteAdminAttachAsyncData, modelList: useAdminEntries, modelEntry: useAdminEntry, publicEntry: (model, id, opts) => useContent(model, { ...opts, id }), publicList: useContent, publicBatch: useContent, createNuxtSiteAdminManagementClient, siteAdminManagementClientOptions, useSiteAdminModels, siteAdminReadModels, siteAdminManagementKey, useSiteAdminAuthScope }`,
     )(...Object.values(dependencies)) as Helpers
     return {
         app,
@@ -490,6 +500,95 @@ const modelDescriptor = createSiteAdminDescriptor(
 )
 
 describe('native management AsyncData and mutation invalidation', () => {
+    it('fills a form created before the awaited entry during SSR', async () => {
+        const { helpers } = await nativeEnvironment(
+            async (input) => {
+                const path = new URL(String(input)).pathname
+                return Response.json(
+                    path === '/manage/models' ? modelDescriptor : modelRecord('one', 3, { title: 'Loaded during SSR' }),
+                )
+            },
+            { serverRuntime: true },
+        )
+        const html = await renderToString(
+            Vue.createSSRApp({
+                async setup() {
+                    const { form, draft } = await helpers.useAdminForm('posts', { id: 'one' })
+                    expect(draft.snapshot().version).toBe(3)
+                    return () => Vue.h('div', String(form.state.values.title))
+                },
+            }),
+        )
+        expect(html).toBe('<div>Loaded during SSR</div>')
+    })
+    it('initializes a new form after its descriptor and owns unload protection until disposal', async () => {
+        const requests: string[] = []
+        const { helpers } = await nativeEnvironment(async (input) => {
+            const path = new URL(String(input)).pathname
+            requests.push(path)
+            return Response.json(modelDescriptor)
+        })
+        const window = new EventTarget()
+        vi.stubGlobal('window', window)
+        const busy = Vue.ref(false)
+        const renderer = Vue.createRenderer<object, object>({
+            createComment: () => ({}),
+            createElement: () => ({}),
+            createText: () => ({}),
+            insert: () => {},
+            remove: () => {},
+            parentNode: () => null,
+            nextSibling: () => null,
+            patchProp: () => {},
+            setElementText: () => {},
+            setText: () => {},
+        })
+        let controller: Awaited<ReturnType<Helpers['useAdminForm']>> | undefined
+        const app = renderer.createApp({
+            render: () =>
+                Vue.h(Vue.Suspense, null, {
+                    default: () =>
+                        Vue.h({
+                            async setup() {
+                                controller = await helpers.useAdminForm('posts', {
+                                    defaultValues: { title: 'Default' },
+                                    beforeUnload: busy,
+                                })
+                                return () => Vue.h('div')
+                            },
+                        }),
+                }),
+        })
+        const unload = () => {
+            const event = new Event('beforeunload', { cancelable: true })
+            Object.defineProperty(event, 'returnValue', {
+                set: () => {
+                    throw new Error('Deprecated returnValue was used')
+                },
+            })
+            window.dispatchEvent(event)
+            return event.defaultPrevented
+        }
+        try {
+            app.mount({})
+            await flush()
+            expect(controller?.form.state.values.title).toBe('Default')
+            expect(controller?.draft.isDirty.value).toBe(false)
+            expect(requests).toEqual(['/manage/models'])
+            expect(unload()).toBe(false)
+            controller!.form.setFieldValue('title', 'Edited')
+            expect(unload()).toBe(true)
+            controller!.form.reset({ ...controller!.form.state.values, title: 'Default' })
+            expect(unload()).toBe(false)
+            busy.value = true
+            expect(unload()).toBe(true)
+            app.unmount()
+            expect(unload()).toBe(false)
+        } finally {
+            app.unmount()
+            vi.unstubAllGlobals()
+        }
+    })
     it('defers management entry/list descriptors until execution and shares the started read', async () => {
         const requests: string[] = []
         const { helpers, app } = await nativeEnvironment(async (input) => {
@@ -858,10 +957,12 @@ describe('native management AsyncData and mutation invalidation', () => {
                                     Vue as typeof Vue & {
                                         withAsyncContext: (fn: () => unknown) => [Promise<unknown>, () => void]
                                     }
-                                ).withAsyncContext(() => helpers.modelEntry('posts', 'one', { authScope: 'alice' }))
+                                ).withAsyncContext(() =>
+                                    helpers.useAdminForm('posts', { id: 'one', authScope: 'alice' }),
+                                )
                                 const resource = await pending
                                 restore()
-                                controller = useEntryForm(resource as SiteAdminModel<Record<string, unknown>>)
+                                controller = resource as Awaited<ReturnType<Helpers['useAdminForm']>>
                                 return () => Vue.h('div')
                             },
                         }),

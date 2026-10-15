@@ -23,10 +23,16 @@ import type {
     SiteAdminSystemAction,
 } from '../config'
 import { createSiteAdminDescriptor, type SiteAdminDescriptor } from '../descriptor'
+import { literalPresentation, type PresentationContext } from '../presentation'
 import { SiteAdminError, type SiteAdminIssue } from '../errors'
 import { searchQuery } from '../storage'
 import { resolveTranslation, type Translations, type TranslationInput } from '../i18n'
-import { createSiteAdminRouteResolver, serializeSiteAdminSeo, type SiteAdminRouteResolver } from '../seo'
+import {
+    createSiteAdminRouteResolver,
+    serializeSiteAdminSeo,
+    mergeSiteAdminSeo,
+    type SiteAdminRouteResolver,
+} from '../seo'
 import type { AnyField } from '../fields'
 import {
     applyFieldDefaults,
@@ -106,6 +112,7 @@ export class SiteAdmin<Context = unknown> {
     readonly #content = new Map<string, { content: ComarkContent; generation: number }>()
     readonly #projection: PublicProjector<Context>
     readonly #parsedContent = new Map<string, { file: ContentFile; generation: number }>()
+    readonly #seo = new Map<string, Promise<import('./types').PublicEntrySeo>>()
     readonly #routes = new Map<string, { generation: number; router: RouterContext<RouteRow> }>()
     #initializer: Promise<void> | undefined
 
@@ -171,8 +178,37 @@ export class SiteAdmin<Context = unknown> {
         }
     }
 
-    descriptorFor(actor: import('./types').SiteAdminActor): SiteAdminDescriptor {
+    presentationContext(locale?: string): Promise<PresentationContext> {
+        return this.#options.presentation?.(locale) ?? Promise.resolve({ ...literalPresentation, locale: locale ?? '' })
+    }
+
+    #modelSeo(entry: PublicEntry): Promise<import('./types').PublicEntrySeo> {
+        const key = JSON.stringify([this.#projection.generation, entry.model, entry.id, entry.revisionId, entry.locale])
+        const cached = this.#seo.get(key)
+        if (cached) return cached
+        const definition = this.#model(entry.model)
+        const pending = (async () =>
+            serializeSiteAdminSeo(
+                typeof definition.seo === 'function'
+                    ? definition.seo(structuredClone(entry), await this.presentationContext(entry.locale))
+                    : definition.seo,
+            ))()
+        this.#seo.set(key, pending)
+        void pending.catch(() => this.#seo.delete(key))
+        if (this.#seo.size > 256) this.#seo.delete(this.#seo.keys().next().value!)
+        return pending
+    }
+
+    async #presentEntry(entry: PublicEntry): Promise<PublicEntry> {
+        return {
+            ...entry,
+            seo: this.#projection.sanitizeSeo(mergeSiteAdminSeo(entry.seo, await this.#modelSeo(entry))),
+        }
+    }
+
+    descriptorFor(actor: import('./types').SiteAdminActor, context?: PresentationContext): SiteAdminDescriptor {
         const descriptor = this.descriptor
+        if (context) descriptor.models = createSiteAdminDescriptor(this.config, context).models
         descriptor.models = Object.fromEntries(
             Object.entries(descriptor.models).filter(([modelName]) => this.can(actor, 'model', 'readDraft', modelName)),
         )
@@ -1507,7 +1543,12 @@ export class SiteAdmin<Context = unknown> {
             const graph = await this.#publicEntryGraph(roots, requestedLocale ?? locale)
             for (const row of roots)
                 if (graph.has(row.id))
-                    projected.set(row.id, this.#projection.project(row, graph, new Set(), budget, markdownSource))
+                    projected.set(
+                        row.id,
+                        await this.#presentEntry(
+                            this.#projection.project(row, graph, new Set(), budget, markdownSource),
+                        ),
+                    )
         }
         return rows.flatMap((row) => (projected.has(row.id) ? [projected.get(row.id)!] : []))
     }
@@ -1572,7 +1613,9 @@ export class SiteAdmin<Context = unknown> {
 
         if (!row) return null
         const graph = await this.#publicEntryGraph([row], normalizedLocale ?? row.locale)
-        return graph.has(row.id) ? this.#projection.project(row, graph, new Set(), { nodes: 0 }, markdownSource) : null
+        return graph.has(row.id)
+            ? this.#presentEntry(this.#projection.project(row, graph, new Set(), { nodes: 0 }, markdownSource))
+            : null
     }
 
     async rebuildSearch(): Promise<{ indexed: number }> {
@@ -1647,6 +1690,11 @@ export class SiteAdmin<Context = unknown> {
         )
     }
 
+    async contentList(modelName: string, locale?: string) {
+        const documents = await (await this.content(modelName, locale)).list()
+        return documents
+    }
+
     async content(modelName: string, locale?: string): Promise<ComarkContent> {
         await this.initialize()
         const definition = this.#model(modelName)
@@ -1684,12 +1732,18 @@ export class SiteAdmin<Context = unknown> {
     }
 
     #prepareContent(content: ComarkContent, definition: ModelDefinition, generation: number): void {
-        content.hooks.hook('file:parsed', ({ file }) => {
+        content.hooks.hook('file:parsed', async ({ file }) => {
             if (!file) return
             const metadata = file.data['_siteAdmin']
             const description = entryDescription(definition, file.data).text
             if (isObject(metadata) && description !== undefined)
-                metadata.seo = { ...serializeSiteAdminSeo(metadata.seo), description }
+                metadata.seo = this.#projection.sanitizeSeo(
+                    mergeSiteAdminSeo(
+                        serializeSiteAdminSeo(metadata.seo),
+                        { description },
+                        await this.#modelSeo({ ...metadata, data: file.data } as unknown as PublicEntry),
+                    ),
+                )
             if (isObject(metadata) && typeof metadata.id === 'string') {
                 this.#parsedContent.set(metadata.id + '\0' + String(metadata.locale ?? ''), {
                     file: structuredClone(file),
@@ -1736,7 +1790,7 @@ export class SiteAdmin<Context = unknown> {
         if (!graph.has(entry.id)) return null
         if (route.kind === 'page') {
             const budget = { nodes: 0 }
-            const projected = this.#projection.project(entry, graph, new Set(), budget)
+            const projected = await this.#presentEntry(this.#projection.project(entry, graph, new Set(), budget))
             const definition = this.#model(entry.model)
             let parsed = this.#parsedContent.get(entry.id + '\0' + entry.locale)
             if (parsed?.generation !== generation) {
@@ -1744,7 +1798,7 @@ export class SiteAdmin<Context = unknown> {
                 const content = await createMarkdownContent(
                     entry.model,
                     definition,
-                    [this.#projection.project(entry, graph, new Set(), { nodes: 0 }, true)],
+                    [await this.#presentEntry(this.#projection.project(entry, graph, new Set(), { nodes: 0 }, true))],
                     this.config.markdown,
                     (id) => this.#projection.assetUrl(id),
                 )
@@ -1754,6 +1808,10 @@ export class SiteAdmin<Context = unknown> {
             }
             const metadata = parsed?.file.data['_siteAdmin']
             if (isObject(metadata)) projected.seo = serializeSiteAdminSeo(metadata.seo)
+            if (parsed) {
+                const { _siteAdmin: _, ...data } = parsed.file.data
+                projected.data = structuredClone(data)
+            }
             // Keep the existing route DTO's self alternate for nonlocalized entries.
             projected.alternates ??= projected.path ? [{ locale: projected.locale, path: projected.path }] : []
             return { entry: projected, kind: 'page' }

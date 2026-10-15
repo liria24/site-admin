@@ -3,11 +3,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, it } from 'vitest'
-import {
-    siteAdminNuxtClientTemplate,
-    siteAdminNuxtFormTemplate,
-    siteAdminNuxtModelTypes,
-} from '../packages/site-admin/src/nuxt/client-templates'
+import { siteAdminNuxtClientTemplate, siteAdminNuxtModelTypes } from '../packages/site-admin/src/nuxt/client-templates'
 
 it('infers high-level form, management list, field and successful save types from model names', async () => {
     await mkdir('.tmp', { recursive: true })
@@ -16,7 +12,6 @@ it('infers high-level form, management list, field and successful save types fro
         join(directory, 'client.ts'),
         siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage', auth: true }),
     )
-    await writeFile(join(directory, 'form.ts'), siteAdminNuxtFormTemplate())
     await writeFile(join(directory, 'models.d.ts'), siteAdminNuxtModelTypes(join(directory, 'config.ts')))
     await writeFile(
         join(directory, 'config.ts'),
@@ -50,11 +45,10 @@ declare module '#imports' {
     await writeFile(
         join(directory, 'consumer.ts'),
         `import { ref } from 'vue'
-import { useEntryForm } from './form'
-import { useAdminEntries, useAdminEntry } from './client'
+import { useAdminEntries, useAdminEntry, useAdminForm } from './client'
 const id = ref<string | null>('post')
 const post = await useAdminEntry('posts', id)
-const { form } = useEntryForm(post, { onSuccess: (saved) => {
+const { form } = await useAdminForm('posts', { id, onSuccess: (saved) => {
     const version: number = saved.version
     if ('data' in saved) { const title: string = saved.data.title; const url: string | undefined = saved.data.image?.url; void [title, url] }
     void version
@@ -83,7 +77,7 @@ const list = await useAdminEntries('posts', { page })
 const first: string | undefined = list.data.value?.items[0]?.data.title
 const total: number | undefined = list.data.value?.total
 const one: string | undefined = post.data.value?.data.title
-const { form: author } = useEntryForm(await useAdminEntry('authors', null))
+const { form: author } = await useAdminForm('authors')
 const name: string = author.state.values.name
 void [title, copy, assetUrl, first, total, one, name]
 

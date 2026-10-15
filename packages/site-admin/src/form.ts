@@ -1,7 +1,19 @@
 import { resolveTranslation } from './i18n'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { useForm } from '@tanstack/vue-form'
-import { computed, getCurrentScope, onScopeDispose, readonly, shallowRef, toRaw, toValue, watch } from 'vue'
+import {
+    computed,
+    getCurrentInstance,
+    getCurrentScope,
+    onMounted,
+    onScopeDispose,
+    readonly,
+    shallowRef,
+    toRaw,
+    toValue,
+    watch,
+    type MaybeRefOrGetter,
+} from 'vue'
 import { SiteAdminClientError, type SiteAdminEntry, type SiteAdminEntryMutation } from './client'
 import { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset } from './management-assets'
 import { projectStoredFields } from './stored-data'
@@ -14,8 +26,13 @@ export type { SiteAdminAsset } from './management-assets'
 export type { SiteAdminSessionDraft } from './model'
 
 export interface UseEntryFormOptions<Data extends Record<string, unknown>> {
+    beforeUnload?: false | MaybeRefOrGetter<boolean>
     defaultValues?: Partial<Data>
-    onBeforeSubmit?: (context: { operation: 'save' | 'publish' | 'schedule' }) => void | Promise<void>
+    onBeforeSubmit?: (context: {
+        operation: 'save' | 'publish' | 'schedule'
+        locale?: string
+        defaultLocale?: string
+    }) => void | Promise<void>
     onUpload?: (context: {
         field: Extract<keyof Data, string>
         files: File[]
@@ -103,8 +120,18 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
     let cachedDescriptor = context.descriptor.value
     const descriptor = () => {
         cachedDescriptor = context.descriptor.value ?? cachedDescriptor
-        if (!cachedDescriptor) throw new Error('[site-admin] Await useAdminEntry before creating its form.')
-        return cachedDescriptor
+        return (
+            cachedDescriptor ?? {
+                fields: {},
+                public: true,
+                publishing: true,
+                scheduling: true,
+                revisions: true,
+                route: false,
+                serverValidation: false,
+                sortable: false,
+            }
+        )
     }
     const present = (data: Record<string, unknown>) =>
         presentSiteAdminData<Data>(descriptor(), data, (id) => context.client.assetUrl(id))
@@ -191,7 +218,18 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
     )
     const form = useForm({
         defaultValues: stored ? storedValue(stored.value) : initial ? entryValue(initial) : defaultValue(),
-        validators: [{ run: descriptorSchema<Data>(descriptor()), triggers: [] }],
+        validators: [
+            {
+                run: {
+                    '~standard': {
+                        version: 1,
+                        vendor: 'site-admin',
+                        validate: (value: unknown) => descriptorSchema<Data>(descriptor())['~standard'].validate(value),
+                    },
+                },
+                triggers: [],
+            },
+        ],
         onSubmit: async ({ value, createValidationError }) => {
             if (lifetime.signal.aborted) return
             const identity = draftKey()
@@ -204,7 +242,18 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
             }
             if (selectedIntent.kind !== 'save' && !entryId.value) pendingPublication = true
             try {
-                await options.onBeforeSubmit?.({ operation: selectedIntent.kind })
+                if (!context.descriptor.value || (context.id.value && !currentEntry() && !entryId.value))
+                    throw (
+                        resource.error.value ??
+                        new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Load the entry before submitting.', 400)
+                    )
+                await options.onBeforeSubmit?.({
+                    operation: selectedIntent.kind,
+                    ...(toValue(context.locale) ? { locale: toValue(context.locale)! } : {}),
+                    ...((currentEntry()?.defaultLocale ?? context.defaultLocale)
+                        ? { defaultLocale: currentEntry()?.defaultLocale ?? context.defaultLocale! }
+                        : {}),
+                })
                 if (
                     resource.error.value?.data?.committed &&
                     resource.error.value.data.code === 'SITE_ADMIN_INVALID_RESPONSE'
@@ -339,12 +388,12 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
         { flush: 'sync' },
     )
     watch(
-        resource.data,
+        [resource.data, resource.status],
         () => {
             const current = currentEntry()
             if (!current || form.state.isSubmitting) return
             if (isDirty.value) {
-                if (version.value !== null && version.value !== current.version)
+                if (resource.status.value === 'success' && version.value !== null && version.value !== current.version)
                     context.report(
                         new SiteAdminClientError(
                             'SITE_ADMIN_CONFLICT',
@@ -360,7 +409,17 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
             form.reset(entryValue(current))
             remember()
         },
-        { immediate: true },
+        { immediate: true, flush: 'sync' },
+    )
+    watch(
+        context.descriptor,
+        (value, previous) => {
+            if (value && !previous && !currentEntry() && !context.id.value && !isDirty.value) {
+                baseline.value = serialize(defaultValue())
+                form.reset(defaultValue())
+            }
+        },
+        { flush: 'sync' },
     )
     if (getCurrentScope())
         onScopeDispose(() => {
@@ -396,7 +455,7 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
             : ['image', 'images'].includes(field.kind)
               ? 1
               : 2
-    return {
+    const result = {
         form,
         operation: readonly(operation),
         fields: computed(() =>
@@ -535,4 +594,27 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
             },
         },
     }
+    const setupUnload = () => {
+        if (typeof window === 'undefined') return () => {}
+        const handler = (event: BeforeUnloadEvent) => event.preventDefault()
+        const stop = watch(
+            () =>
+                options.beforeUnload !== false &&
+                (result.draft.isDirty.value || operation.value !== null || toValue(options.beforeUnload) === true),
+            (active) => window[active ? 'addEventListener' : 'removeEventListener']('beforeunload', handler),
+            { immediate: true, flush: 'sync' },
+        )
+        return () => {
+            stop()
+            window.removeEventListener('beforeunload', handler)
+        }
+    }
+    if (getCurrentInstance()) {
+        let cleanup: (() => void) | undefined
+        onMounted(() => {
+            cleanup = setupUnload()
+        })
+        onScopeDispose(() => cleanup?.())
+    }
+    return result
 }

@@ -1,26 +1,24 @@
 import { defineEventHandler } from 'nuxt/server'
+import { db } from 'void/db'
 import type { AnyD1Database } from 'drizzle-orm/d1'
-import { getAppDb, getSiteAdminDatabase } from '../database'
+import { useVoidDatabase } from '@liria24/site-admin/internal/runtime/database'
+import { withSiteAdminContext } from '@liria24/site-admin/internal/runtime/context'
+import * as schema from '../../db/schema'
 
-export default defineEventHandler(async (event) => {
-    const context = { event }
-    const database = getAppDb(context)
-    const adapter = getSiteAdminDatabase(context)
-    const binding = database.$client
-    const freshContext = { platformContext: { cloudflare: { env: { DB: binding } } } }
-    // A delegated test binding exercises app cache identity without adding a second database.
-    const alternateBinding = {
-        prepare: binding.prepare.bind(binding),
-        batch: binding.batch.bind(binding),
-    } as AnyD1Database
-    const alternateContext = { platformContext: { cloudflare: { env: { DB: alternateBinding } } } }
-    const users = (await binding.prepare('SELECT COUNT(*) AS count FROM user').all<{ count: number }>()).results
-    return {
-        users: Number(users[0]?.count ?? 0),
-        sameClientInFreshContext: getAppDb(freshContext) === database,
-        sameAdapterInFreshContext: getSiteAdminDatabase(freshContext) === adapter,
-        alternateClientIsolated: getAppDb(alternateContext) !== database,
-        alternateAdapterIsolated: getSiteAdminDatabase(alternateContext) !== adapter,
-        alternateClientOwnsBinding: getAppDb(alternateContext).$client === alternateBinding,
-    }
-})
+export default defineEventHandler((event) =>
+    withSiteAdminContext(event.context, async () => {
+        const adapter = useVoidDatabase(schema)
+        const binding = (event.context.cloudflare as { env: { DB: AnyD1Database } }).env.DB
+        const alternate = { ...event.context, cloudflare: { env: { DB: new Proxy(binding, {}) } } }
+        const users = await db.select().from(schema.user)
+        return {
+            users: users.length,
+            sameAdapterInFreshContext: withSiteAdminContext(
+                { ...event.context },
+                () => useVoidDatabase(schema) === adapter,
+            ),
+            alternateAdapterIsolated: withSiteAdminContext(alternate, () => useVoidDatabase(schema) !== adapter),
+            restoredOriginalBinding: useVoidDatabase(schema) === adapter,
+        }
+    }),
+)

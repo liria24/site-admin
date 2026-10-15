@@ -29,7 +29,6 @@ export default defineSiteAdminConfig({
             editor: { ai: ['proofread'], models: { posts: ['create', 'publish', 'readDraft', 'update'] } },
         },
     },
-    database: async () => (await import('./server/database')).getSiteAdminDatabase(),
     tasks: { publishDue: true, syncAssets: true },
     seo: { titleTemplate: '%s | Global' },
     routeRules: {
@@ -64,10 +63,11 @@ export default defineSiteAdminConfig({
             route: { path: '/go/:slug', redirect: 'destination' },
         },
         posts: {
+            meta: ({ t }) => ({ label: t('entry'), plural: t('entries'), editor: 'markdown' }),
             fields: {
                 slug: text({ i18n: true }),
                 description: text({ i18n: true }),
-                title: text({ required: true, i18n: true }),
+                title: text({ required: true, i18n: true, label: ({ t }) => t('title') }),
                 body: markdown({ i18n: true }),
             },
 

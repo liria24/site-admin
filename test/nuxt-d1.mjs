@@ -9,7 +9,6 @@ import { join as joinPath } from 'pathe'
 import { buildNuxt, loadNuxt } from 'nuxt/kit'
 import { generateCombinedSchema } from '../packages/site-admin/dist/generate.js'
 import { admin } from 'better-auth/plugins'
-import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 import domain from './fixtures/nuxt-d1/site-admin.config.ts'
 import { assertNoNodeSQLiteDriver, verifyNodeSQLiteDriverCheck } from './fixtures/nuxt-d1/worker-imports.mjs'
 import { assertAiOmitted } from './assert-ai-omitted.mjs'
@@ -19,7 +18,7 @@ const run = promisify(execFile)
 const workspace = fileURLToPath(new URL('../', import.meta.url))
 const fixture = fileURLToPath(new URL('./fixtures/nuxt-d1/', import.meta.url))
 const wrangler = join(workspace, 'node_modules/wrangler/bin/wrangler.js')
-const schemaPath = joinPath(fixture, '.data/schema/schema.ts')
+const schemaPath = joinPath(fixture, 'db/schema.ts')
 const migrations = joinPath(fixture, '.data/migrations')
 const wranglerConfig = join(fixture, '.data/wrangler.json')
 const authSecret = 'site-admin-d1-integration-test-secret-0000000000000000'
@@ -31,17 +30,16 @@ const wranglerEnvironment = {
 }
 await Promise.all(
     // Nuxt recreates its module-install marker; each run must exercise clean native auth setup.
-    ['.data', '.nuxt', '.output', '.wrangler', '.nuxtrc'].map((name) =>
-        rm(join(fixture, name), { recursive: true, force: true }),
+    ['.data', '.nuxt', '.output', '.wrangler', '.nuxtrc', 'db', '.void', 'void.lock.json', '.void-wrangler.jsonc'].map(
+        (name) => rm(join(fixture, name), { recursive: true, force: true }),
     ),
 )
-await mkdir(join(fixture, '.data/schema'), { recursive: true })
+await mkdir(join(fixture, 'db'), { recursive: true })
 // Consumer-owned generation does not import its DB helper or open a connection.
 await writeFile(
     schemaPath,
     await generateCombinedSchema(domain, {
         plugins: [admin({ schema: { user: { fields: { role: 'accessRole' } } } })],
-        database: drizzleAdapter({}, { provider: 'sqlite', transaction: false }),
         emailAndPassword: { enabled: true },
     }),
 )
@@ -58,12 +56,9 @@ await run(
 )
 const wranglerMigrations = join(fixture, '.data/wrangler-migrations')
 await mkdir(wranglerMigrations, { recursive: true })
-const migration = (await readdir(migrations)).find((name) => !name.startsWith('.'))
+const migration = (await readdir(migrations)).find((name) => name.endsWith('.sql'))
 if (!migration) throw new Error('The consumer schema migration was not generated.')
-await writeFile(
-    join(wranglerMigrations, '0001_initial.sql'),
-    await readFile(join(migrations, migration, 'migration.sql')),
-)
+await writeFile(join(wranglerMigrations, '0001_initial.sql'), await readFile(join(migrations, migration)))
 const port = await new Promise((resolvePort, reject) => {
     const probe = createServer()
     probe.once('error', reject)

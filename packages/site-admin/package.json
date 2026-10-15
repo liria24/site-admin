@@ -29,10 +29,6 @@
         },
         "./package.json": "./package.json",
         "./module.json": "./dist/module.json",
-        "./adapters/drizzle": {
-            "types": "./dist/adapters/drizzle.d.ts",
-            "import": "./dist/adapters/drizzle.js"
-        },
         "./internal/runtime/tasks/publish-due": {
             "types": "./dist/runtime/tasks/publish-due.d.ts",
             "import": "./dist/runtime/tasks/publish-due.js"
@@ -52,6 +48,14 @@
         "./internal/runtime/database": {
             "types": "./dist/runtime/database.d.ts",
             "import": "./dist/runtime/database.js"
+        },
+        "./internal/runtime/context": {
+            "types": "./dist/runtime/context.d.ts",
+            "import": "./dist/runtime/context.js"
+        },
+        "./internal/runtime/presentation": {
+            "types": "./dist/runtime/presentation.d.ts",
+            "import": "./dist/runtime/presentation.js"
         },
         "./internal/runtime/tasks": {
             "types": "./dist/runtime/tasks.d.ts",
@@ -121,6 +125,10 @@
         "./internal/runtime/tasks/rebuild-search": {
             "types": "./dist/runtime/tasks/rebuild-search.d.ts",
             "import": "./dist/runtime/tasks/rebuild-search.js"
+        },
+        "./internal/runtime/seo": {
+            "types": "./dist/runtime/seo.d.ts",
+            "import": "./dist/runtime/seo.js"
         }
     },
     "publishConfig": {
@@ -134,31 +142,35 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
+        "@better-auth/drizzle-adapter": "1.7.10",
         "@nuxt/devtools-kit": "4.0.0-beta.5",
         "@nuxt/kit": "^4.6.1",
         "@nuxt/schema": "^4.6.1",
         "@standard-schema/spec": "^1.1.0",
         "@tanstack/vue-form": "2.0.0-alpha.2",
+        "auth": "^1.7.10",
         "comark-content": "^0.4.1",
         "devframe": "1.2.5",
+        "drizzle-orm": "0.45.4",
         "h3": "^1.15.11",
         "jiti": "^2.7.0",
         "nitropack": "2.13.4",
         "nypm": "^0.6.10",
         "pathe": "^2.0.3",
-        "rou3": "^1.0.0"
+        "rou3": "^1.0.0",
+        "void": "1.1.11"
     },
     "peerDependencies": {
-        "@better-auth/drizzle-adapter": "^1.7.9",
         "@nuxtjs/better-auth": "^0.3.9",
         "@nuxtjs/i18n": "^10.6.0",
         "@nuxtjs/robots": "^7.0.2",
         "@nuxtjs/sitemap": "^9.1.0",
+        "@takumi-rs/core": "^2.16.2",
+        "@takumi-rs/wasm": "^2.16.2",
         "ai": "^7.0.141",
         "better-auth": "^1.7.9",
         "comark": "^0.7.0",
-        "drizzle-kit": "1.0.0-rc.4",
-        "drizzle-orm": "1.0.0-rc.4",
+        "drizzle-kit": "^0.31.11",
         "files-sdk": "^3.1.1",
         "nuxt": "^4.6.1",
         "nuxt-files-sdk": "^0.3.1",
@@ -170,13 +182,7 @@
         "vue": "^3.6.0-rc.2"
     },
     "peerDependenciesMeta": {
-        "@better-auth/drizzle-adapter": {
-            "optional": true
-        },
         "drizzle-kit": {
-            "optional": true
-        },
-        "drizzle-orm": {
             "optional": true
         },
         "nuxt": {
@@ -226,9 +232,15 @@
         },
         "nuxt-site-config": {
             "optional": true
+        },
+        "@takumi-rs/core": {
+            "optional": true
+        },
+        "@takumi-rs/wasm": {
+            "optional": true
         }
     },
     "engines": {
-        "node": "^24.11.0 || >=26.0.0"
+        "node": ">=24.21.0"
     }
 }

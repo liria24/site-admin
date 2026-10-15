@@ -7,11 +7,7 @@ import {
     SiteAdminClientError,
     type PublicEntry,
 } from '../packages/site-admin/src/client'
-import {
-    siteAdminNuxtClientTemplate,
-    siteAdminNuxtFormTemplate,
-    siteAdminNuxtModelTypes,
-} from '../packages/site-admin/src/nuxt/client-templates'
+import { siteAdminNuxtClientTemplate, siteAdminNuxtModelTypes } from '../packages/site-admin/src/nuxt/client-templates'
 
 describe('Site Admin clients', () => {
     it('returns migration errors without retrying search or mutating reads', async () => {
@@ -370,11 +366,10 @@ describe('Site Admin clients', () => {
         await expect(unavailable.models()).rejects.toMatchObject({ code: 'SITE_ADMIN_REQUEST_FAILED', status: 503 })
     })
 
-    it('generates public/management helpers independently from the optional form peer and server config', () => {
+    it('generates a unified form composable without exposing server configuration', () => {
         const source = siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage' })
         expect(source).not.toContain('@liria24/site-admin/internal/form')
-        const form = siteAdminNuxtFormTemplate()
-        expect(form).toContain("from '@liria24/site-admin/internal/form'")
+        expect(source).toContain('useAdminForm')
         const types = siteAdminNuxtModelTypes('C:\\project\\site-admin.config.ts', ['production', 'preview'])
         expect(types).toContain('C:/project/site-admin.config.ts')
         expect(types).toContain('publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>')

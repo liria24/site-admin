@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { parseArgs } from 'node:util'
 import { createJiti } from 'jiti'
 import type { SiteAdminConfig } from './config'
@@ -37,13 +38,23 @@ const config = resolveSiteAdminConfig(loaded, [
     ...(values.env ?? []),
     ...(values.prerender ? ['prerender'] : []),
 ])
-const auth = values.auth
-    ? await jiti.import<NativeAuthConfig>(resolve(values.auth), {
+const nuxt = existsSync(resolve('nuxt.config.ts'))
+    ? await (await import('nuxt/kit')).loadNuxtConfig({ cwd: process.cwd(), dotenv: false })
+    : undefined
+const authOptions = (
+    nuxt as { auth?: { serverConfig?: string; schema?: Parameters<typeof generateCombinedSchema>[2] } } | undefined
+)?.auth
+const authFile =
+    values.auth ??
+    authOptions?.serverConfig ??
+    (existsSync(resolve('server/auth.config.ts')) ? 'server/auth.config.ts' : undefined)
+const auth = authFile
+    ? await jiti.import<NativeAuthConfig>(resolve(authFile), {
           default: true,
       })
     : undefined
-const source = auth ? await generateCombinedSchema(config, auth) : generateSiteAdminSchema(config),
-    output = resolve(values.out ?? 'schema.ts')
+const source = auth ? await generateCombinedSchema(config, auth, authOptions?.schema) : generateSiteAdminSchema(config),
+    output = resolve(values.out ?? config.schema?.output ?? 'db/schema.ts')
 await mkdir(dirname(output), { recursive: true })
 await writeFile(output, source)
-console.log(`Generated ${output}. Run drizzle-kit generate to create SQL migrations; no database was modified.`)
+console.log(`Generated ${output}. Run void db generate to create SQL migrations; no database was modified.`)

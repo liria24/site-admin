@@ -16,6 +16,7 @@ import { SiteAdminError } from './errors'
 import { createManagementOperations } from './server/operations'
 import { projectMarkdownListSummary } from './markdown/list-summary'
 import { useSiteAdminRuntime } from './nuxt/server'
+import { withSiteAdminContext } from './runtime/context'
 
 export interface ServerContent {
     get<Name extends Extract<keyof SiteAdminPublicModels, string>>(
@@ -115,7 +116,18 @@ export const useAdmin = (event?: RequestEvent, platformContext?: object): Server
         if (kind === 'rebuildSearch') return admin.rebuildSearch()
         return admin.syncAssetCopies()
     }
-    return {
+    const api = {
+        models: async () =>
+            Object.entries((await raw.models()).models).map(([name, model]) => ({
+                name,
+                meta: model.meta ?? { label: name, plural: name },
+                features: {
+                    publishing: model.publishing,
+                    scheduling: model.scheduling,
+                    revisions: model.revisions,
+                    sortable: model.sortable,
+                },
+            })),
         entries: {
             list: async <Model extends ModelName>(model: Model, options?: import('./client').ManagementListOptions) => {
                 const page = await forModel(model).listEntries(model, options)
@@ -259,7 +271,7 @@ export const useAdmin = (event?: RequestEvent, platformContext?: object): Server
                 options?: PublicMarkdownListOptions,
             ) => {
                 const admin = await instance()
-                const documents = await (await admin.content(model, options?.locale)).list()
+                const documents = await admin.contentList(model, options?.locale)
                 const items =
                     options?.markdown === 'summary'
                         ? await projectMarkdownListSummary(
@@ -300,4 +312,17 @@ export const useAdmin = (event?: RequestEvent, platformContext?: object): Server
             rebuildSearch: async () => (await task('rebuildSearch')) as { indexed: number },
         },
     }
+    for (const [namespace, group] of Object.entries(api)) {
+        if (typeof group === 'function') {
+            Object.assign(api, { [namespace]: () => withSiteAdminContext(platformContext ?? event?.context, group) })
+            continue
+        }
+        for (const [name, method] of Object.entries(group)) {
+            Object.assign(group, {
+                [name]: (...args: unknown[]) =>
+                    withSiteAdminContext(platformContext ?? event?.context, () => Reflect.apply(method, group, args)),
+            })
+        }
+    }
+    return api
 }

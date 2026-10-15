@@ -22,7 +22,7 @@ const ogImage = JSON.parse(
     await readFile(new URL('../node_modules/nuxt-og-image/package.json', import.meta.url), 'utf8'),
 )
 const renderers = Object.fromEntries(
-    ['@takumi-rs/core', 'satori', '@resvg/resvg-js'].map((name) => {
+    ['@takumi-rs/core', '@takumi-rs/wasm', 'satori', '@resvg/resvg-js'].map((name) => {
         if (!ogImage.peerDependencies[name]) throw new Error(`OG renderer peer missing: ${name}`)
         return [name, ogImage.peerDependencies[name]]
     }),
@@ -48,6 +48,8 @@ const install = async (cwd = temporary, production = false) => {
         manifest.overrides = Object.fromEntries(
             ['vue', 'drizzle-orm'].filter((name) => manifest.dependencies?.[name]).map((name) => [name, `$${name}`]),
         )
+        // npm otherwise selects Prisma 8 RC for Drizzle's wildcard optional peer, outside Better Auth's range.
+        manifest.overrides.prisma = '^7.0.0'
         await writeFile(path, JSON.stringify(manifest))
         // npm cannot reify Nitro's traced links; install the generated production manifest into a clean tree.
         if (production) await rm(join(cwd, 'node_modules'), { force: true, recursive: true })
@@ -81,10 +83,23 @@ const reservePort = () =>
             server.close((error) => (error ? reject(error) : resolve(address.port)))
         })
     })
-const startNuxt = async (directory) => {
+const startNuxt = async (directory, worker = false) => {
     const port = await reservePort()
     const output = []
-    const child = spawn(process.execPath, [join(directory, '.output/server/index.mjs')], {
+    const args = worker
+        ? [
+              join(temporary, 'node_modules/wrangler/bin/wrangler.js'),
+              'dev',
+              '--local',
+              '--config',
+              '.data/wrangler.json',
+              '--persist-to',
+              '.data/state',
+              '--port',
+              String(port),
+          ]
+        : [join(directory, '.output/server/index.mjs')]
+    const child = spawn(process.execPath, args, {
         cwd: directory,
         env: {
             ...process.env,
@@ -131,7 +146,7 @@ try {
         await verifyStandalone(tarball)
         await verifyPublicDataConsumer(tarball)
     }
-    if (packageManager === 'pnpm') await verifyPeerDependencies(tarball)
+    await verifyPeerDependencies(tarball, packageManager)
     await Promise.all(['server', 'remote'].map((name) => mkdir(join(temporary, name), { recursive: true })))
     await writeFile(
         join(temporary, 'package.json'),
@@ -154,7 +169,8 @@ try {
                     'nuxt-seo-utils',
                     '@better-auth/drizzle-adapter',
                     '@nuxtjs/better-auth',
-                    '@tanstack/vue-form',
+                    'void',
+                    'wrangler',
                     'drizzle-orm',
                     'drizzle-kit',
                     'nuxt',
@@ -244,6 +260,15 @@ export default defineNuxtConfig({ modules: ['@liria24/site-admin/nuxt'], ...{ fi
         `<script setup>const route = useRoute(); const { data: entry } = await useContent('posts', { path: () => route.path })</script><template><div>{{ entry?.data?.title || 'remote empty' }}</div></template>`,
     )
 
+    for (const name of ['server', 'remote'])
+        await writeFile(
+            join(temporary, name, 'package.json'),
+            JSON.stringify({ name: 'packed-' + name, type: 'module', dependencies: { nuxt: '*' } }),
+        )
+    await writeFile(
+        join(temporary, 'server/void.config.ts'),
+        "export default { inference: { bindings: { db: true } }, cloudflare: { name: 'packed-site-admin', compatibility_flags: ['nodejs_compat'] } }",
+    )
     await install()
     exec(['tsc', '--noEmit'])
     run(process.execPath, ['core.ts'])
@@ -289,13 +314,11 @@ registerHooks({ resolve(specifier, context, next) {
 await import('@liria24/site-admin/internal/form')
 `,
     ])
-    exec(['site-admin', 'generate', '--config', 'server/site-admin.config.ts', '--out', 'server/schema.ts'])
+    exec(['site-admin', 'generate', '--config', 'server/site-admin.config.ts', '--out', 'server/db/schema.ts'])
     await writeFile(
         join(temporary, 'server/auth.config.ts'),
         `import { defineServerAuth } from '@nuxtjs/better-auth/config'
-import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
 export default defineServerAuth({
-  database: drizzleAdapter({}, { provider: 'sqlite', usePlural: true, transaction: false }),
   emailAndPassword: { enabled: true },
 })
 `,
@@ -306,50 +329,60 @@ export default defineServerAuth({
         '--config',
         'server/site-admin.config.ts',
         '--out',
-        'server/schema.ts',
+        'server/db/schema.ts',
         '--auth',
         'server/auth.config.ts',
     ])
-    await writeFile(
-        join(temporary, 'server/drizzle.config.ts'),
-        `export default { dialect: 'sqlite', schema: './schema.ts', out: './migrations', dbCredentials: { url: './.data/content.sqlite3' } }`,
+    await mkdir(join(temporary, 'server/server'), { recursive: true })
+    await writeFile(join(temporary, 'server/server/auth.config.ts'), `export { default } from '../auth.config'`)
+    run(
+        process.execPath,
+        [join(temporary, 'node_modules/void/dist/cli/cli.mjs'), 'db', 'generate'],
+        join(temporary, 'server'),
     )
     await mkdir(join(temporary, 'server/.data'), { recursive: true })
-    // Resolve the application's declared migration tool, never Site Admin's dependency directory.
-    const kitBin = run(process.execPath, [
-        '--input-type=module',
-        '-e',
-        `import {createRequire} from 'node:module'; import {dirname,join} from 'node:path'; const require=createRequire(import.meta.url); console.log(join(dirname(require.resolve('drizzle-kit')),'bin.cjs'))`,
-    ])
-    run(process.execPath, [kitBin, 'generate'], join(temporary, 'server'))
-    run(process.execPath, [kitBin, 'migrate'], join(temporary, 'server'))
-    await mkdir(join(temporary, 'server/server/plugins'), { recursive: true })
-    await writeFile(join(temporary, 'server/server/auth.config.ts'), `export { default } from '../auth.config'`)
+    await writeFile(
+        join(temporary, 'server/.data/wrangler.json'),
+        JSON.stringify({
+            name: 'packed-site-admin',
+            main: '../.output/server/index.mjs',
+            compatibility_date: '2026-10-15',
+            compatibility_flags: ['nodejs_compat'],
+            d1_databases: [
+                {
+                    binding: 'DB',
+                    database_name: 'packed',
+                    database_id: '00000000-0000-4000-8000-000000000005',
+                    migrations_dir: '../db/migrations',
+                },
+            ],
+            vars: { NUXT_BETTER_AUTH_SECRET: 'packed-consumer-test-secret-000000000000000' },
+        }),
+    )
+    run(
+        process.execPath,
+        [
+            join(temporary, 'node_modules/wrangler/bin/wrangler.js'),
+            'd1',
+            'migrations',
+            'apply',
+            'DB',
+            '--local',
+            '--config',
+            '.data/wrangler.json',
+            '--persist-to',
+            '.data/state',
+        ],
+        join(temporary, 'server'),
+    )
     await writeFile(
         join(temporary, 'server/app/auth.config.ts'),
         `import { defineClientAuth } from '@nuxtjs/better-auth/config'; export default defineClientAuth({})`,
     )
     await writeFile(
-        join(temporary, 'server/server/plugins/database.ts'),
-        `
-import { useServerHooks } from 'nuxt/server'
-import { drizzle } from 'drizzle-orm/node-sqlite'
-import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
-import { drizzleAdapter as authAdapter } from '@better-auth/drizzle-adapter/relations-v2'
-import * as schema from '../../schema'
-export default () => {
-  const db = drizzle(${JSON.stringify(join(temporary, 'server/.data/content.sqlite3'))}, { relations: schema.authRelations })
-  const database = drizzleAdapter(db, { schema })
-  const authDatabase = authAdapter(db, { provider: 'sqlite', schema, usePlural: true, transaction: false })
-  useServerHooks().hook('site-admin:database', (context) => { context.database = database; context.authDatabase = authDatabase })
-}
-`,
-    )
-    await writeFile(
         join(temporary, 'server/server/types.ts'),
         `import { useServerHooks } from 'nuxt/server'
 export default () => {
-  useServerHooks().hook('site-admin:database', (context) => { const event = context.event; void event })
   useServerHooks().hook('site-admin:authorize', (context) => {
     const request: Request = context.event.req
     context.event.res.headers.set('x-native-probe', '1')
@@ -393,9 +426,9 @@ void invalidImpersonatedBy
                 [
                     '--input-type=module',
                     '-e',
-                    `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: './server', dev: ${dev}, ready: true }); try { if (!nuxt.options.alias['#auth/server']?.endsWith('site-admin/better-auth-server-config.ts')) throw new Error('Native module ordering lost the Site Admin auth wrapper'); } finally { await nuxt.close() }`,
+                    `import { loadNuxt } from 'nuxt/kit'; const nuxt = await loadNuxt({ cwd: '.', dev: ${dev}, ready: true }); try { if (!nuxt.options.alias['#auth/server']?.endsWith('site-admin/better-auth-server-config.ts')) throw new Error('Native module ordering lost the Site Admin auth wrapper'); } finally { await nuxt.close() }`,
                 ],
-                temporary,
+                join(temporary, 'server'),
                 {
                     ...process.env,
                     CI: 'true',
@@ -405,10 +438,20 @@ void invalidImpersonatedBy
             )
         const manifestBefore = await readFile(join(temporary, 'package.json'), 'utf8')
         try {
-            exec(['nuxt', 'build', 'server'])
+            run(
+                process.execPath,
+                [join(temporary, 'node_modules/nuxt/bin/nuxt.mjs'), 'build'],
+                join(temporary, 'server'),
+                { ...process.env, CI: 'true' },
+            )
             throw new Error('Missing renderer dependency was accepted.')
         } catch (error) {
-            if (!/renderer missing dependencies|takumi renderer is not installed/u.test(String(error))) throw error
+            if (
+                !/Missing dependencies:|renderer missing dependencies|takumi renderer is not installed/u.test(
+                    String(error),
+                )
+            )
+                throw error
         }
         if ((await readFile(join(temporary, 'package.json'), 'utf8')) !== manifestBefore)
             throw new Error('Build mutated dependencies.')
@@ -442,10 +485,10 @@ void invalidImpersonatedBy
         setupNuxt(false)
         await rm(satoriPath)
     }
-    exec(['nuxt', 'build', 'server'])
-    await assertAiOmitted(join(temporary, 'server'))
+    exec(['nuxt', 'build'], join(temporary, 'server'))
     // CLI 4 relocates build artifacts; prepare restores the public generated type surface.
-    exec(['nuxt', 'prepare', 'server'])
+    exec(['nuxt', 'prepare'], join(temporary, 'server'))
+    await assertAiOmitted(join(temporary, 'server'))
     for (const context of ['node', 'app', 'server'])
         exec(['tsc', '--noEmit', '-p', `server/.nuxt/tsconfig.${context}.json`])
     const serverFiles = await filesUnder(join(temporary, 'server/.output'))
@@ -467,8 +510,7 @@ void invalidImpersonatedBy
         )
             throw new Error(`Generation-only Drizzle Kit leaked into production server: ${file}`)
     }
-    await install(join(temporary, 'server/.output/server'), true)
-    const local = await startNuxt(join(temporary, 'server'))
+    const local = await startNuxt(join(temporary, 'server'), true)
     try {
         const response = await fetch(`${local.origin}/api/content/posts`)
         const body = await response.text()

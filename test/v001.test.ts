@@ -453,7 +453,11 @@ it('does not opt in by the draft storage name and rejects missing, aliased and u
         ).rejects.toMatchObject({ code: 'SITE_ADMIN_STORAGE_UNAVAILABLE' })
     await expect(
         createSiteAdmin({
-            config: { ...config, assets: { ...config.assets, storage: 'draft' } },
+            config: {
+                ...config,
+                storage: { draft: { adapter: 'memory' } },
+                assets: { ...config.assets, storage: 'draft' },
+            },
             database: adapter,
             getFiles: shared.options.getFiles,
         }).initialize(),

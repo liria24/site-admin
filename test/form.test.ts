@@ -4,6 +4,18 @@ import { useEntryForm, siteAdminFormDefaults } from '../packages/site-admin/src/
 import { formDescriptor, modelEntry, modelFixture } from './model-fixture'
 
 describe('native resource form', () => {
+    it('retains dirty input and reports conflicts after AsyncData clears its previous error', () => {
+        const { resource } = modelFixture(async () => Response.json(null))
+        const editor = useEntryForm(resource)
+        editor.form.setFieldValue('title', 'Local input')
+        resource.status.value = 'pending'
+        resource.data.value = modelEntry('one', 2, { title: 'Remote input' })
+        resource.error.value = undefined
+        resource.status.value = 'success'
+        expect(resource.error.value).toMatchObject({ data: { code: 'SITE_ADMIN_CONFLICT' } })
+        expect(editor.form.state.values.title).toBe('Local input')
+        expect(editor.draft.snapshot().version).toBe(1)
+    })
     it('clones defaults from reactive descriptors', () => {
         const descriptor = reactive({
             ...formDescriptor,

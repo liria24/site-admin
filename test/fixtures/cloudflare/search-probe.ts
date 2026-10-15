@@ -1,5 +1,5 @@
-import { drizzle, type AnyD1Database } from 'drizzle-orm/d1'
-import { drizzleAdapter } from '../../../packages/site-admin/src/adapters/drizzle'
+import type { AnyD1Database } from 'drizzle-orm/d1'
+import { createD1Database } from '../../../packages/site-admin/src/adapters/database'
 import { defineSiteAdminConfig, file, text } from '../../../packages/site-admin/src/index'
 import { createSiteAdmin, handleManagementRequest } from '../../../packages/site-admin/src/server/index'
 
@@ -16,7 +16,7 @@ const config = defineSiteAdminConfig({
 /** Synthetic local-worker probes; the production package has no seeding or query-budget wrapper. */
 export async function searchProbe(request: Request, binding: AnyD1Database, schema: Record<string, unknown>) {
     const path = new URL(request.url).pathname
-    const database = drizzleAdapter(drizzle(binding), { schema })
+    const database = createD1Database(binding, schema)
     if (path === '/search-large') {
         const core = createSiteAdmin({ config, database, authorize: () => ({ id: 'probe', roles: ['admin'] }) })
         const marker = 'A😀B%_[]C'
@@ -111,7 +111,7 @@ export async function searchProbe(request: Request, binding: AnyD1Database, sche
             return typeof value === 'function' ? value.bind(target) : value
         },
     })
-    const freshDatabase = drizzleAdapter(drizzle(limited), { schema })
+    const freshDatabase = createD1Database(limited, schema)
     for (let index = 0; index < 10; index++) await freshDatabase.query('SELECT 1')
     const fresh = createSiteAdmin({
         config,

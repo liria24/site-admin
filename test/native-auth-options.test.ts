@@ -1,8 +1,9 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { betterAuth } from 'better-auth'
 import { admin, createAccessControl, username } from 'better-auth/plugins'
-import { drizzleAdapter } from '@better-auth/drizzle-adapter/relations-v2'
-import { drizzle } from 'drizzle-orm/node-sqlite'
+import { drizzleAdapter } from '@better-auth/drizzle-adapter'
+import { drizzle } from 'drizzle-orm/d1'
+import { sqliteD1 } from './d1'
 import { DatabaseSync } from 'node:sqlite'
 import { createRequire } from 'node:module'
 import { execFileSync } from 'node:child_process'
@@ -60,16 +61,20 @@ describe('native admin configuration preservation', () => {
             })
             const other = username()
             const config = defineSiteAdminConfig({ models: { posts: { fields: { slug: text(), title: text() } } } })
-            const schemaSource = await generateCombinedSchema(config, {
-                database: drizzleAdapter({}, { provider: 'sqlite' }),
-                plugins: [native, other],
-            })
+            const schemaSource = await generateCombinedSchema(
+                config,
+                {
+                    database: drizzleAdapter({}, { provider: 'sqlite' }),
+                    plugins: [native, other],
+                },
+                { casing: 'snake_case' },
+            )
             expect(schemaSource).toContain('accessRole: text("access_role")')
             expect(schemaSource).not.toContain('role: text("role")')
             const schemaFile = resolve(directory, 'schema.ts')
             await writeFile(schemaFile, schemaSource)
             const migrationDirectory = resolve(directory, 'migrations')
-            execFileSync(
+            const generation = execFileSync(
                 process.execPath,
                 [
                     resolve('packages/site-admin/node_modules/drizzle-kit/bin.cjs'),
@@ -78,16 +83,20 @@ describe('native admin configuration preservation', () => {
                     `--schema=${schemaFile.replaceAll('\\', '/')}`,
                     `--out=${migrationDirectory.replaceAll('\\', '/')}`,
                 ],
-                { stdio: 'pipe' },
+                { stdio: ['ignore', 'pipe', 'inherit'] },
             )
-            const migration = (await readdir(migrationDirectory)).find((name) => !name.startsWith('.'))!
-            database.exec(await readFile(resolve(migrationDirectory, migration, 'migration.sql'), 'utf8'))
+            const migration = (await readdir(migrationDirectory)).find((name) => name.endsWith('.sql'))!
+            expect(migration, generation.toString()).toBeDefined()
+            database.exec(await readFile(resolve(migrationDirectory, migration), 'utf8'))
             const schema = await createJiti(import.meta.url, { fsCache: false }).import<Record<string, unknown>>(
                 schemaFile,
             )
             const extended = extendSiteAdminAuth(
                 {
-                    database: drizzleAdapter(drizzle({ client: database }), { provider: 'sqlite', schema }),
+                    database: drizzleAdapter(
+                        drizzle(sqliteD1(database) as unknown as import('drizzle-orm/d1').AnyD1Database, { schema }),
+                        { provider: 'sqlite', schema, transaction: false },
+                    ),
                     secret: 'synthetic-native-admin-test-secret-at-least-32',
                     baseURL: 'https://native-admin.test',
                     plugins: [native, other],

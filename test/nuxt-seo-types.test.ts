@@ -14,7 +14,8 @@ it('accepts shared reactive DTOs and validates native second overrides without r
     await writeFile(join(directory, 'disabled.ts'), siteAdminNuxtSeoTemplate({ ogImage: false }))
     await writeFile(
         join(directory, 'imports.d.ts'),
-        `declare module '#imports' {
+        `declare module '#app' { export * from '#imports' }
+declare module '#imports' {
   export const useRequestURL: () => URL
   export const useRuntimeConfig: () => { public: { siteAdmin?: unknown } }
   export const useRoute: () => { path: string }
@@ -58,6 +59,7 @@ useSeoWithoutOg(dto, { image: { component: 'Default.takumi' } })
                 paths: {
                     '@liria24/site-admin': [resolve('packages/site-admin/src/index.ts')],
                     '@liria24/site-admin/internal/seo': [resolve('packages/site-admin/src/seo.ts')],
+                    '@liria24/site-admin/internal/runtime/seo': [resolve('packages/site-admin/src/runtime/seo.ts')],
                     vue: [resolve('node_modules/vue/dist/vue.d.ts')],
                     '@unhead/vue': [requireNuxt.resolve('@unhead/vue')],
                 },

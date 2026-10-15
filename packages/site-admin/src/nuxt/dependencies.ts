@@ -5,6 +5,7 @@ import type { Nuxt, NuxtImport, ModuleDependencies } from 'nuxt/schema'
 import { addDependency, installDependencies } from 'nypm'
 import { siteAdminFilesModuleDependencies, siteAdminModuleOptions } from './files-source'
 import type { ModuleOptions } from '../nuxt'
+import { preparePresentation } from './presentation'
 
 const prepared = new WeakSet<Nuxt>()
 const pending = new Map<string, Promise<void>>()
@@ -58,6 +59,7 @@ export const ensureSiteAdminDependencies = async (nuxt: Nuxt, names: string[]) =
                 )
             const manifest = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')) as {
                 peerDependencies: Record<string, string>
+                dependencies: Record<string, string>
             }
             const project = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')) as Record<
                 string,
@@ -71,7 +73,7 @@ export const ensureSiteAdminDependencies = async (nuxt: Nuxt, names: string[]) =
             }
             const additions = missing
                 .filter((name) => !declared[name])
-                .map((name) => name + '@' + manifest.peerDependencies[name])
+                .map((name) => name + '@' + (manifest.peerDependencies[name] ?? manifest.dependencies[name]))
             await installLocally(root, () =>
                 additions.length ? addDependency(additions, { cwd: root }) : installDependencies({ cwd: root }),
             )
@@ -117,6 +119,7 @@ export const siteAdminModuleDependencies = async (nuxt: Nuxt): Promise<ModuleDep
     }
     const dependencies: ModuleDependencies = {}
     const names: string[] = []
+    if (options.server?.enabled !== false) names.push('void', 'drizzle-orm')
     for (const [flag, name] of Object.entries(modules) as Array<[keyof typeof modules, string]>) {
         if (options[flag] === false || (flag === 'auth' && options.server?.enabled === false)) continue
         dependencies[name] = {}
@@ -125,6 +128,7 @@ export const siteAdminModuleDependencies = async (nuxt: Nuxt): Promise<ModuleDep
     if (options.auth !== false && options.server?.enabled !== false) names.push('better-auth')
     if (options.ai !== false) names.push('ai')
     if (options.markdown !== false) names.push('comark')
+    if (options.ogImage !== false) names.push('@takumi-rs/core', '@takumi-rs/wasm')
     if ((nuxt.options as unknown as { files?: unknown }).files !== false) {
         names.push('files-sdk', 'nuxt-files-sdk')
     }
@@ -137,5 +141,6 @@ export const siteAdminModuleDependencies = async (nuxt: Nuxt): Promise<ModuleDep
         dependencies['nuxt-site-config'] = {}
     }
     await ensureSiteAdminDependencies(nuxt, [...new Set(names)])
+    if (options.i18n !== false && options.server?.enabled !== false) await preparePresentation(nuxt)
     return { ...dependencies, ...(await siteAdminFilesModuleDependencies(nuxt)) }
 }

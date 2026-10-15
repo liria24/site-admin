@@ -1,4 +1,4 @@
-import type { DrizzleConnection } from './drizzle'
+import type { DrizzleConnection } from './database'
 import type { SiteAdminConfig } from '../config'
 import type { AtomicStatement, DatabaseValue } from './sqlite-statements'
 import type { AssetRecord, EntryRecord, RevisionRecord } from '../server/types'
@@ -110,9 +110,9 @@ export const sqliteStorage = (
         queryRows<Row>(database, sql, params)
     const row = async <Row extends object>(sql: string, params: DatabaseValue[] = []) =>
         (await rows<Row>(sql, params))[0]
-    const execute = async (statements: AtomicStatement[], mode: 'read' | 'write' = 'write') => {
+    const execute = async (statements: AtomicStatement[]) => {
         try {
-            return await runAtomic(database, statements, mode)
+            return await runAtomic(database, statements)
         } catch (error) {
             if (
                 !(error instanceof SiteAdminError) &&
@@ -219,10 +219,7 @@ export const sqliteStorage = (
                   },
               ]
             : []
-        const result = await execute(
-            [...checks, ...statements(`${contentFrom} WHERE ${where.sql}`, where.params)],
-            'read',
-        )
+        const result = await execute([...checks, ...statements(`${contentFrom} WHERE ${where.sql}`, where.params)])
         if (q && result.shift()!.rows.length)
             throw new SiteAdminError(
                 'SITE_ADMIN_MIGRATION_REQUIRED',
@@ -364,22 +361,19 @@ export const sqliteStorage = (
         },
         pagePublished: async (filter, page) => {
             const from = `FROM site_admin_entries e JOIN ${source} r ON r.id=e.published_revision_id WHERE e.model=? AND e.published_revision_id IS NOT NULL AND e.published_at IS NOT NULL`
-            const result = await execute(
-                [
-                    { sql: `SELECT COUNT(*) AS total ${from}`, params: [filter.model], query: true },
-                    {
-                        sql: `SELECT ${selectedPublishedColumns(filter.locale)} ${from} ORDER BY e.sort_order IS NULL,e.sort_order,e.published_at DESC,e.id LIMIT ? OFFSET ?`,
-                        params: [
-                            ...(filter.locale === undefined ? [] : [filter.locale]),
-                            filter.model,
-                            page.limit,
-                            page.offset,
-                        ],
-                        query: true,
-                    },
-                ],
-                'read',
-            )
+            const result = await execute([
+                { sql: `SELECT COUNT(*) AS total ${from}`, params: [filter.model], query: true },
+                {
+                    sql: `SELECT ${selectedPublishedColumns(filter.locale)} ${from} ORDER BY e.sort_order IS NULL,e.sort_order,e.published_at DESC,e.id LIMIT ? OFFSET ?`,
+                    params: [
+                        ...(filter.locale === undefined ? [] : [filter.locale]),
+                        filter.model,
+                        page.limit,
+                        page.offset,
+                    ],
+                    query: true,
+                },
+            ])
             return {
                 items: (result[1]!.rows as StoredPublished[]).map(published),
                 total: Number((result[0]!.rows[0] as { total: number }).total),

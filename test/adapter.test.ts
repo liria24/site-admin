@@ -11,7 +11,7 @@ import { createSiteAdmin, handleManagementRequest } from '../packages/site-admin
 import { defineSiteAdminConfig, text, file, relation, array, object } from '../packages/site-admin/src'
 import { migrateTestDatabase, testAdapter } from './migrate'
 import { createMemoryDatabase } from './memory-storage'
-import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
+import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/database'
 import { queryRows, runAtomic } from './sqlite-queries'
 import { createSiteAdminManagementClient } from '../packages/site-admin/src/client'
 

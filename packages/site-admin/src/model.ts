@@ -1,7 +1,18 @@
 import { prepareAdminEntry } from './entry-preparation'
 import { resolveTranslation, type TranslationInput } from './i18n'
 import { createError, type H3Error } from 'h3'
-import { computed, getCurrentScope, onScopeDispose, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
+import {
+    computed,
+    getCurrentScope,
+    onScopeDispose,
+    toValue,
+    watch,
+    reactive,
+    readonly,
+    type MaybeRefOrGetter,
+    type Ref,
+} from 'vue'
+import type { ModelMeta } from './presentation'
 import { SiteAdminClientError } from './client'
 import type { SiteAdminEntry, SiteAdminEntryMutation, SiteAdminEntryPage, SiteAdminManagementClient } from './client'
 import type { ModelDescriptor } from './descriptor'
@@ -412,7 +423,17 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
             signal.throwIfAborted()
             return result ? accept(result, entry) : undefined
         })
+    const meta = reactive<ModelMeta>({ label: input.model, plural: input.model })
+    watch(
+        () => input.descriptor.value?.meta,
+        (value) => {
+            for (const key of Object.keys(meta)) if (key !== 'label' && key !== 'plural') delete meta[key]
+            Object.assign(meta, { label: input.model, plural: input.model }, value)
+        },
+        { immediate: true, flush: 'sync' },
+    )
     const actions = {
+        meta: readonly(meta),
         data: state.data,
         status: state.status,
         error: state.error,

@@ -20,6 +20,12 @@ export type { InferPublicModelData, InferSiteAdminModels, InferSiteAdminPublicMo
 
 /** Nuxt augments this with the public and management models inferred from its config. */
 export interface SiteAdminClientRegistry {}
+type ModelMetas = SiteAdminClientRegistry extends { modelMeta: infer Meta }
+    ? Meta
+    : Record<string, import('./presentation').ModelMeta>
+export type SiteAdminModelMeta<Name extends string = string> = Name extends keyof ModelMetas
+    ? ModelMetas[Name]
+    : ModelMetas[keyof ModelMetas]
 export type SiteAdminNamedAiActions = SiteAdminClientRegistry extends { namedAiActions: infer Actions }
     ? Actions
     : Record<string, { input: Record<string, unknown>; data: unknown }>
@@ -304,7 +310,7 @@ export interface SiteAdminClient<Models = SiteAdminPublicModels, SummaryModels =
         page: { limit: number; offset: number },
         options?: PublicListOptions & { markdown?: 'full' },
     ): Promise<PublicPage<Models[Name]>>
-    models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
+    models(options?: SiteAdminRequestOptions & { uiLocale?: string }): Promise<SiteAdminDescriptor>
     resolveRoute(this: void, path: string, options?: PublicListOptions): Promise<PublicRouteResult | null>
 }
 
@@ -362,7 +368,7 @@ export const createSiteAdminClient = <
 
 export interface SiteAdminManagementClient<Models = SiteAdminManagementModels> {
     assetUrl(this: void, id: string): string
-    models(options?: SiteAdminRequestOptions): Promise<SiteAdminDescriptor>
+    models(options?: SiteAdminRequestOptions & { uiLocale?: string }): Promise<SiteAdminDescriptor>
     listEntries<Name extends ModelName<Models>>(
         model: Name,
         options?: ManagementListOptions,
@@ -494,7 +500,7 @@ export const createSiteAdminManagementClient = <
     }
     return {
         assetUrl: (id) => managementAssetUrl(id, base),
-        models: (requestOptions = {}) => get('/models', undefined, requestOptions.signal),
+        models: (requestOptions = {}) => get('/models', { uiLocale: requestOptions.uiLocale }, requestOptions.signal),
         listEntries: (model: ModelName<Models> | undefined, requestOptions: ManagementListOptions = {}) => {
             const { signal, ...query } = requestOptions
             return entriesPage({ model, ...query }, signal)

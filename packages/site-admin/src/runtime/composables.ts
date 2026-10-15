@@ -32,6 +32,7 @@ import type { AsyncDataMiddleware } from '#app'
 import type { SiteAdminNamedAiActions } from '../client'
 import { computed, nextTick, toValue, watch, ref, shallowRef, type Ref, type MaybeRefOrGetter } from 'vue'
 import type { EntryPrepareContext } from '../model'
+import { useEntryForm, type UseEntryFormOptions } from '../form'
 
 declare module '#app' {
     interface RuntimeNuxtHooks {
@@ -154,7 +155,8 @@ type SiteAdminModelResource<Name extends string, Result> = Omit<
     AsyncData<Result, SiteAdminModelError | undefined>,
     'then' | 'catch' | 'finally'
 > &
-    Handled<Omit<SiteAdminModelActions<FormData<Name>>, 'data' | 'status' | 'error' | 'refresh'>> & {
+    Handled<Omit<SiteAdminModelActions<FormData<Name>>, 'data' | 'status' | 'error' | 'refresh' | 'meta'>> & {
+        meta: Readonly<import('../client').SiteAdminModelMeta<Name>>
         page: Ref<number>
     }
 
@@ -603,10 +605,12 @@ export const createSiteAdminComposables = (
     const useAdminClient = (): ReturnType<typeof createAdminClient<SiteAdminFormModels>> => {
         const nuxtApp = useNuxtApp()
         const scope = useSiteAdminAuthScope()
+        const uiLocale = useSiteAdminLocale()
         return createAdminClient(
             createNuxtSiteAdminManagementClient<SiteAdminFormModels>(siteAdminManagementClientOptions(), scope),
             (context) => nuxtApp.runWithContext(() => nuxtApp.callHook('site-admin:entry:prepare', context)),
-            () => scope.value,
+            () => JSON.stringify([scope.value, uiLocale.value]),
+            () => uiLocale.value,
         )
     }
 
@@ -629,7 +633,7 @@ export const createSiteAdminComposables = (
         return siteAdminAsyncData<Data>(key, handler, { dedupe: 'defer', ...options })
     }
 
-    const useSiteAdminLocale = (provided: SiteAdminLocaleOptions['locale']) => {
+    const useSiteAdminLocale = (provided?: SiteAdminLocaleOptions['locale']) => {
         const i18n = configuration.i18n
             ? (useNuxtApp() as unknown as { $i18n?: { locale: Ref<string> } }).$i18n
             : undefined
@@ -1036,10 +1040,13 @@ export const createSiteAdminComposables = (
         immediate = true,
     ) => {
         const client = createNuxtSiteAdminManagementClient(connection, auth)
-        const key = computed(() => siteAdminManagementKey(connection, toValue(auth), 'models', null, null))
+        const uiLocale = useSiteAdminLocale()
+        const key = computed(() =>
+            siteAdminManagementKey(connection, toValue(auth), 'models', null, null, uiLocale.value),
+        )
         return siteAdminAttachAsyncData(
             () => key.value,
-            (_app, { signal }) => client.models({ signal }),
+            (_app, { signal }) => client.models({ signal, ...(uiLocale.value ? { uiLocale: uiLocale.value } : {}) }),
             { dedupe: 'defer', immediate },
         )
     }
@@ -1084,6 +1091,26 @@ export const createSiteAdminComposables = (
         id: MaybeRefOrGetter<string | null>,
         options: SiteAdminModelOptions = {},
     ) => useAdminResource(model, { ...options, id }) as unknown as Promise<SingleResource<Name>> & SingleResource<Name>
+
+    const useAdminForm = <Name extends string>(
+        model: ValidModel<Name>,
+        options: SiteAdminModelOptions &
+            UseEntryFormOptions<FormData<Name>> & { id?: MaybeRefOrGetter<string | null | undefined> } = {},
+    ) => {
+        const resource = useAdminEntry(model, () => toValue(options.id) ?? null, options)
+        const editor = useEntryForm(resource, options)
+        const result = {
+            ...editor,
+            meta: resource.meta,
+            data: resource.data,
+            status: resource.status,
+            error: resource.error,
+            refresh: resource.refresh,
+            features: resource.features,
+            display: resource.display,
+        }
+        return resource.then(() => result)
+    }
 
     function useAdminResource(
         model: string,
@@ -1311,5 +1338,6 @@ export const createSiteAdminComposables = (
         siteAdminReadModels,
         useAdminEntries,
         useAdminEntry,
+        useAdminForm,
     }
 }

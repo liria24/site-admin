@@ -28,7 +28,11 @@ const fixture = async (standalone = false) => {
         resolve(root, 'package.json'),
         JSON.stringify({ name: 'site-admin-files-probe', private: true, type: 'module' }),
     )
-    await symlink(fileURLToPath(new URL('../../node_modules', import.meta.url)), resolve(root, 'node_modules'), 'dir')
+    await symlink(
+        fileURLToPath(new URL('../../node_modules', import.meta.url)),
+        resolve(root, 'node_modules'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+    )
     for (const name of [
         'site-admin.config.ts',
         'inline-site.config.ts',

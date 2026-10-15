@@ -3,8 +3,8 @@ import type { MarkdownDocument, MergePluginMeta, Node, ParserOptions } from 'com
 import type summary from 'comark/plugins/summary'
 import type { FilesEnvironmentConfig, FilesConfigInput, defineFilesConfig } from 'nuxt-files-sdk/config'
 import type { SiteAdminAIModel } from './ai'
-import type { SiteAdminDatabaseConfig } from './runtime/database'
 import type { SiteAdminTaskOptions } from './runtime/tasks'
+import type { Localized, ModelMeta, PresentationContext } from './presentation'
 
 import type {
     AnyField,
@@ -20,6 +20,7 @@ import type { PublicEntry, PublicEntrySeo } from './server/types'
 import type { SiteAdminRouteRules } from './seo'
 import type { SiteAdminAsset } from './management-assets'
 import { SiteAdminError } from './errors'
+import { voidFilesStorage } from './runtime/files'
 import type {
     SiteAdminAiActionsFromInput,
     SiteAdminAiInput,
@@ -27,7 +28,7 @@ import type {
     SiteAdminNamedAiAction,
 } from './ai/actions'
 
-export type SiteAdminSeoOptions = PublicEntrySeo
+export type SiteAdminSeoOptions = Localized<PublicEntrySeo>
 
 /** Resolvers run synchronously on the server's public projection, before Markdown parsing. */
 export type ModelSeoOptions<Fields extends FieldRecord = FieldRecord> =
@@ -39,6 +40,7 @@ export type ModelSeoOptions<Fields extends FieldRecord = FieldRecord> =
                       ? Record<string, unknown>
                       : PublicFields<Fields, Record<string, ModelDefinition>, false>
               >,
+              context: PresentationContext,
           ): PublicEntrySeo
       }['resolve']
 
@@ -62,6 +64,7 @@ export interface ModelDisplayFields {
 
 export interface ModelOptions<Fields extends FieldRecord = FieldRecord> {
     fields: Fields
+    meta?: Localized<Partial<ModelMeta>>
     displayFields?: ModelDisplayFields
     /** `false` makes saves immediately public. */
     publishing?: boolean
@@ -76,6 +79,15 @@ export interface ModelOptions<Fields extends FieldRecord = FieldRecord> {
 }
 
 export type ModelDefinition<Fields extends FieldRecord = FieldRecord> = ModelOptions<Fields>
+
+export type InferSiteAdminMeta<Config extends { models: Record<string, unknown> }> = {
+    [Name in keyof Config['models']]: ModelMeta &
+        (Config['models'][Name] extends { meta: infer Meta }
+            ? Meta extends (...args: never[]) => infer Value
+                ? Value
+                : Meta
+            : {})
+}
 
 export interface SiteAdminLifecycleEvent {
     version?: number
@@ -135,8 +147,7 @@ export interface SiteAdminConfig<
         storage?: string
     }
     authorization?: SiteAdminAuthorization
-    /** Application-owned adapter or resolver. Site Admin never owns the connection or migrations. */
-    database?: SiteAdminDatabaseConfig
+    schema?: { output?: string }
     markdown?: {
         plugins?: ParserOptions['plugins']
         summary?: {
@@ -157,7 +168,6 @@ export interface SiteAdminConfig<
 }
 
 type OpaqueConfigPath =
-    | readonly ['database']
     | readonly ['ai', 'model']
     | readonly ['ai', 'decisionModel']
     | readonly ['ai', 'actions', PropertyKey, 'model']
@@ -226,6 +236,8 @@ export const defineSiteAdminConfig = <
 ): Config & { models: ConfigModels<Fields> } => {
     if (Object.hasOwn(config.authorization?.roles ?? {}, 'admin'))
         throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'The built-in admin role cannot be overridden.')
+    if (config.assets && !config.storage)
+        return Object.assign({}, config, { storage: { [config.assets.storage ?? 'content']: voidFilesStorage } })
     return config
 }
 

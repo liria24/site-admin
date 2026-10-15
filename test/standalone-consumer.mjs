@@ -59,7 +59,7 @@ export const verifyStandalone = async (tarball) => {
             'const require = createRequire(import.meta.url)',
             "assert.throws(() => require.resolve('nuxt/package.json'), { code: 'MODULE_NOT_FOUND' })",
             "assert.equal(typeof createSiteAdmin, 'function')",
-            "const admin = { descriptor: { models: { posts: { public: true } } }, authorizeRequest: () => ({ id: 'admin' }), descriptorFor: () => ({ models: {} }) }",
+            "const admin = { descriptor: { models: { posts: { public: true } } }, authorizeRequest: () => ({ id: 'admin' }), presentationContext: () => ({}), descriptorFor: () => ({ models: {} }) }",
             "const publicResponse = await handlePublicRequest(admin, new Request('http://localhost/api/content/models'))",
             'assert.equal(publicResponse.status, 200); assert.ok((await publicResponse.json()).models.posts)',
             "const management = await handleManagementRequest(admin, new Request('http://localhost/api/site-admin/models'))",

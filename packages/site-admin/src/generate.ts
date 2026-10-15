@@ -8,12 +8,13 @@ type NativeAuthConfig =
     | ((context: { db: unknown; requestOrigin?: string; runtimeConfig: Record<string, unknown> }) => BetterAuthOptions)
 
 /** Uses Better Auth's schema generator without initializing auth or connecting to a database. */
-export async function generateCombinedSchema(config: SiteAdminConfig, auth: NativeAuthConfig): Promise<string> {
+export async function generateCombinedSchema(
+    config: SiteAdminConfig,
+    auth: NativeAuthConfig,
+    schema: { usePlural?: boolean; casing?: 'camelCase' | 'snake_case' } = {},
+): Promise<string> {
     const resolved = typeof auth === 'function' ? auth({ db: undefined, runtimeConfig: {} }) : auth
-    if (typeof resolved.database !== 'function')
-        throw new Error(
-            'Auth generation requires the application-selected native adapter factory with createSchema. Defer opening its database during schema inspection.',
-        )
+    const { drizzleAdapter } = await import('@better-auth/drizzle-adapter')
     const { admin } = await import('better-auth/plugins')
     const plugins = [...(resolved.plugins ?? [])]
     if (!plugins.some((plugin) => plugin.id === 'admin')) plugins.push(admin())
@@ -21,13 +22,27 @@ export async function generateCombinedSchema(config: SiteAdminConfig, auth: Nati
         ...resolved,
         plugins,
     }
-    const adapter = resolved.database(authOptions)
-    if (!adapter.createSchema)
-        throw new Error('The application-selected native auth adapter does not implement createSchema.')
-    const { getAuthTables } = await import('better-auth/db')
-    const generated = await adapter.createSchema({ tables: getAuthTables(authOptions), file: 'schema.ts' })
+    const adapter = drizzleAdapter(
+        {},
+        {
+            provider: 'sqlite',
+            transaction: false,
+            usePlural: schema.usePlural ?? false,
+            camelCase: schema.casing !== 'snake_case',
+        },
+    )(authOptions)
+    const { generateDrizzleSchema } = await import('auth/api')
+    const generated = await generateDrizzleSchema({ adapter, options: authOptions, file: 'schema.ts' })
     if (!generated?.code) throw new Error('Better Auth returned no schema source.')
-    return mergeSchemaSources(generateSiteAdminSchema(config), generated.code)
+    // The CMS relation table already exports `relations`; preserve its schema identity.
+    const source = generated.code
+        .replace(
+            /import\s*\{([^}]+)\}\s*from\s*(['"])drizzle-orm\2/gu,
+            (_match, names: string) =>
+                `import { ${names.replace(/\brelations\b/gu, 'relations as authRelations')} } from 'drizzle-orm'`,
+        )
+        .replace(/\brelations\(/gu, 'authRelations(')
+    return mergeSchemaSources(generateSiteAdminSchema(config), source)
 }
 
 // Both generators emit named imports. Reject unsupported syntax rather than silently producing a broken schema.

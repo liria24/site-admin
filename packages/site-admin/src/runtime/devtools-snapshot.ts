@@ -2,6 +2,7 @@ import { defineEventHandler } from 'nuxt/server'
 import { SiteAdminError } from '../errors'
 import type { FieldDescriptor } from '../descriptor'
 import { useSiteAdminRuntime } from '../nuxt/server'
+import { withSiteAdminContext } from './context'
 
 const fields = (source: Record<string, FieldDescriptor>): unknown =>
     Object.fromEntries(
@@ -17,81 +18,85 @@ const fields = (source: Record<string, FieldDescriptor>): unknown =>
         ]),
     )
 
-export default defineEventHandler(async (event) => {
-    const headers = { 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' }
-    let authorized = false
-    try {
-        const { getSiteAdmin, development } = useSiteAdminRuntime()
-        const siteAdmin = await getSiteAdmin(event)
-        const actor = await siteAdmin.authorizeRequest(event.req, event)
-        siteAdmin.assertPermission(actor, 'system', 'diagnostics')
-        authorized = true
-        const descriptor = siteAdmin.descriptorFor(actor)
-        const models = Object.fromEntries(
-            Object.entries(descriptor.models).map(([name, model]) => [
-                name,
-                {
-                    ...model,
-                    localized: Object.values(siteAdmin.config.models[name]?.fields ?? {}).some((field) => field.i18n),
-                    fields: fields(model.fields),
-                },
-            ]),
-        )
-        const [inspection, routes, entries] = await Promise.all([
-            siteAdmin.inspect(),
-            siteAdmin.routeSnapshot(),
-            siteAdmin.listEntries(),
-        ])
-        const allowed = new Set(Object.keys(models))
-        return Response.json(
-            {
-                models,
-                database: { ...development, schemaReady: true },
-                assets: {
-                    ...inspection.assets,
-                    orphanCount: inspection.orphanAssets,
-                    storage: siteAdmin.config.assets?.storage,
-                    cleanup: { minimumAge: siteAdmin.config.assets?.cleanup?.minimumAge ?? 86400 },
-                    operationLeaseSeconds: siteAdmin.config.assets?.operationLeaseSeconds ?? 900,
-                },
-                routes: routes.filter((route) =>
-                    entries.some((entry) => allowed.has(entry.model) && entry.id === route.entryId),
-                ),
-                revisions: entries
-                    .filter((entry) => allowed.has(entry.model))
-                    .map((entry) => ({
-                        id: entry.id,
-                        model: entry.model,
-                        locale: entry.locale,
-                        current: entry.currentRevisionId,
-                        published: entry.publishedRevisionId,
-                        scheduled: entry.scheduledRevisionId,
-                    })),
-                diagnostics: [...new Set(inspection.diagnostics.map((item) => item.code))].map((code) => ({
-                    code,
-                    hint: 'Check the current Model definition, field validation and referenced entries/assets.',
-                })),
-            },
-            { headers },
-        )
-    } catch (error) {
-        if (authorized && error instanceof SiteAdminError && error.code === 'SITE_ADMIN_MIGRATION_REQUIRED') {
+export default defineEventHandler((event) =>
+    withSiteAdminContext(event.context, async () => {
+        const headers = { 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' }
+        let authorized = false
+        try {
+            const { getSiteAdmin, development } = useSiteAdminRuntime()
+            const siteAdmin = await getSiteAdmin(event)
+            const actor = await siteAdmin.authorizeRequest(event.req, event)
+            siteAdmin.assertPermission(actor, 'system', 'diagnostics')
+            authorized = true
+            const descriptor = siteAdmin.descriptorFor(actor)
+            const models = Object.fromEntries(
+                Object.entries(descriptor.models).map(([name, model]) => [
+                    name,
+                    {
+                        ...model,
+                        localized: Object.values(siteAdmin.config.models[name]?.fields ?? {}).some(
+                            (field) => field.i18n,
+                        ),
+                        fields: fields(model.fields),
+                    },
+                ]),
+            )
+            const [inspection, routes, entries] = await Promise.all([
+                siteAdmin.inspect(),
+                siteAdmin.routeSnapshot(),
+                siteAdmin.listEntries(),
+            ])
+            const allowed = new Set(Object.keys(models))
             return Response.json(
                 {
-                    database: { ...useSiteAdminRuntime().development, schemaReady: false },
-                    diagnostics: [
-                        {
-                            code: error.code,
-                            hint: 'Run site-admin generate, review drizzle-kit generate output and explicitly apply the migrations.',
-                        },
-                    ],
+                    models,
+                    database: { ...development, schemaReady: true },
+                    assets: {
+                        ...inspection.assets,
+                        orphanCount: inspection.orphanAssets,
+                        storage: siteAdmin.config.assets?.storage,
+                        cleanup: { minimumAge: siteAdmin.config.assets?.cleanup?.minimumAge ?? 86400 },
+                        operationLeaseSeconds: siteAdmin.config.assets?.operationLeaseSeconds ?? 900,
+                    },
+                    routes: routes.filter((route) =>
+                        entries.some((entry) => allowed.has(entry.model) && entry.id === route.entryId),
+                    ),
+                    revisions: entries
+                        .filter((entry) => allowed.has(entry.model))
+                        .map((entry) => ({
+                            id: entry.id,
+                            model: entry.model,
+                            locale: entry.locale,
+                            current: entry.currentRevisionId,
+                            published: entry.publishedRevisionId,
+                            scheduled: entry.scheduledRevisionId,
+                        })),
+                    diagnostics: [...new Set(inspection.diagnostics.map((item) => item.code))].map((code) => ({
+                        code,
+                        hint: 'Check the current Model definition, field validation and referenced entries/assets.',
+                    })),
                 },
                 { headers },
             )
+        } catch (error) {
+            if (authorized && error instanceof SiteAdminError && error.code === 'SITE_ADMIN_MIGRATION_REQUIRED') {
+                return Response.json(
+                    {
+                        database: { ...useSiteAdminRuntime().development, schemaReady: false },
+                        diagnostics: [
+                            {
+                                code: error.code,
+                                hint: 'Run site-admin generate, review drizzle-kit generate output and explicitly apply the migrations.',
+                            },
+                        ],
+                    },
+                    { headers },
+                )
+            }
+            return Response.json(
+                { error: error instanceof SiteAdminError ? error.code : 'SITE_ADMIN_INSPECTION_FAILED' },
+                { status: error instanceof SiteAdminError ? error.status : 500, headers },
+            )
         }
-        return Response.json(
-            { error: error instanceof SiteAdminError ? error.code : 'SITE_ADMIN_INSPECTION_FAILED' },
-            { status: error instanceof SiteAdminError ? error.status : 500, headers },
-        )
-    }
-})
+    }),
+)

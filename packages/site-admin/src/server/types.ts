@@ -13,6 +13,7 @@ export interface SiteAdminActor {
 export type FilesResolver = (storage: string) => Promise<Files>
 
 export interface SiteAdminOptions<Context = unknown> {
+    presentation?: (locale?: string) => Promise<import('../presentation').PresentationContext>
     authorize?: (request: Request, context?: Context) => Promise<SiteAdminActor | null> | SiteAdminActor | null
     config: SiteAdminConfig
     database: Database

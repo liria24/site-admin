@@ -47,28 +47,19 @@ const noPrivatePost: PrivatePublicPost = undefined
 void noPrivatePost
 
 // Application-owned adapters and SDK models replace as opaque values, including inferred types.
-declare const originalDatabase: import('../packages/site-admin/src/adapter').SiteAdminDatabase & { oldMarker: true }
-declare const productionDatabase: import('../packages/site-admin/src/adapter').SiteAdminDatabase & { replacement: true }
 declare const originalModel: import('ai/test').MockLanguageModelV4 & { oldMarker: true }
 declare const productionModel: import('ai/test').MockLanguageModelV4 & { replacement: true }
 const opaqueEnvironment = defineSiteAdminConfig({
     models: {},
-    database: originalDatabase,
     ai: { model: originalModel },
-    $production: { database: productionDatabase, ai: { model: productionModel } },
+    $production: { ai: { model: productionModel } },
 })
 declare const resolvedOpaque: ResolvedSiteAdminConfig<typeof opaqueEnvironment, readonly ['production']>
-const replacedDatabase: true = resolvedOpaque.database.replacement
 const replacedModel: true = resolvedOpaque.ai.model.replacement
-// @ts-expect-error Replaced database methods/properties do not retain the old instance's keys.
-void resolvedOpaque.database.oldMarker
 // @ts-expect-error Replaced SDK model does not retain the old instance's keys.
 void resolvedOpaque.ai.model.oldMarker
-void replacedDatabase
 void replacedModel
 
-// @ts-expect-error An environment replaces the whole adapter, never a partial method bag.
-defineSiteAdminConfig({ models: {}, $production: { database: { dialect: 'sqlite' } } })
 // @ts-expect-error An environment replaces the whole SDK model, never a partial provider descriptor.
 defineSiteAdminConfig({ models: {}, $production: { ai: { model: { specificationVersion: 'v4' } } } })
 

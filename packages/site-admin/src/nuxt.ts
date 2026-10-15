@@ -26,7 +26,7 @@ import { resolveSiteAdminFilesSource, allowGeneratedFilesConfig } from './nuxt/f
 import type { NitroConfig } from 'nitropack/types'
 import { createJiti } from 'jiti'
 import type { ModuleOptions as NuxtLLMsOptions } from 'nuxt-llms'
-import type { SiteAdminDatabaseScopeContext } from './runtime/database'
+import { voidPlugin } from 'void'
 
 import type { SiteAdminConfig, SiteAdminConfigInput, SiteAdminLifecycleEvent } from './config'
 import type { EntryPrepareContext } from './model'
@@ -34,12 +34,7 @@ import type { AnyField } from './fields'
 import { resolveSiteAdminConfig } from './config-resolution'
 import { serializeSiteAdminSeo, serializeSiteAdminRouteRules } from './seo'
 import { resolveSiteAdminAssets } from './assets-config'
-import {
-    siteAdminNuxtClientTemplate,
-    siteAdminNuxtFormTemplate,
-    siteAdminNuxtModelTypes,
-    siteAdminNuxtSeoTemplate,
-} from './nuxt/client-templates'
+import { siteAdminNuxtClientTemplate, siteAdminNuxtModelTypes, siteAdminNuxtSeoTemplate } from './nuxt/client-templates'
 import type { SiteAdminActor } from './server/types'
 import { moduleMeta } from './meta'
 import { siteAdminNuxtMetadataTemplate, siteAdminNuxtRouteTemplate } from './nuxt/route-templates'
@@ -75,8 +70,6 @@ export interface SiteAdminAuthorizeContext {
     session: AppSession
 }
 
-export type SiteAdminDatabaseContext = SiteAdminDatabaseScopeContext<RequestEvent>
-
 // Build-time registries live on @nuxt/schema and are bridged by nuxt/schema.
 declare module '@nuxt/schema' {
     interface NuxtConfig {
@@ -95,7 +88,6 @@ declare module '@nuxt/schema' {
 
 declare module 'nuxt/schema' {
     interface NuxtServerHooks {
-        'site-admin:database': (context: SiteAdminDatabaseContext) => void | Promise<void>
         'site-admin:authorize': (context: SiteAdminAuthorizeContext) => void | Promise<void>
         'site-admin:entry:committed': (event: SiteAdminLifecycleEvent) => void | Promise<void>
     }
@@ -246,15 +238,12 @@ const roles = {
 export default adminClient({ ac, roles })
 `
 
-const betterAuthDatabaseProvider =
-    (): string => `import { useSiteAdminRuntime } from '@liria24/site-admin/internal/nuxt/server'
-
-export const db = undefined
-export function createDatabase(event) {
-  const database = useSiteAdminRuntime().authDatabase?.(event?.context)
-  if (!database) throw new Error('[site-admin] The site-admin:database hook must provide authDatabase when authentication is enabled.')
-  return database
-}
+const betterAuthDatabaseProvider = (
+    options: { usePlural?: boolean; camelCase?: boolean } = {},
+): string => `import { createAuthDatabase } from '@liria24/site-admin/internal/runtime/database'
+import * as schema from '@schema'
+export { db } from 'void/db'
+export const createDatabase = (event) => createAuthDatabase(schema, ${JSON.stringify(options)}, event?.context)
 `
 
 export default defineNuxtModule<ModuleConfig>({
@@ -317,13 +306,29 @@ export default defineNuxtModule<ModuleConfig>({
         if (options.seo || options.ogImage || options.schemaOrg) {
             const plugin = addTemplate({
                 filename: 'site-admin/metadata-plugin.mjs',
-                getContents: () => siteAdminNuxtMetadataTemplate(options),
+                getContents: () =>
+                    siteAdminNuxtMetadataTemplate({
+                        ...options,
+                        ...(options.server.enabled ? { presentationBase: options.client.basePath } : {}),
+                    }),
                 write: true,
             })
             addPlugin(plugin.dst)
         }
 
         const nitro = (nuxt.options as unknown as { nitro: NitroConfig }).nitro
+        if (options.server.enabled) {
+            nitro.modules ??= []
+            if (!nitro.modules.includes('void/nitro')) nitro.modules.push('void/nitro')
+            nitro.preset ??= 'cloudflare-module'
+            nitro.cloudflare ??= {}
+            nitro.cloudflare.dev ??= { configPath: './.void-wrangler.jsonc' }
+            nuxt.options.vite ??= {}
+            nuxt.options.vite.plugins ??= []
+            nuxt.options.vite.plugins.push(
+                voidPlugin() as unknown as NonNullable<typeof nuxt.options.vite.plugins>[number],
+            )
+        }
         nitro.externals ??= {}
         // Nuxt 4.6's renderer subpaths must be bundled so Nitro replaces their build stubs.
         ;(nitro.externals.inline ??= []).push(
@@ -359,6 +364,7 @@ export default defineNuxtModule<ModuleConfig>({
             })
             const inputConfig = await jiti.import<SiteAdminConfigInput>(configPath, { default: true })
             domainConfig = resolveSiteAdminConfig(inputConfig, environments)
+            nuxt.options.alias['@schema'] = resolve(nuxt.options.rootDir, domainConfig.schema?.output ?? 'db/schema.ts')
             if (Object.values(domainConfig.models).some((model) => Object.values(model.fields).some(hasMarkdown))) {
                 if (!options.markdown) throw new Error('[site-admin] Enable markdown for Markdown fields.')
                 await resolvePeer('comark', nuxt)
@@ -400,9 +406,7 @@ export default defineNuxtModule<ModuleConfig>({
                 nuxt.hook('better-auth:plugins:extend', (sources) => {
                     sources.client = [...(sources.client ?? []), clientAuthPlugin.dst]
                 })
-                // Preserve the existing custom-hook bridge only for legacy hook-only apps.
-                // Direct adapter configurations leave Better Auth's app-owned provider intact.
-                if (!domainConfig.database && Object.keys(domainConfig.models).length > 0) {
+                {
                     nuxt.hook('better-auth:database:providers', (providers) => {
                         providers.siteAdmin = {
                             priority: 1_000,
@@ -414,6 +418,8 @@ export default defineNuxtModule<ModuleConfig>({
 
                 nuxt.hook('nitro:config', (nativeConfig) => {
                     const config = nativeConfig as NitroConfig
+                    // Auth secrets belong to runtime bindings, not a developer's build environment.
+                    if (!nuxt.options.dev && config.runtimeConfig) config.runtimeConfig.betterAuthSecret = ''
                     config.esbuild ??= {}
                     config.esbuild.options ??= {}
                     config.esbuild.options.exclude = allowGeneratedFilesConfig(
@@ -492,9 +498,7 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
         const aiEnabled = options.ai ?? Boolean(domainConfig?.ai)
         const namedAiActions = aiEnabled && Boolean(Object.keys(domainConfig?.ai?.actions ?? {}).length)
         if (namedAiActions) await resolvePeer('ai', nuxt)
-        const cmsConfigured =
-            !domainConfig ||
-            Boolean(Object.keys(domainConfig.models).length || domainConfig.assets || domainConfig.database)
+        const cmsConfigured = !domainConfig || Boolean(Object.keys(domainConfig.models).length || domainConfig.assets)
         if (options.routing.enabled && cmsConfigured) {
             const middleware = addTemplate({
                 filename: 'site-admin/route-middleware.mjs',
@@ -536,6 +540,7 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
             { from: clientTemplate.dst, name: 'useContent' },
             { from: clientTemplate.dst, name: 'useAdminEntries' },
             { from: clientTemplate.dst, name: 'useAdminEntry' },
+            { from: clientTemplate.dst, name: 'useAdminForm' },
             { from: clientTemplate.dst, name: 'useAdminClient' },
         ])
         if (namedAiActions) {
@@ -561,12 +566,6 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
                 },
                 { nuxt: true, nitro: true, node: false },
             )
-            const formTemplate = addTemplate({
-                filename: 'site-admin/form.ts',
-                getContents: () => siteAdminNuxtFormTemplate(),
-                write: true,
-            })
-            addImports({ from: formTemplate.dst, name: 'useEntryForm' })
         }
 
         if (!options.server.enabled || !domainConfig || !configPath) return
@@ -642,10 +641,20 @@ export default (context: Parameters<typeof createAuth>[0]) => extendAuth(createA
             filename: 'site-admin/runtime.mjs',
             getContents: () => `import { defineNitroPlugin } from 'nitropack/runtime'
 import { useServerHooks } from 'nuxt/server'
+import { currentSiteAdminContext, withSiteAdminContext } from '@liria24/site-admin/internal/runtime/context'
+import { resolvePublicPresentation } from '@liria24/site-admin/internal/runtime/presentation'
+${
+    options.i18n
+        ? `import { useTranslation } from '#imports'
+import detector from ${JSON.stringify(normalize(resolve(nuxt.options.buildDir, 'site-admin/locale-detector.mjs')))}
+import { createPresentationContext } from '@liria24/site-admin/internal/runtime/presentation'`
+        : ''
+}
 ${authImport}
 ${filesImport}
 ${namedAiActions ? "import { executeSiteAdminAiAction } from '@liria24/site-admin/internal/ai'" : ''}
-import { createSiteAdminDatabaseScope } from '@liria24/site-admin/internal/runtime/database'
+import { useVoidDatabase } from '@liria24/site-admin/internal/runtime/database'
+import * as schema from '@schema'
 import inputConfig from ${JSON.stringify(normalize(configPath))}
 import { resolveSiteAdminConfig } from '@liria24/site-admin/internal/config-resolution'
 const domainConfig = resolveSiteAdminConfig(inputConfig, ${JSON.stringify(environments)})
@@ -653,32 +662,36 @@ delete domainConfig.storage
 delete domainConfig.routes
 import { createSiteAdmin } from '@liria24/site-admin/internal/server'
 import { configureSiteAdminRuntime, normalizeSiteAdminAuthorizationError } from '@liria24/site-admin/internal/nuxt/server'
-import { captureNitroRequest, getNitroRequest } from '@liria24/site-admin/internal/runtime/nitro2'
+import { captureNitroRequest, getNitroRequest, getNitroContextEvent } from '@liria24/site-admin/internal/runtime/nitro2'
 
-export default defineNitroPlugin((nitroApp) => {
+export default defineNitroPlugin(${nuxt.options.dev && domainConfig.tasks?.rebuildSearch ? 'async ' : ''}(nitroApp) => {
   const hooks = useServerHooks()
+  const presentation = ${
+      options.i18n
+          ? `(locale) => createPresentationContext(getNitroContextEvent(currentSiteAdminContext()), locale, {
+    locales: ${JSON.stringify(locales.supported)},
+    detect: (event) => detector(event, { defaultLocale: ${JSON.stringify(locales.defaultLocale ?? '')} }),
+    translate: useTranslation,
+  })`
+          : `async (locale = '') => ({ locale, t: () => { throw new Error('[site-admin] Translated presentation requires Nuxt i18n.') } })`
+  }
   /** @type {WeakMap<import('@liria24/site-admin/internal/server').SiteAdminDatabase, import('@liria24/site-admin/internal/server').SiteAdmin<import('nuxt/server').RequestEvent>>} */
   const instances = new WeakMap()
-  const databases = createSiteAdminDatabaseScope(domainConfig.database, (context) => hooks.callHook('site-admin:database', context))
   /** @type {WeakMap<object, import('nuxt/server').RequestEvent>} */
   const nativeEvents = new WeakMap()
   const authorize = ${authorize}
   nitroApp.hooks.hook('request', (event) => {
     captureNitroRequest(event, ${JSON.stringify(options.server.managementBase)}, ${JSON.stringify(Boolean(domainConfig.assets))})
   })
-  /** @param {import('nuxt/server').RequestEvent} [event] @returns {Promise<import('@liria24/site-admin/nuxt').SiteAdminDatabaseContext>} */
-  const resolveDatabases = (event, platformContext) => {
-    if (event) nativeEvents.set(event.context, event)
-    return databases.resolve(event, platformContext)
-  }
   /** @param {import('nuxt/server').RequestEvent} [event] @returns {Promise<import('@liria24/site-admin/internal/server').SiteAdmin<import('nuxt/server').RequestEvent>>} */
   const getSiteAdmin = async (event, platformContext) => {
-    const context = await resolveDatabases(event, platformContext)
-    const database = context.database
+    if (event) nativeEvents.set(event.context, event)
+    const database = useVoidDatabase(schema)
     let siteAdmin = instances.get(database)
     if (siteAdmin) return siteAdmin
     siteAdmin = createSiteAdmin({
     authorize,
+    presentation,
     afterCommit: (event) => hooks.callHook('site-admin:entry:committed', event),
     config: { ...domainConfig, assets: ${JSON.stringify(domainConfig.assets)} },
     database,
@@ -695,7 +708,7 @@ export default defineNitroPlugin((nitroApp) => {
   ${
       options.llms
           ? `nitroApp.hooks.hook('llms:generate', async (event, options) => {
-    const entries = await (await getSiteAdmin(nativeEvents.get(event.context))).llmsEntries()
+    const entries = await withSiteAdminContext(event.context, async () => (await getSiteAdmin(nativeEvents.get(event.context))).llmsEntries())
     if (entries.length === 0) return
     options.sections.push({
       links: entries.map(({ content: _, ...entry }) => entry),
@@ -703,20 +716,21 @@ export default defineNitroPlugin((nitroApp) => {
     })
   })
   nitroApp.hooks.hook('llms:generate:full', async (event, _options, contents) => {
-    const entries = await (await getSiteAdmin(nativeEvents.get(event.context))).llmsEntries()
+    const entries = await withSiteAdminContext(event.context, async () => (await getSiteAdmin(nativeEvents.get(event.context))).llmsEntries())
     contents.push(...entries.map((entry) =>
       \`## [\${entry.title}](\${entry.href})\${entry.description ? \`\\n\\n\${entry.description}\` : ''}\${entry.content ? \`\\n\\n\${entry.content}\` : ''}\`,
     ))
   })`
           : ''
   }
-  configureSiteAdminRuntime({
-    ${nuxt.options.dev ? `development: ${JSON.stringify({ connector: 'application', devDatabase: false, locales })},` : ''}
+  const runtime = configureSiteAdminRuntime({
+    ${nuxt.options.dev ? `development: ${JSON.stringify({ connector: 'void', devDatabase: true, locales })},` : ''}
     managementBase: ${JSON.stringify(options.server.managementBase)},
     publicBase: ${JSON.stringify(options.client.basePath)},
     tasks: ${JSON.stringify(domainConfig.tasks ?? {})},
     getSiteAdmin,
-    initializeRequest: ${options.auth && !domainConfig.database && Object.keys(domainConfig.models).length > 0 ? 'async (event) => { nativeEvents.set(event.context, event); await databases.prepare(event) }' : '(event) => { nativeEvents.set(event.context, event) }'},
+    presentation: async (_event, path) => resolvePublicPresentation(domainConfig, path, await presentation()),
+    initializeRequest: (event) => { nativeEvents.set(event.context, event) },
     ${
         namedAiActions
             ? `runAiAction: async (event, name, input) => executeSiteAdminAiAction(domainConfig, name, input, {
@@ -724,14 +738,26 @@ export default defineNitroPlugin((nitroApp) => {
     }),`
             : ''
     }
-    authDatabase: (context) => context ? databases.get(context)?.authDatabase : undefined,
   })
+  ${
+      nuxt.options.dev && domainConfig.tasks?.rebuildSearch
+          ? `// Void applies local SQL before exposing the development binding.
+  const env = await globalThis.__env__
+  if (!env?.DB) throw new Error('[site-admin] Void development database is not ready.')
+  await withSiteAdminContext({ env }, async () => (await runtime.getSiteAdmin()).rebuildSearch())`
+          : ''
+  }
 })
 `,
             write: true,
         })
         addServerPlugin(runtimeTemplate.dst)
         const resolver = createResolver(import.meta.url)
+        if (options.seo || options.ogImage)
+            addServerHandler({
+                handler: resolver.resolve('./runtime/presentation-handler'),
+                route: `${options.client.basePath}/_presentation`,
+            })
         if (cmsConfigured)
             addServerHandler({
                 handler: resolver.resolve('./runtime/public-handler'),

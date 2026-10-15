@@ -1,7 +1,7 @@
-import { drizzle, type AnyD1Database } from 'drizzle-orm/d1'
+import type { AnyD1Database } from 'drizzle-orm/d1'
 import { Files } from 'files-sdk'
 import { r2 } from 'files-sdk/r2'
-import { drizzleAdapter } from '../../../packages/site-admin/src/adapters/drizzle'
+import { createD1Database } from '../../../packages/site-admin/src/adapters/database'
 // @ts-ignore Test setup generates this application schema before bundling.
 import * as schema from './.data/schema/schema'
 
@@ -33,9 +33,9 @@ export default {
             if (new URL(request.url).pathname === '/health') return new Response('OK')
             if (new URL(request.url).pathname.startsWith('/search-'))
                 return await searchProbe(request, env.SITE_ADMIN_DB, schema)
-            const database = drizzleAdapter(drizzle(env.SITE_ADMIN_DB), { schema })
+            const database = createD1Database(env.SITE_ADMIN_DB, schema)
             if (new URL(request.url).pathname === '/missing-binding') {
-                const missing = drizzleAdapter(drizzle(undefined as unknown as AnyD1Database), { schema })
+                const missing = createD1Database(undefined as unknown as AnyD1Database, schema)
                 await queryRow(missing, 'SELECT 1')
             }
             if (new URL(request.url).pathname === '/rollback') {

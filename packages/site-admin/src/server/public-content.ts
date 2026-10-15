@@ -17,7 +17,6 @@ export interface ProjectionBudget {
 export class PublicProjector<Context> {
     generation = -1
     readonly availableLocales = new WeakMap<PublishedRow, Set<string>>()
-    readonly #seo = new Map<string, PublicEntrySeo>()
     constructor(private readonly options: SiteAdminOptions<Context>) {}
     #publicModel(name: string) {
         const definition = this.options.config.models[name]
@@ -57,8 +56,7 @@ export class PublicProjector<Context> {
     }
 
     #entrySeo(definition: ModelDefinition, entry: PublicEntry): PublicEntrySeo {
-        const model = typeof definition.seo === 'function' ? definition.seo(structuredClone(entry)) : definition.seo
-        const result = serializeSiteAdminSeo(model)
+        const result: PublicEntrySeo = {}
         const text = (keys: Array<string | undefined>): string | undefined =>
             keys
                 .map((key) => (key && typeof entry.data[key] === 'string' ? cleanText(entry.data[key]) : ''))
@@ -85,6 +83,11 @@ export class PublicProjector<Context> {
                 }
             }
         }
+        return this.sanitizeSeo(result)
+    }
+
+    sanitizeSeo(value: PublicEntrySeo): PublicEntrySeo {
+        const result = serializeSiteAdminSeo(value)
         if (typeof result.image === 'string') {
             const image = this.#seoUrl(result.image)
             if (image === undefined) delete result.image
@@ -240,13 +243,7 @@ export class PublicProjector<Context> {
                 }),
             )
         }
-        const seoKey = JSON.stringify([this.generation, entry.id, entry.revisionId, entry.locale, markdownSource])
-        const cachedSeo = this.#seo.get(seoKey)
-        entry.seo = cachedSeo ? structuredClone(cachedSeo) : this.#entrySeo(definition, entry)
-        if (!cachedSeo) {
-            this.#seo.set(seoKey, structuredClone(entry.seo))
-            if (this.#seo.size > 256) this.#seo.delete(this.#seo.keys().next().value!)
-        }
+        entry.seo = this.#entrySeo(definition, entry)
         return entry
     }
 }

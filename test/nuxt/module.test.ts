@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { $fetch, setup, getServerLogs, startServer, useTestContext, url } from '@nuxt/test-utils/e2e'
 import { beforeAll, expect, it } from 'vitest'
+import { generateSiteAdminSchema } from '../../packages/site-admin/src/generate'
+import { text } from '../../packages/site-admin/src/fields'
 
 const workspace = fileURLToPath(new URL('../../', import.meta.url))
 await mkdir(join(workspace, '.tmp'), { recursive: true })
@@ -16,7 +18,20 @@ import { z } from 'zod'
 export default defineSiteAdminConfig({ ai: { actions: ${aiChanged ? "{ suggest: { type: 'text-generation', input: z.object({}), prompt: () => 'AI server sentinel' } }" : '{}'} }, storage: { adapter: 'memory' }, assets: {}, models: { posts: { fields: { title: text({ required, default: ${JSON.stringify(title)} }) } } } })`
 await mkdir(join(fixture, 'server/api'), { recursive: true })
 await mkdir(join(fixture, 'app'), { recursive: true })
+await mkdir(join(fixture, 'db'), { recursive: true })
+await writeFile(
+    join(fixture, 'package.json'),
+    JSON.stringify({ name: 'site-admin-nuxt-test', type: 'module', dependencies: { nuxt: '*' } }),
+)
+await writeFile(
+    join(fixture, 'db/schema.ts'),
+    generateSiteAdminSchema({ models: { posts: { fields: { title: text() } } } }),
+)
 await writeFile(join(fixture, 'policy.ts'), 'export const required = true\n')
+await writeFile(
+    join(fixture, 'void.config.ts'),
+    `export default { inference: { bindings: { db: true } }, cloudflare: { name: 'site-admin-module-test', compatibility_flags: ['nodejs_compat'] } }`,
+)
 await writeFile(join(fixture, 'site-admin.config.ts'), config('Before'))
 await writeFile(
     join(fixture, 'nuxt.config.ts'),
@@ -51,14 +66,6 @@ await writeFile(
     join(fixture, 'server/types.ts'),
     `import { useServerHooks } from 'nuxt/server'
 export default () => {
-  useServerHooks().hook('site-admin:database', (context) => {
-    if (context.event) {
-      const request: Request = context.event.req
-      // @ts-expect-error Native events do not expose Node.
-      context.event.node
-      void request
-    }
-  })
   useServerHooks().hook('site-admin:authorize', (context) => { const id: string = context.actor.id; void id })
   // @ts-expect-error Unknown Site Admin hook.
   useServerHooks().hook('site-admin:missing', () => {})
@@ -88,12 +95,12 @@ const checkModels = async () => {
   await client.entries.create('posts', { data: { title: 123 } })
   const entry = (await client.entries.list('posts')).items[0]!
   const resource = await useAdminEntry('posts', entry.id)
-  const { form } = useEntryForm(resource)
+  const { form } = await useAdminForm('posts', { id: entry.id })
   const formTitle: string = form.state.values.title
   // @ts-expect-error Unknown model.
   await useAdminEntry('missing', null)
   // @ts-expect-error Default values retain model field types.
-  useEntryForm(resource, { defaultValues: { title: 123 } })
+  useAdminForm('posts', { defaultValues: { title: 123 } })
   void [title, invalidTitle, formTitle]
 }
 void checkModels
@@ -142,6 +149,8 @@ it('delivers Vue component updates through the live Vite HMR connection', async 
             .toBe(true)
         expect(await $fetch<string>('/_nuxt/app.vue')).toContain('component hot update')
         await expect.poll(async () => await $fetch<string>('/'), { timeout: 20_000 }).toContain('component hot update')
+    } catch (error) {
+        throw new Error(getServerLogs().join('\n'), { cause: error })
     } finally {
         socket.close()
     }

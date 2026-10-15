@@ -302,7 +302,7 @@ export const handlePublicRequest = async <Context>(
                             })
                         } else {
                             const generation = await siteAdmin.publicGeneration()
-                            const items = await (await siteAdmin.content(modelName, locale)).list()
+                            const items = await siteAdmin.contentList(modelName, locale)
                             if (generation !== (await siteAdmin.publicGeneration()))
                                 throw new SiteAdminError(
                                     'SITE_ADMIN_CONFLICT',

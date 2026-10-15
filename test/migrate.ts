@@ -6,10 +6,9 @@ import type { Database } from 'db0'
 import type { SiteAdminConfig } from '../packages/site-admin/src/config'
 import { generateSiteAdminSchema } from '../packages/site-admin/src/generate'
 import { createSiteAdmin as createRuntime } from '../packages/site-admin/src/server'
-import { drizzle } from 'drizzle-orm/node-sqlite'
-import { drizzle as drizzleD1, type AnyD1Database } from 'drizzle-orm/d1'
 import { createJiti } from 'jiti'
-import { drizzleAdapter } from '../packages/site-admin/src/adapters/drizzle'
+import { createD1Database } from '../packages/site-admin/src/adapters/database'
+import { sqliteD1 } from './d1'
 
 const schemaDirectory = (source: string) =>
     resolve('.tmp/test-schema', `${createHash('sha256').update(source).digest('hex')}-${process.pid}`)
@@ -21,8 +20,10 @@ export async function testAdapter(database: Database, config: SiteAdminConfig) {
     const path = resolve(directory, 'schema.ts')
     writeFileSync(path, source)
     const schema = await createJiti(import.meta.url, { fsCache: false }).import<Record<string, unknown>>(path)
-    const client = (await database.getInstance()) as import('node:sqlite').DatabaseSync | AnyD1Database
-    return drizzleAdapter('batch' in client ? drizzleD1(client) : drizzle({ client }), { schema })
+    const client = (await database.getInstance()) as
+        | import('node:sqlite').DatabaseSync
+        | Parameters<typeof createD1Database>[0]
+    return createD1Database('batch' in client ? client : sqliteD1(client as import('node:sqlite').DatabaseSync), schema)
 }
 
 /** Tests explicitly apply real Drizzle Kit SQL; the runtime never creates tables. */
@@ -33,10 +34,7 @@ export async function migrateTestDatabase(database: Database, config: SiteAdminC
     const schema = resolve(directory, 'schema.ts').replaceAll('\\', '/')
     const output = resolve(directory, 'migrations').replaceAll('\\', '/')
     writeFileSync(schema, source)
-    if (
-        !existsSync(output) ||
-        !readdirSync(output).some((name) => existsSync(resolve(output, name, 'migration.sql')))
-    ) {
+    if (!existsSync(output) || !readdirSync(output).some((name) => name.endsWith('.sql'))) {
         execFileSync(
             process.execPath,
             [
@@ -53,8 +51,10 @@ export async function migrateTestDatabase(database: Database, config: SiteAdminC
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='site_admin_entries'")
         .all()
     if (existing.length) return
-    const migration = readdirSync(output).find((name) => !name.startsWith('.'))!
-    await database.exec(readFileSync(resolve(output, migration, 'migration.sql'), 'utf8'))
+    for (const migration of readdirSync(output)
+        .filter((name) => name.endsWith('.sql'))
+        .sort())
+        await database.exec(readFileSync(resolve(output, migration), 'utf8'))
 }
 
 export async function createMigratedTestAdmin(

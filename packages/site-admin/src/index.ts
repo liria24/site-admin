@@ -1,8 +1,10 @@
 export { defineSiteAdminConfig } from './config'
+export type { PresentationContext, ModelMeta } from './presentation'
 export type {
     InferModelData,
     InferPublicModelData,
     InferSiteAdminModels,
+    InferSiteAdminMeta,
     InferSiteAdminFormModels,
     InferSiteAdminPublicModels,
     ModelDefinition,
@@ -63,4 +65,3 @@ export type {
 export type { Entry, Revision, Content, Asset } from './public-client'
 export type { EntryFeatures, EntryPrepareContext } from './model'
 export type { SiteAdminLifecycleEvent } from './config'
-export type { SiteAdminDatabaseContext } from './runtime/database'

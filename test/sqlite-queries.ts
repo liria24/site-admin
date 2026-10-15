@@ -1,4 +1,4 @@
-import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
+import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/database'
 import type { DatabaseValue, AtomicStatement } from '../packages/site-admin/src/adapters/sqlite-statements'
 
 /** Adapter-specific inspection for tests; Core never receives SQL. */

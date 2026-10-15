@@ -169,9 +169,9 @@ describe('public entry SEO payload', () => {
         const fetched = await client.get('posts', draft.id)
         expect(fetched?.seo).toEqual({
             canonical: 'https://example.com/writing/published',
-            description: 'Published description',
+            description: 'Model description',
             image: `https://example.com/api/content/_assets/${asset.id}`,
-            title: 'Published heading',
+            title: 'Model title',
             titleTemplate: '%s | Posts',
             twitterCard: 'summary',
             type: 'article',
@@ -238,7 +238,7 @@ describe('public entry SEO payload', () => {
         expect((await admin.getPublicEntry('disabled', disabled.id))?.seo).toEqual({ image: false })
         expect((await admin.getPublicEntry('generated', generated.id))?.seo).toEqual({ image: component })
         expect((await admin.getPublicEntry('gallery', gallery.id))?.seo).toEqual({
-            image: `https://example.com/api/content/_assets/${asset.id}`,
+            image: 'https://example.com/default.png',
         })
     })
 
@@ -270,7 +270,7 @@ describe('public entry SEO payload', () => {
                 image: `https://example.com/api/content/_assets/${asset.id}`,
             })
             expect((await admin.getPublicEntry('overridden', overridden.id))?.seo).toEqual({
-                image: `https://example.com/api/content/_assets/${asset.id}`,
+                image: 'https://example.com/model.png',
             })
         },
     )
@@ -423,7 +423,7 @@ describe('public entry SEO payload', () => {
         const plugin = vi.fn()
         const resolver = vi.fn((entry: PublicEntry) => {
             expect(entry.data.summary).toBeTypeOf('string')
-            return { description: 'Model fallback' }
+            return { titleTemplate: '%s | Model' }
         })
         const admin = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
@@ -431,6 +431,7 @@ describe('public entry SEO payload', () => {
                 models: {
                     posts: {
                         fields: { slug: text(), body: markdown(), description: textarea(), summary: markdown() },
+                        route: '/posts/:slug',
                         displayFields: { description: 'body' },
                         publishing: false,
                         seo: resolver,
@@ -440,7 +441,7 @@ describe('public entry SEO payload', () => {
             database: database(),
         })
         const entry = await admin.createEntry('posts', {
-            data: { summary: 'Intro **summary**\n\n<!-- more -->\n\nLong body' },
+            data: { slug: 'parsed', summary: 'Intro **summary**\n\n<!-- more -->\n\nLong body' },
         })
         const client = createSiteAdminClient<Record<string, PublicEntry>>({
             origin: 'https://example.com',
@@ -448,6 +449,9 @@ describe('public entry SEO payload', () => {
         })
         const fetched = await client.get('posts', entry.id)
         expect(fetched?.seo?.description).toBe('Intro summary')
+        const resolved = await client.resolveRoute('/posts/parsed')
+        expect(resolved).toMatchObject({ kind: 'page', entry: { data: { summary: fetched?.data.summary } } })
+        expect(resolved).toHaveProperty('entry.data.summary.nodes')
         expect(resolver).toHaveBeenCalledTimes(1)
         expect(plugin).toHaveBeenCalledTimes(1)
         expect((await client.list('posts'))[0]?.seo?.description).toBe('Intro summary')
@@ -455,7 +459,7 @@ describe('public entry SEO payload', () => {
         expect(plugin).toHaveBeenCalledTimes(1)
         expect(resolver.mock.calls[0]?.[0].data.summary).toBe('Intro **summary**\n\n<!-- more -->\n\nLong body')
         // The direct server projection preserves its Markdown source contract.
-        expect((await admin.getPublicEntry('posts', entry.id))?.seo?.description).toBe('Model fallback')
+        expect((await admin.getPublicEntry('posts', entry.id))?.seo?.description).toBeUndefined()
         let version = entry.version
         for (const [data, description] of [
             [{ body: '---', description: ' Later text ', summary: '---' }, 'Later text'],

@@ -109,7 +109,7 @@ export const createManagementOperations = <
         assetUrl: (id: string) => managementBase.replace(/\/$/u, '') + '/assets/' + encodeURIComponent(id) + '/content',
         models: async () => {
             const { admin, actor: current } = await authorize()
-            return admin.descriptorFor(current)
+            return admin.descriptorFor(current, await admin.presentationContext())
         },
         getEntry: (id: string) =>
             entryOperation(

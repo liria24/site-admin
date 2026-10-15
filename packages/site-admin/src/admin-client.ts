@@ -24,12 +24,13 @@ export const createAdminClient = <Models extends Shape<Models> = SiteAdminManage
     client: SiteAdminManagementClient<Models>,
     prepare?: (context: EntryPrepareContext) => void | Promise<void>,
     identity: () => string = () => 'request',
+    uiLocale: () => string | undefined = () => undefined,
 ) => {
     let cached: { scope: string; value: ReturnType<typeof client.models> } | undefined
     const descriptors = () => {
         const scope = identity()
         if (cached?.scope !== scope) {
-            const value = client.models()
+            const value = client.models({ ...(uiLocale() ? { uiLocale: uiLocale()! } : {}) })
             cached = { scope, value }
             void value.catch(() => {
                 if (cached?.value === value) cached = undefined
@@ -87,6 +88,17 @@ export const createAdminClient = <Models extends Shape<Models> = SiteAdminManage
     }
 
     return {
+        models: async () =>
+            Object.entries((await descriptors()).models).map(([name, model]) => ({
+                name,
+                meta: (model.meta ?? { label: name, plural: name }) as import('./client').SiteAdminModelMeta,
+                features: {
+                    publishing: model.publishing,
+                    scheduling: model.scheduling,
+                    revisions: model.revisions,
+                    sortable: model.sortable,
+                },
+            })),
         entries: {
             list: async <Name extends NameOf<Models>>(model: Name, options?: ManagementListOptions) => {
                 const [page, descriptor] = await Promise.all([client.listEntries(model, options), describe(model)])

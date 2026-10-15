@@ -123,7 +123,6 @@ describe('native Better Auth integration', () => {
 
     it('registers matching server/client permissions and a request-scoped database provider', async () => {
         const hook = await setup(true, undefined, (config) => {
-            delete config.database
             config.authorization = {
                 roles: {
                     admin: { models: { '*': ['update'], posts: ['readDraft'] } },
@@ -167,15 +166,17 @@ describe('native Better Auth integration', () => {
         const providerSource = providers.siteAdmin!.buildDatabaseCode()
         const database = { kind: 'better-auth' }
         const context = {}
+        const factory = vi.fn(() => database)
         const createDatabase = new Function(
-            'useSiteAdminRuntime',
-            `${providerSource
-                .replace(/import[^\n]+\n/u, '')
-                .replace('export const db = undefined', '')
-                .replace('export function createDatabase', 'function createDatabase')}\nreturn createDatabase`,
-        )(() => ({ authDatabase: (value: object) => (value === context ? database : undefined) }))
+            'createAuthDatabase',
+            'schema',
+            providerSource
+                .replace(/^import .*$/gmu, '')
+                .replace(/^export \{.*$/gmu, '')
+                .replace('export const createDatabase', 'const createDatabase') + '\nreturn createDatabase',
+        )(factory, {})
         expect(createDatabase({ context })).toBe(database)
-        expect(() => createDatabase({ context: {} })).toThrow('authDatabase')
+        expect(factory).toHaveBeenCalledWith({}, {}, context)
 
         const runtime = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
         expect(kit.handlers.some((handler) => 'middleware' in handler && handler.middleware)).toBe(true)
@@ -184,13 +185,12 @@ describe('native Better Auth integration', () => {
         expect(kit.handlers.some(({ route }) => route === '/api/site-admin/**')).toBe(true)
     })
 
-    it('leaves application-owned auth providers intact with a direct content adapter resolver', async () => {
+    it('uses the same Void database for CMS and native auth', async () => {
         const hook = await setup(true)
-        expect(hook.mock.calls.some(([name]) => name === 'better-auth:database:providers')).toBe(false)
+        expect(hook.mock.calls.some(([name]) => name === 'better-auth:database:providers')).toBe(true)
         const runtime = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
-        expect(runtime).toContain('createSiteAdminDatabaseScope(domainConfig.database')
-        expect(runtime).not.toContain('database-sqlite')
-        expect(runtime).not.toContain('database-d1')
+        expect(runtime).toContain('useVoidDatabase(schema)')
+        expect(runtime).not.toContain('domainConfig.database')
     })
 
     it('extends the effective native factory after module setup without adding a second server admin', async () => {
@@ -248,42 +248,16 @@ describe('native Better Auth integration', () => {
         expect(filters.some((filter) => filter.test('/app/node_modules/better-auth/dist/index.mjs'))).toBe(true)
     })
 
-    it('keeps direct-provider middleware lazy and prepares only the legacy native auth bridge', async () => {
-        const initialize = () => {
-            const source = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
-            const expression = source.match(/initializeRequest: (.+),\n/u)![1]
-            const nativeEvents = new WeakMap()
-            const databases = { prepare: vi.fn(async () => undefined), resolve: vi.fn() }
-            const run = new Function('nativeEvents', 'databases', `return (${expression})`)(nativeEvents, databases)
-            return { run, nativeEvents, databases }
-        }
+    it('does not open a database during unrelated requests or auth initialization', async () => {
         await setup(true)
-        const direct = initialize()
+        const source = kit.templates.find(({ filename }) => filename === 'site-admin/runtime.mjs')!.getContents()
+        const expression = source.match(/initializeRequest: (.+),\n/u)![1]
+        const nativeEvents = new WeakMap()
+        const run = new Function('nativeEvents', 'return (' + expression + ')')(nativeEvents)
         const event = { req: new Request('https://example.test/unrelated'), context: {} }
-        await direct.run(event)
-        expect(direct.nativeEvents.get(event.context)).toBe(event)
-        expect(direct.databases.prepare).not.toHaveBeenCalled()
-        expect(direct.databases.resolve).not.toHaveBeenCalled()
-
-        kit.templates.length = 0
-        await setup(true, undefined, (config) => {
-            delete config.database
-        })
-        const bridge = initialize()
-        await bridge.run(event)
-        expect(bridge.databases.prepare).toHaveBeenCalledOnce()
-        expect(bridge.databases.resolve).not.toHaveBeenCalled()
-
-        kit.templates.length = 0
-        const hook = await setup(true, undefined, (config) => {
-            delete config.database
-            config.models = {}
-        })
-        const withoutModels = initialize()
-        await withoutModels.run(event)
-        expect(hook.mock.calls.some(([name]) => name === 'better-auth:database:providers')).toBe(false)
-        expect(withoutModels.databases.prepare).not.toHaveBeenCalled()
-        expect(withoutModels.databases.resolve).not.toHaveBeenCalled()
+        await run(event)
+        expect(nativeEvents.get(event.context)).toBe(event)
+        expect(expression).not.toContain('Database')
     })
 
     it('serializes only approved SEO defaults and rules into public config', async () => {
