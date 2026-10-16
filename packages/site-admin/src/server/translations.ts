@@ -29,10 +29,17 @@ export const prepareTranslations = async (
         for (const key of Object.keys(value))
             if (!definition.fields[key]?.i18n)
                 throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', `Field "${key}" is not translatable.`)
-        const validated = await validateModelData(definition, { ...data, ...value })
+        const candidate = { ...data, ...value }
+        const validated = await validateModelData(definition, candidate)
         if (!validated.data)
             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', `Invalid ${locale} translation.`, validated.issues)
-        output[locale] = Object.fromEntries(Object.keys(value).map((key) => [key, validated.data![key]]))
+        output[locale] = Object.fromEntries(
+            Object.entries(validated.data).filter(
+                ([key, result]) =>
+                    definition.fields[key]?.i18n &&
+                    (Object.hasOwn(value, key) || JSON.stringify(result) !== JSON.stringify(candidate[key])),
+            ),
+        )
     }
     return output
 }

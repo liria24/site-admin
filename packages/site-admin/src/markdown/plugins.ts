@@ -17,7 +17,7 @@ export const markdownPlugins = async (
             name: 'site-admin-summary-fallback',
             post(state) {
                 if (state.tree.meta.summary !== undefined) return
-                const fallback = paragraphSummary(state.tree.nodes)
+                const fallback = paragraphSummary(state.tree.nodes, options?.summary?.inlineTags)
                 if (fallback) state.tree.meta.summary = fallback
             },
         })

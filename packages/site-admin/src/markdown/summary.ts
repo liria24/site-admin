@@ -2,9 +2,9 @@ import type { ElementNode, Node } from 'comark'
 import { astText, cleanText } from './document'
 
 /** Bounded fallback over native AST. Never changes the body or reparses Markdown. */
-export const paragraphSummary = (nodes: readonly Node[]): Node[] | undefined => {
+export const paragraphSummary = (nodes: readonly Node[], inlineTags: readonly string[] = []): Node[] | undefined => {
     const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-    const inline = new Set(['a', 'em', 'strong', 's', 'del', 'br'])
+    const inline = new Set(['a', 'em', 'strong', 's', 'del', 'br', ...inlineTags])
     let remaining = 280
     const text = (value: string): string => {
         let result = ''

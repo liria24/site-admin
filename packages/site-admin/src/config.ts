@@ -153,6 +153,7 @@ export interface SiteAdminConfig<
         summary?: {
             delimiter?: string
             enabled?: boolean
+            inlineTags?: readonly string[]
         }
     }
     modelDefaults?: {
