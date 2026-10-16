@@ -19,7 +19,7 @@ export async function generateFixtureSQL(config, directory, plugins = []) {
     execFileSync(
         process.execPath,
         [
-            resolve('packages/site-admin/node_modules/drizzle-kit/bin.cjs'),
+            resolve('node_modules/drizzle-kit/bin.cjs'),
             'generate',
             '--dialect=sqlite',
             `--schema=${schema}`,

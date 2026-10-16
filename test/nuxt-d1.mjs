@@ -46,7 +46,7 @@ await writeFile(
 await run(
     process.execPath,
     [
-        join(workspace, 'packages/site-admin/node_modules/drizzle-kit/bin.cjs'),
+        join(workspace, 'node_modules/drizzle-kit/bin.cjs'),
         'generate',
         '--dialect=sqlite',
         `--schema=${schemaPath}`,

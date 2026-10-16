@@ -77,7 +77,7 @@ describe('native admin configuration preservation', () => {
             const generation = execFileSync(
                 process.execPath,
                 [
-                    resolve('packages/site-admin/node_modules/drizzle-kit/bin.cjs'),
+                    resolve('node_modules/drizzle-kit/bin.cjs'),
                     'generate',
                     '--dialect=sqlite',
                     `--schema=${schemaFile.replaceAll('\\', '/')}`,
