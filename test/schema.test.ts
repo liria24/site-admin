@@ -158,7 +158,8 @@ describe('application-owned Drizzle migrations', () => {
         expect(generated).toContain('text("field_title").notNull()')
         expect(generated).not.toContain('schemaVersion')
         expect(generated).not.toContain('@liria24/site-admin/schema')
-        expect(generated).toContain("from 'drizzle-orm/sqlite-core'")
+        expect(generated).toContain('from "void/schema-d1"')
+        expect(generated).not.toContain('from "drizzle-orm')
         expect(() =>
             generateSiteAdminSchema({ models: { posts: { fields: { slug: text(), revisionId: text() } } } }),
         ).toThrow()

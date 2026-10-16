@@ -51,6 +51,14 @@ export const executeSiteAdminAiAction = async (
             const model = typeof source === 'function' ? await source(context) : source
             const prompt = await action.prompt(values, context)
             const output = typeof action.output === 'function' ? await action.output(values, context) : action.output
+            const completeOutput: typeof output = output && {
+                ...output,
+                async parseCompleteOutput(value, completion) {
+                    if (completion.finishReason !== 'stop')
+                        throw new SiteAdminError('SITE_ADMIN_AI_OUTPUT_INVALID', 'AI returned an incomplete result.')
+                    return output.parseCompleteOutput(value, completion)
+                },
+            }
             const signals = [context.request?.signal, action.options?.abortSignal].filter(
                 (signal): signal is AbortSignal => !!signal,
             )
@@ -59,7 +67,7 @@ export const executeSiteAdminAiAction = async (
                 ...action.options,
                 model,
                 prompt,
-                ...(output ? { output } : {}),
+                ...(completeOutput ? { output: completeOutput } : {}),
                 ...(signals.length ? { abortSignal: AbortSignal.any(signals) } : {}),
             })
             return generated.output

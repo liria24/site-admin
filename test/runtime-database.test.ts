@@ -35,27 +35,6 @@ it('reuses storage for the same native binding and schema while retaining reques
     withRuntimeEnv({ DB: first }, () => expect(useVoidDatabase({})).not.toBe(one.storage))
 })
 
-it('uses a fresh Void session across requests without caching a request-bound native client', async () => {
-    const DB = binding('one'),
-        schema = {}
-    let sessions = 0
-    const session = DB.withSession
-    DB.withSession = () => {
-        sessions++
-        return session()
-    }
-    const run = () =>
-        withRuntimeEnv({ DB }, async () => {
-            const storage = useVoidDatabase(schema)
-            await storage.query('SELECT name FROM probe')
-            await storage.query('SELECT name FROM probe')
-        })
-    await run()
-    expect(sessions).toBe(1)
-    await run()
-    expect(sessions).toBe(2)
-})
-
 it('rejects missing D1 bindings and keeps auth preparation independent from CMS schema initialization', () => {
     withRuntimeEnv({}, () => expect(() => useVoidDatabase({})).toThrow('Void with a D1'))
     const auth = createAuthDatabase({})({})

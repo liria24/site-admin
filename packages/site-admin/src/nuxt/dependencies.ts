@@ -119,7 +119,7 @@ export const siteAdminModuleDependencies = async (nuxt: Nuxt): Promise<ModuleDep
     }
     const dependencies: ModuleDependencies = {}
     const names: string[] = []
-    if (options.server?.enabled !== false) names.push('void', 'drizzle-orm')
+    if (options.server?.enabled !== false) names.push('void')
     for (const [flag, name] of Object.entries(modules) as Array<[keyof typeof modules, string]>) {
         if (options[flag] === false || (flag === 'auth' && options.server?.enabled === false)) continue
         dependencies[name] = {}

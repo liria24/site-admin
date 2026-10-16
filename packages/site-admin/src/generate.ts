@@ -63,15 +63,32 @@ function mergeSchemaSources(...sources: string[]): string {
         const body = source.replace(
             /import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"];?/g,
             (_, names: string, module: string) => {
-                if (!['drizzle-orm', 'drizzle-orm/sqlite-core'].includes(module))
+                if (
+                    ![
+                        'drizzle-orm',
+                        'drizzle-orm/sqlite-core',
+                        'void/db',
+                        'void/schema-d1',
+                        '@liria24/site-admin/internal/schema',
+                    ].includes(module)
+                )
                     throw new Error('Combined schema generation supports Drizzle SQLite only.')
-                const bindings = imports.get(module) ?? new Set<string>()
                 for (const name of names
                     .split(',')
                     .map((binding) => binding.trim())
-                    .filter(Boolean))
+                    .filter(Boolean)) {
+                    const target =
+                        module === 'drizzle-orm/sqlite-core'
+                            ? 'void/schema-d1'
+                            : module === 'drizzle-orm'
+                              ? /^relations(?:\s+as\s+\w+)?$/.test(name)
+                                  ? '@liria24/site-admin/internal/schema'
+                                  : 'void/db'
+                              : module
+                    const bindings = imports.get(target) ?? new Set<string>()
                     bindings.add(name)
-                imports.set(module, bindings)
+                    imports.set(target, bindings)
+                }
                 return ''
             },
         )
@@ -109,5 +126,5 @@ export const generateSiteAdminSchema = (config: SiteAdminConfig): string => {
             `export const ${identifier} = sqliteTable(${JSON.stringify(contentTableName(name))}, {\n  revisionId: text('revision_id').primaryKey().references(() => revisions.id, { onDelete: 'cascade' }),\n  ${columns.join(',\n  ')}\n})`,
         )
     }
-    return result.join('\n') + '\n'
+    return mergeSchemaSources(result.join('\n'))
 }

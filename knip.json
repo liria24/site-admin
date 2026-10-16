@@ -31,7 +31,8 @@
                 "src/server-api.ts!",
                 "src/public-client.ts!",
                 "src/seo.ts!",
-                "src/model.ts!"
+                "src/model.ts!",
+                "src/schema.ts!"
             ],
             "project": ["src/**/*.ts!", "*.config.ts"],
             "ignoreDependencies": [

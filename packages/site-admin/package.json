@@ -129,6 +129,11 @@
         "./internal/runtime/seo": {
             "types": "./dist/runtime/seo.d.ts",
             "import": "./dist/runtime/seo.js"
+        },
+        "./internal/schema": {
+            "types": "./dist/schema.d.ts",
+            "import": "./dist/schema.js",
+            "require": "./dist/schema.js"
         }
     },
     "publishConfig": {
@@ -170,7 +175,6 @@
         "ai": "^7.0.141",
         "better-auth": "^1.7.9",
         "comark": "^0.7.0",
-        "drizzle-kit": "^0.31.11",
         "files-sdk": "^3.1.1",
         "nuxt": "^4.6.1",
         "nuxt-files-sdk": "^0.3.1",
@@ -182,9 +186,6 @@
         "vue": "^3.6.0-rc.2"
     },
     "peerDependenciesMeta": {
-        "drizzle-kit": {
-            "optional": true
-        },
         "nuxt": {
             "optional": true
         },

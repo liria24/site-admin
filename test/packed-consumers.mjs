@@ -171,8 +171,6 @@ try {
                     '@nuxtjs/better-auth',
                     'void',
                     'wrangler',
-                    'drizzle-orm',
-                    'drizzle-kit',
                     'nuxt',
                     'nitropack',
                     'typescript',

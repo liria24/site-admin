@@ -66,6 +66,7 @@ export default defineConfig({
                 'config-resolution': 'src/config-resolution.ts',
                 cli: 'src/cli.ts',
                 generate: 'src/generate.ts',
+                schema: 'src/schema.ts',
                 form: 'src/form.ts',
                 model: 'src/model.ts',
                 index: 'src/index.ts',

@@ -63,6 +63,15 @@ const setup = (generate: MockLanguageModelV4['doGenerate'] = async () => result(
 }
 
 describe('authenticated named native AI actions', () => {
+    it.each(['length', 'content-filter'] as const)('rejects incomplete structured output (%s)', async (reason) => {
+        const { config } = setup(async () => ({
+            ...result('{"content":"Complete-looking result"}'),
+            finishReason: { unified: reason, raw: undefined },
+        }))
+        await expect(
+            executeSiteAdminAiAction(config, 'proofread', { input: { content: 'Original' } }, context),
+        ).rejects.toMatchObject({ code: 'SITE_ADMIN_AI_OUTPUT_INVALID' })
+    })
     it('validates and transforms input before resolving the native model, returns native output or text', async () => {
         const { config, run } = setup()
         expect(
