@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { computed, effectScope, nextTick, reactive } from 'vue'
 import { useEntryForm, siteAdminFormDefaults } from '../packages/site-admin/src/form'
+import { siteAdminModelContext } from '../packages/site-admin/src/model'
 import { formDescriptor, modelEntry, modelFixture } from './model-fixture'
 
 describe('native resource form', () => {
@@ -153,6 +154,44 @@ describe('native resource form', () => {
         expect(next.resource.error.value?.data?.code).toBe('SITE_ADMIN_CONFLICT')
         await restoredState.form.handleSubmit()
         expect(writes).toBe(0)
+    })
+    it('restores local input before the descriptor and entry finish loading', () => {
+        const first = modelFixture(async () => Response.json(null))
+        const scope = effectScope()
+        const editing = scope.run(() => useEntryForm(first.resource))!
+        editing.form.setFieldValue('title', 'Unsaved')
+        editing.form.setFieldValue('slug', 'manual-url')
+        editing.form.setFieldValue('publication', { slug: 'manual' })
+        editing.form.setFieldValue('image', { id: 'draft-image' })
+        scope.stop()
+        first.drafts[first.identity.value]!.value.retired = 'Old field'
+        const next = modelFixture(async () => Response.json(null), null, first.drafts)
+        next.identity.value = first.identity.value
+        next.id.value = first.id.value
+        const context = next.resource[siteAdminModelContext]
+        context.descriptor.value = undefined
+        next.resource.status.value = 'pending'
+        const restored = useEntryForm(next.resource)
+        expect(restored.form.state.values).toMatchObject({
+            title: 'Unsaved',
+            slug: 'manual-url',
+            publication: { slug: 'manual' },
+        })
+        context.descriptor.value = formDescriptor
+        next.resource.data.value = modelEntry()
+        next.resource.status.value = 'success'
+        expect(restored.form.state.values).toMatchObject({
+            title: 'Unsaved',
+            slug: 'manual-url',
+            publication: { slug: 'manual' },
+        })
+        expect(restored.form.state.values.image).toEqual({
+            id: 'draft-image',
+            url: next.client.assetUrl('draft-image'),
+        })
+        expect(restored.form.state.values).not.toHaveProperty('retired')
+        expect(restored.draft.isDirty.value).toBe(true)
+        expect(restored.draft.snapshot().version).toBe(1)
     })
     it('submits one validated candidate for repeated publish clicks and supports schedules', async () => {
         const requests: Array<{ url: string; body: Record<string, unknown> }> = []

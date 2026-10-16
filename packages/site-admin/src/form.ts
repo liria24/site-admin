@@ -200,7 +200,11 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
                 ) as Partial<Data>,
             ),
         )
-    const storedValue = (value: Record<string, unknown>) => present(projectStoredFields(descriptor().fields, value))
+    const storedValue = (value: Record<string, unknown>) => {
+        const fields = (context.descriptor.value ?? cachedDescriptor)?.fields
+        // An unloaded descriptor cannot decide which trusted draft fields to discard.
+        return present(fields ? projectStoredFields(fields, value) : value)
+    }
     const baseline = shallowRef(
         stored ? serialize(storedValue(stored.baseline)) : serialize(initial ? entryValue(initial) : defaultValue()),
     )
@@ -414,9 +418,13 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
     watch(
         context.descriptor,
         (value, previous) => {
-            if (value && !previous && !currentEntry() && !context.id.value && !isDirty.value) {
+            if (!value || previous) return
+            if (!currentEntry() && !context.id.value && !isDirty.value) {
                 baseline.value = serialize(defaultValue())
                 form.reset(defaultValue())
+            } else {
+                baseline.value = serialize(storedValue(baseline.value))
+                form.reset(storedValue(form.state.values))
             }
         },
         { flush: 'sync' },
