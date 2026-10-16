@@ -86,7 +86,8 @@ export const chromiumProbe = async (origin, directory) => {
     })
     try {
         let debuggingPort
-        for (let attempt = 0; attempt < 200; attempt++) {
+        // Hosted runners can still be flushing package installs while Chromium creates its profile.
+        for (let attempt = 0; attempt < 600; attempt++) {
             const content = await readFile(join(profile, 'DevToolsActivePort'), 'utf8').then(
                 (value) => {
                     portState = { content: value.slice(0, 300) }
