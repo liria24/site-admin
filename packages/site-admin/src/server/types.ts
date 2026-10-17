@@ -3,6 +3,7 @@ import type { Body, Files, StoredFile } from 'files-sdk'
 
 import type { SiteAdminConfig } from '../config'
 import type { SiteAdminIssue } from '../errors'
+import type { Translations, TranslationInput } from '../i18n'
 
 export interface SiteAdminActor {
     id: string
@@ -12,9 +13,11 @@ export interface SiteAdminActor {
 export type FilesResolver = (storage: string) => Promise<Files>
 
 export interface SiteAdminOptions<Context = unknown> {
+    presentation?: (locale?: string) => Promise<import('../presentation').PresentationContext>
     authorize?: (request: Request, context?: Context) => Promise<SiteAdminActor | null> | SiteAdminActor | null
     config: SiteAdminConfig
     database: Database
+    afterCommit?: (event: import('../config').SiteAdminLifecycleEvent) => Promise<void> | void
     getFiles?: FilesResolver
     id?: () => string
     locales?: {
@@ -40,26 +43,30 @@ export interface EntryInput {
     actorId?: string
     data: Record<string, unknown>
     id?: string
-    locale?: string
-    slug?: string
+    defaultLocale?: string
     sortOrder?: number | null
-    translationGroup?: string
+    translations?: TranslationInput
 }
 
 /** Publishes an existing revision or atomically stores and publishes a caller-owned candidate. */
 export type PublishEntryInput<Data = Record<string, unknown>> = {
     actorId?: string
     expectedVersion: number
-} & ({ revisionId?: string; draft?: never } | { draft: { data: Data; slug?: string }; revisionId?: never })
+} & (
+    | { revisionId?: string; draft?: never }
+    | { draft: { data?: Partial<Data>; translations?: TranslationInput }; revisionId?: never }
+)
 
 export interface UpdateEntryInput {
     actorId?: string
-    data: Record<string, unknown>
+    data?: Record<string, unknown>
+    translations?: TranslationInput
     expectedVersion: number
-    slug?: string
 }
 
 export interface EntryRecord {
+    defaultLocale: string
+    translations: Translations
     createdAt: string
     currentRevisionId: string
     data: Record<string, unknown>
@@ -71,20 +78,18 @@ export interface EntryRecord {
     revisionId: string
     scheduledAt: string | null
     scheduledRevisionId: string | null
-    slug: string
     sortOrder: number | null
-    translationGroup: string
     updatedAt: string
     version: number
 }
 
 export interface RevisionRecord {
+    translations: Translations
     actorId: string | null
     createdAt: string
     data: Record<string, unknown>
     entryId: string
     id: string
-    slug: string
 }
 
 export interface EntryMutationReceipt {
@@ -134,6 +139,8 @@ export interface PublicEntrySeo {
 }
 
 export interface PublicEntry<Data = Record<string, unknown>> {
+    localeParams?: Record<string, Record<string, string> | false>
+    defaultLocale: string
     alternates?: Array<{ locale: string; path: string }>
     data: Data
     id: string
@@ -143,7 +150,6 @@ export interface PublicEntry<Data = Record<string, unknown>> {
     publishedAt: string
     revisionId: string
     seo?: PublicEntrySeo
-    slug: string
 }
 
 export interface AssetRecord {

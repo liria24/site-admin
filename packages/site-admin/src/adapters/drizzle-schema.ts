@@ -1,4 +1,4 @@
-import type { DrizzleConnection as Database } from './drizzle'
+import type { DrizzleConnection as Database } from './database'
 import { getTableColumns } from 'drizzle-orm'
 import { getTableConfig } from 'drizzle-orm/sqlite-core'
 import type { SiteAdminConfig } from '../config'
@@ -15,6 +15,8 @@ import {
     relations,
     revisions,
     routes,
+    translations,
+    search,
 } from './drizzle-tables'
 
 const nullDefault = (value: string | null): boolean =>
@@ -61,14 +63,14 @@ export function contentTables(database: Database, config: SiteAdminConfig) {
                 const type = storage === 'json' ? 'text' : storage === 'boolean' ? 'integer' : storage
                 const dataType =
                     storage === 'json'
-                        ? 'object json'
+                        ? 'json'
                         : storage === 'boolean'
                           ? 'boolean'
                           : storage === 'text'
                             ? 'string'
                             : storage === 'integer'
-                              ? 'number int53'
-                              : 'number double'
+                              ? 'number'
+                              : 'number'
                 if (
                     !column ||
                     column.name !== `field_${key}` ||
@@ -88,8 +90,6 @@ export function contentTables(database: Database, config: SiteAdminConfig) {
 
 /** Read-only check: migrations are generated and applied outside the runtime. */
 export const assertSiteAdminSchema = async (database: Database, config: SiteAdminConfig): Promise<void> => {
-    if (database.dialect !== 'sqlite')
-        throw new SiteAdminError('SITE_ADMIN_DATABASE_UNSUPPORTED', 'Site Admin currently supports SQLite and D1.')
     const tables = [
         entries,
         revisions,
@@ -97,6 +97,8 @@ export const assertSiteAdminSchema = async (database: Database, config: SiteAdmi
         relations,
         assetRefs,
         routes,
+        translations,
+        search,
         meta,
         ...Object.values(contentTables(database, config)),
     ]

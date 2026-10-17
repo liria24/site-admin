@@ -14,14 +14,14 @@ it('protects runtime diagnostics and never returns content bodies or field defau
         const siteAdmin = await createMigratedTestAdmin({
             database,
             config: defineSiteAdminConfig({
-                models: { posts: { fields: { title: text({ default: 'SECRET_DEFAULT' }) } } },
+                models: { posts: { fields: { slug: text(), title: text({ default: 'SECRET_DEFAULT' }) } } },
             }),
             authorize: (request) => {
                 const role = request.headers.get('authorization')
                 return role ? { id: 'test', roles: [role] } : null
             },
         })
-        await siteAdmin.createEntry('posts', { data: { title: 'SECRET_CONTENT_BODY' } })
+        await siteAdmin.createEntry('posts', { data: { slug: 'secret-content-body', title: 'SECRET_CONTENT_BODY' } })
         configureSiteAdminRuntime({
             getSiteAdmin: () => siteAdmin,
             publicBase: '/api/content',

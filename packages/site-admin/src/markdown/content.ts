@@ -41,7 +41,7 @@ const fieldsSchema = (fields: FieldRecord): JsonSchema => ({
     type: 'object',
 })
 
-export const createMarkdownContent = (
+export const createMarkdownContent = async (
     modelName: string,
     definition: ModelDefinition,
     entries: PublicEntry[],
@@ -51,19 +51,20 @@ export const createMarkdownContent = (
 ) => {
     const items = new Map(
         entries.map((entry) => [
-            `${definition.route ? entry.slug : entry.id}.json`,
+            `${entry.id}.json`,
             {
                 ...entry.data,
                 _siteAdmin: {
                     ...(entry.alternates ? { alternates: entry.alternates } : {}),
+                    ...(entry.localeParams ? { localeParams: entry.localeParams } : {}),
                     id: entry.id,
                     locale: entry.locale,
+                    defaultLocale: entry.defaultLocale,
                     model: entry.model,
                     path: entry.path,
                     publishedAt: entry.publishedAt,
                     revisionId: entry.revisionId,
                     ...(entry.seo ? { seo: entry.seo } : {}),
-                    slug: entry.slug,
                 },
             },
         ]),
@@ -81,7 +82,11 @@ export const createMarkdownContent = (
         getItem: async (key) => JSON.stringify(items.get(key)),
         getItemRaw: async (key) => items.get(key),
     }
-    const plugins = markdownPlugins(options, resolve)
+    const hasMarkdown = (field: AnyField): boolean =>
+        field.kind === 'markdown' ||
+        (field.kind === 'object' && Object.values(field.fields).some(hasMarkdown)) ||
+        (field.kind === 'array' && hasMarkdown(field.item))
+    const plugins = Object.values(definition.fields).some(hasMarkdown) ? await markdownPlugins(options, resolve) : []
     const contentOptions = {
         markdown: { plugins },
         onError: 'throw' as const,

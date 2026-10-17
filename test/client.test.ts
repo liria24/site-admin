@@ -7,131 +7,43 @@ import {
     SiteAdminClientError,
     type PublicEntry,
 } from '../packages/site-admin/src/client'
-import {
-    siteAdminNuxtClientTemplate,
-    siteAdminNuxtFormTemplate,
-    siteAdminNuxtModelTypes,
-} from '../packages/site-admin/src/nuxt/client-templates'
+import { siteAdminNuxtClientTemplate, siteAdminNuxtModelTypes } from '../packages/site-admin/src/nuxt/client-templates'
 
 describe('Site Admin clients', () => {
-    const preparing = (searchRemaining: unknown, status = 503, code = 'SITE_ADMIN_SEARCH_PREPARING') =>
-        Response.json({ error: { code, message: 'Preparing.', searchRemaining } }, { status })
-
-    it('resumes only progressing search GETs with the same query and signal, including paginated reads', async () => {
-        const controller = new AbortController()
-        const calls: string[] = []
-        const entries = [
-            { id: 'one', data: {} },
-            { id: 'two', data: {} },
-        ]
-        const client = createSiteAdminManagementClient({
-            fetch: async (input, init) => {
-                calls.push(String(input))
-                expect(init?.method).toBe('GET')
-                expect(init?.signal).toBe(controller.signal)
-                if (calls.length <= 2) return preparing(3 - calls.length)
-                const offset = Number(new URL(String(input), 'http://localhost').searchParams.get('offset'))
-                return Response.json({ items: entries.slice(offset, offset + 1), total: 2 })
-            },
-        })
-        expect(await client.listAllEntries('posts', { q: 'needle', limit: 1, signal: controller.signal })).toEqual(
-            entries,
-        )
-        expect(calls).toHaveLength(4)
-        expect(calls[0]).toBe(calls[1])
-        expect(calls[1]).toBe(calls[2])
-        expect(calls[3]).toContain('offset=1')
-    })
-
-    it.each([{ counts: [4, 4] }, { counts: [4, 5] }])(
-        'stops a search whose remaining count does not decrease: %j',
-        async ({ counts }) => {
-            let calls = 0
-            const client = createSiteAdminManagementClient({ fetch: async () => preparing(counts[calls++] ?? 1) })
-            await expect(client.listEntries('posts', { q: 'needle' })).rejects.toMatchObject({
-                code: 'SITE_ADMIN_SEARCH_PREPARING',
-            })
-            expect(calls).toBe(2)
-        },
-    )
-
-    it.each([undefined, null, '1', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-        'rejects malformed search progress without retry: %j',
-        async (remaining) => {
-            let calls = 0
-            const client = createSiteAdminManagementClient({
-                fetch: async () => {
-                    calls++
-                    return preparing(remaining)
-                },
-            })
-            await expect(client.listEntries('posts', { q: 'needle' })).rejects.toMatchObject({ status: 503 })
-            expect(calls).toBe(1)
-        },
-    )
-
-    it.each([
-        [500, 'SITE_ADMIN_SEARCH_PREPARING'],
-        [503, 'SITE_ADMIN_STORAGE_UNAVAILABLE'],
-        [401, 'SITE_ADMIN_AUTH_REQUIRED'],
-        [403, 'SITE_ADMIN_FORBIDDEN'],
-    ])('preserves ordinary and authorization errors without retry: %i %s', async (status, code) => {
+    it('returns migration errors without retrying search or mutating reads', async () => {
         let calls = 0
         const client = createSiteAdminManagementClient({
             fetch: async () => {
                 calls++
-                return preparing(1, status, code)
+                return Response.json(
+                    { error: { code: 'SITE_ADMIN_MIGRATION_REQUIRED', message: 'Rebuild explicitly.' } },
+                    { status: 409 },
+                )
             },
         })
-        await expect(client.listEntries('posts', { q: 'needle' })).rejects.toMatchObject({ status, code })
+        await expect(client.listEntries('posts', { q: 'needle' })).rejects.toMatchObject({
+            code: 'SITE_ADMIN_MIGRATION_REQUIRED',
+        })
         expect(calls).toBe(1)
     })
-
-    it('stops cancellation between preparation GETs and rejects an already cancelled search before transport', async () => {
+    it('preserves cancellation before and after the search transport', async () => {
         const controller = new AbortController()
         let calls = 0
         const client = createSiteAdminManagementClient({
-            fetch: async (_input, init) => {
+            fetch: async () => {
                 calls++
-                expect(init?.signal).toBe(controller.signal)
                 controller.abort()
-                return preparing(1)
+                return Response.json({ items: [], total: 0 })
             },
         })
         await expect(client.listEntries('posts', { q: 'needle', signal: controller.signal })).rejects.toMatchObject({
             name: 'AbortError',
         })
-        expect(calls).toBe(1)
         await expect(client.listAllEntries('posts', { q: 'needle', signal: controller.signal })).rejects.toMatchObject({
             name: 'AbortError',
         })
         expect(calls).toBe(1)
     })
-
-    it('never retries unfiltered reads, other GETs, writes, or AI even when they return search preparation errors', async () => {
-        let calls = 0
-        const client = createSiteAdminManagementClient<Record<string, Record<string, unknown>>>({
-            fetch: async () => {
-                calls++
-                return preparing(1)
-            },
-        })
-        const operations = [
-            () => client.listEntries('posts'),
-            () => client.listAllEntries('posts', { q: '' }),
-            () => client.models(),
-            () => client.getEntry('entry'),
-            () => client.createEntry('posts', { data: {} }),
-            () => client.updateEntry('entry', { data: {}, expectedVersion: 1 }),
-            () => client.deleteEntry('entry', { expectedVersion: 1 }),
-            () => client.runAiAction('metadata', { props: {} }),
-        ]
-        for (const [index, operation] of operations.entries()) {
-            await expect(operation()).rejects.toMatchObject({ code: 'SITE_ADMIN_SEARCH_PREPARING', status: 503 })
-            expect(calls).toBe(index + 1)
-        }
-    })
-
     it('preserves public projection, encoding, locale and nullable lookup contracts', async () => {
         const calls: Array<{ input: string; method?: string }> = []
         const client = createSiteAdminClient<Record<string, PublicEntry>>({
@@ -141,13 +53,13 @@ describe('Site Admin clients', () => {
                 calls.push({ input: String(input), ...(init?.method ? { method: init.method } : {}) })
                 if (String(input).includes('/missing')) return Response.json(null, { status: 404 })
                 const document = {
-                    data: { _siteAdmin: { id: 'entry', model: 'posts', slug: 'hello' }, title: 'Hello' },
+                    data: { _siteAdmin: { id: 'entry', model: 'posts' }, slug: 'hello', title: 'Hello' },
                 }
                 return Response.json(String(input).includes('/hello') ? document : [document])
             },
         })
         expect(await client.list('posts', { locale: 'ja' })).toEqual([
-            { data: { title: 'Hello' }, id: 'entry', model: 'posts', slug: 'hello' },
+            { id: 'entry', model: 'posts', data: { slug: 'hello', title: 'Hello' } },
         ])
         expect(await client.get('posts', 'hello')).toMatchObject({ data: { title: 'Hello' }, id: 'entry' })
         expect(await client.get('posts', 'missing')).toBeNull()
@@ -220,14 +132,14 @@ describe('Site Admin clients', () => {
             },
         })
         expect(
-            await client.createEntry('posts', { data: { title: 'Created' }, locale: 'ja', slug: 'created' }),
+            await client.createEntry('posts', { defaultLocale: 'ja', data: { slug: 'created', title: 'Created' } }),
         ).toEqual({
             id: 'entry',
             model: 'posts',
             sortOrder: null,
             version: 2,
         })
-        await client.updateEntry('entry/1', { data: { title: 'Edited' }, expectedVersion: 2 })
+        await client.updateEntry('entry/1', { data: { slug: 'edited', title: 'Edited' }, expectedVersion: 2 })
         await client.publishEntry('entry/1', { expectedVersion: 3, revisionId: 'revision/1' })
         await client.unpublishEntry('entry/1', { expectedVersion: 4 })
         await client.schedulePublish('entry/1', { at: '2026-12-01T00:00:00.000Z', expectedVersion: 5 })
@@ -240,12 +152,12 @@ describe('Site Admin clients', () => {
         await client.deleteEntry('entry/1', { expectedVersion: 10 })
         expect(calls.map(({ body, method, url }) => ({ body, method, url }))).toEqual([
             {
-                body: { data: { title: 'Created' }, locale: 'ja', slug: 'created' },
+                body: { defaultLocale: 'ja', data: { slug: 'created', title: 'Created' } },
                 method: 'POST',
                 url: '/manage/entries/posts',
             },
             {
-                body: { data: { title: 'Edited' }, expectedVersion: 2 },
+                body: { data: { title: 'Edited', slug: 'edited' }, expectedVersion: 2 },
                 method: 'PATCH',
                 url: '/manage/entries/entry%2F1',
             },
@@ -296,7 +208,7 @@ describe('Site Admin clients', () => {
         await client.models()
         await client.inspect()
         await client.routeSnapshot()
-        await client.runAiAction('suggest/title', { props: { instruction: 'Shorten' } })
+        await client.runAiAction('suggest/title', { input: { instruction: 'Shorten' } })
         await client.publishDue()
         await client.runAssetGC()
         expect(urls).toEqual([
@@ -454,11 +366,10 @@ describe('Site Admin clients', () => {
         await expect(unavailable.models()).rejects.toMatchObject({ code: 'SITE_ADMIN_REQUEST_FAILED', status: 503 })
     })
 
-    it('generates public/management helpers independently from the optional form peer and server config', () => {
+    it('generates a unified form composable without exposing server configuration', () => {
         const source = siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage' })
-        expect(source).not.toContain('@liria24/site-admin/form')
-        const form = siteAdminNuxtFormTemplate()
-        expect(form).toContain("from '@liria24/site-admin/form'")
+        expect(source).not.toContain('@liria24/site-admin/internal/form')
+        expect(source).toContain('useAdminForm')
         const types = siteAdminNuxtModelTypes('C:\\project\\site-admin.config.ts', ['production', 'preview'])
         expect(types).toContain('C:/project/site-admin.config.ts')
         expect(types).toContain('publicModels: InferSiteAdminPublicModels<SiteAdminDomainConfig>')

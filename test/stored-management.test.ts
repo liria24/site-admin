@@ -1,19 +1,19 @@
+import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createDatabase, type Database } from 'db0'
 import nodeSqlite from 'db0/connectors/node-sqlite'
-import { effectScope } from 'vue'
+import { effectScope, nextTick } from 'vue'
 import {
     array,
-    createSiteAdminDescriptor,
     defineSiteAdminConfig,
     object,
     select,
     text,
-    type InferSiteAdminFormModels,
     type InferSiteAdminModels,
 } from '../packages/site-admin/src'
 import { createSiteAdminManagementClient } from '../packages/site-admin/src/client'
-import { useSiteAdminForm } from '../packages/site-admin/src/form'
+import { modelFixture } from './model-fixture'
+import { useEntryForm } from '../packages/site-admin/src/form'
 import { createSiteAdmin, handleManagementRequest } from '../packages/site-admin/src/server'
 import { migrateTestDatabase, testAdapter } from './migrate'
 
@@ -22,6 +22,7 @@ const original = defineSiteAdminConfig({
         posts: {
             route: '/posts/:slug',
             fields: {
+                slug: text(),
                 title: text({ required: true }),
                 excerpt: text(),
                 publication: object({ slug: select(['auto', 'manual']), excerpt: text() }),
@@ -35,6 +36,7 @@ const current = defineSiteAdminConfig({
         posts: {
             route: '/posts/:slug',
             fields: {
+                slug: text(),
                 title: text({ required: true }),
                 publication: object({ slug: select(['auto', 'manual'], { required: true }) }),
                 sections: array(array(object({ heading: text() }))),
@@ -42,7 +44,6 @@ const current = defineSiteAdminConfig({
         },
     },
 })
-type Data = InferSiteAdminFormModels<typeof current>['posts']
 const databases: Database[] = []
 afterEach(async () => Promise.all(databases.splice(0).map((db) => db.dispose())))
 const fixture = async (oldMapping: boolean) => {
@@ -51,8 +52,8 @@ const fixture = async (oldMapping: boolean) => {
     await migrateTestDatabase(db, original)
     const legacy = createSiteAdmin({ config: original, database: await testAdapter(db, original) })
     const created = await legacy.createEntry('posts', {
-        slug: 'synthetic',
         data: {
+            slug: 'synthetic',
             title: 'Stored',
             excerpt: 'Historical',
             publication: { slug: 'manual', excerpt: 'auto' },
@@ -83,28 +84,33 @@ describe('trusted stored management snapshots', () => {
             expect(raw.data.publication).toEqual({ slug: 'manual', excerpt: 'auto' })
             expect((await admin.listRevisions(entry.id))[0]?.data.publication).toEqual(raw.data.publication)
             const read = await client.getEntry(entry.id)
-            const projected = { title: 'Stored', publication: { slug: 'manual' }, sections: [[{ heading: 'Heading' }]] }
+            const projected = {
+                slug: 'synthetic',
+                title: 'Stored',
+                publication: { slug: 'manual' },
+                sections: [[{ heading: 'Heading' }]],
+            }
             expect(read.data).toEqual(projected)
             expect((await client.listEntries('posts')).items[0]?.data).toEqual(projected)
             expect((await client.listRevisions(entry.id))[0]?.data).toEqual(projected)
             const scope = effectScope()
             try {
-                // A Core raw DTO passed directly to the existing form overload is also a trusted initial snapshot.
-                const form = scope.run(() =>
-                    useSiteAdminForm<Data>({
-                        descriptor: createSiteAdminDescriptor(current).models.posts!,
-                        modelName: 'posts',
-                        entry: raw,
-                        origin: 'http://fixture.test',
-                        fetch: (input, init) => handleManagementRequest(admin, new Request(input, init)),
-                    }),
-                )!
+                const session = modelFixture(
+                    (input, init) => handleManagementRequest(admin, new Request(input, init)),
+                    raw,
+                    {},
+                    { model: 'posts', descriptor: createSiteAdminDescriptor(current).models.posts! },
+                )
+                session.state.refresh = async () => {
+                    session.state.data.value = await admin.getEntry(entry.id)
+                }
+                const form = scope.run(() => useEntryForm(session.resource))!
                 expect(form.form.state.values).toEqual(projected)
-                expect(form.dirty.value).toBe(false)
+                expect(form.draft.isDirty.value).toBe(false)
                 form.form.setFieldValue('title', 'Edited')
                 await form.form.handleSubmit()
-                expect(form.serverError.value).toBeNull()
-                expect(form.dirty.value).toBe(false)
+                expect(session.resource.error.value).toBeUndefined()
+                expect(form.draft.isDirty.value).toBe(false)
                 expect((await admin.getEntry(entry.id)).data.title).toBe('Edited')
                 expect((await admin.getEntry(entry.id)).publishedRevisionId).toBe(entry.publishedRevisionId)
                 const version = (await admin.getEntry(entry.id)).version
@@ -113,9 +119,10 @@ describe('trusted stored management snapshots', () => {
                 expect(restored.currentRevisionId).not.toBe(entry.currentRevisionId)
                 expect(restored.data.publication).toEqual({ slug: 'manual' })
                 expect(restored.data.sections).toEqual([[{ heading: 'Heading' }]])
-                await form.refresh()
+                await session.state.refresh()
+                await nextTick()
                 expect(form.form.state.values).toEqual(projected)
-                expect(form.baseVersion.value).toBe(restored.version)
+                expect(form.draft.snapshot().version).toBe(restored.version)
                 await client.publishEntry(entry.id, { expectedVersion: restored.version, revisionId: entry.revisionId })
                 expect((await admin.getEntry(entry.id)).publishedRevisionId).toBe(entry.revisionId)
                 expect((await admin.getPublicEntry('posts', entry.id))?.data).toEqual(projected)

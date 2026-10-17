@@ -1,5 +1,5 @@
 import { SiteAdminError } from '../errors'
-import { projectStoredFields } from '../stored-data'
+import { createManagementOperations } from './operations'
 import { projectMarkdownListSummary } from '../markdown/list-summary'
 import type { SiteAdmin } from './site-admin'
 
@@ -16,7 +16,7 @@ const errorResponse = (error: unknown): Response => {
                 error: {
                     code: error.code,
                     ...(error.issues ? { issues: error.issues } : {}),
-                    ...(error.searchRemaining !== undefined ? { searchRemaining: error.searchRemaining } : {}),
+                    ...(error.committed ? { committed: true, receipt: error.receipt, effects: error.effects } : {}),
                     message: error.message,
                 },
             },
@@ -59,16 +59,6 @@ const requiredString = (value: unknown, name: string): string => {
     return value
 }
 
-const isObject = (value: unknown): value is Record<string, unknown> =>
-    typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const expectedVersion = (value: unknown): number => {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
-        throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"expectedVersion" must be a non-negative integer.')
-    }
-    return value
-}
-
 const optionalString = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
 
 const inlineTypes = new Set(['image/avif', 'image/gif', 'image/jpeg', 'image/png', 'image/webp'])
@@ -102,275 +92,90 @@ const handleManagementRequestInner = async <Context>(
     base = '/api/site-admin',
     context?: Context,
 ): Promise<Response> => {
-    let redactError = false
     try {
-        const actor = await siteAdmin.authorizeRequest(request, context)
-        const storedResult = <Value extends { data: Record<string, unknown> }>(value: Value, model: string): Value => ({
-            ...value,
-            data: projectStoredFields(siteAdmin.config.models[model]!.fields, value.data),
-        })
-        const entryResult = (value: unknown): unknown => {
-            if (!value || typeof value !== 'object' || !('currentRevisionId' in value)) return value
-            const entry = value as Awaited<ReturnType<SiteAdmin['getEntry']>>
-            return siteAdmin.can(actor, 'model', 'readDraft', entry.model)
-                ? storedResult(entry, entry.model)
-                : { id: entry.id, model: entry.model, sortOrder: entry.sortOrder, version: entry.version }
-        }
-        const json = (value: unknown, init?: ResponseInit): Response =>
-            jsonResponse(Array.isArray(value) ? value.map(entryResult) : entryResult(value), init)
-        const path = pathAfter(request, base)
-        const method = request.method.toUpperCase()
+        const path = pathAfter(request, base),
+            method = request.method.toUpperCase()
         if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-            const origin = request.headers.get('origin')
-            const site = request.headers.get('sec-fetch-site')
-            if (origin !== null ? origin !== new URL(request.url).origin : site !== null && site !== 'same-origin') {
+            const origin = request.headers.get('origin'),
+                site = request.headers.get('sec-fetch-site')
+            if (origin !== null ? origin !== new URL(request.url).origin : site !== null && site !== 'same-origin')
                 throw new SiteAdminError('SITE_ADMIN_FORBIDDEN', 'Management mutations require the same origin.')
-            }
         }
-        const entryFor = async (id: string, action: Parameters<SiteAdmin['can']>[2]) => {
-            const entry = await siteAdmin.getEntry(id)
-            redactError = !siteAdmin.can(actor, 'model', 'readDraft', entry.model)
-            siteAdmin.assertPermission(actor, 'model', action, entry.model)
-            return entry
-        }
-        if (method === 'GET' && path.length === 1 && path[0] === 'models') return json(siteAdmin.descriptorFor(actor))
-        if (method === 'GET' && path.length === 1 && path[0] === 'diagnostics') {
-            siteAdmin.assertPermission(actor, 'system', 'diagnostics')
-            return json(await siteAdmin.inspect())
-        }
-        if (method === 'GET' && path.length === 1 && path[0] === 'routes') {
-            siteAdmin.assertPermission(actor, 'system', 'diagnostics')
-            return json(await siteAdmin.routeSnapshot())
-        }
-        if (method === 'GET' && path.length === 1 && path[0] === 'entries') {
-            const url = new URL(request.url)
-            const model = url.searchParams.get('model') ?? undefined
-            if (model) siteAdmin.assertPermission(actor, 'model', 'readDraft', model)
-            const locale = url.searchParams.get('locale')
-            const query = url.searchParams.get('q') ?? undefined
-            const limit = Number(url.searchParams.get('limit') ?? 50)
-            const offset = Number(url.searchParams.get('offset') ?? 0)
-            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0)
-                throw new SiteAdminError(
-                    'SITE_ADMIN_INVALID_INPUT',
-                    'limit must be 1–100 and offset a non-negative integer.',
-                )
-            const models = model
-                ? [model]
-                : Object.keys(siteAdmin.config.models).filter((name) =>
-                      siteAdmin.can(actor, 'model', 'readDraft', name),
-                  )
-            const result = await siteAdmin.pageEntries(
-                { models, ...(locale ? { locale } : {}), ...(query ? { q: query } : {}) },
-                { limit, offset },
-            )
-            return json({
-                ...result,
-                items: result.items.map((entry) => storedResult(entry, entry.model)),
-                limit,
-                offset,
-            })
-        }
-        if (method === 'POST' && path.length === 2 && path[0] === 'entries') {
-            redactError = !siteAdmin.can(actor, 'model', 'readDraft', path[1])
-            siteAdmin.assertPermission(actor, 'model', 'create', requiredString(path[1], 'model'))
-            const body = await bodyObject(request)
-            const data = body.data
-            if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
-            }
-            return json(
-                await siteAdmin.createEntry(requiredString(path[1], 'model'), {
-                    actorId: actor.id,
-                    data: data as Record<string, unknown>,
-                    ...(typeof body.id === 'string' ? { id: body.id } : {}),
-                    ...(typeof body.locale === 'string' ? { locale: body.locale } : {}),
-                    ...(typeof body.slug === 'string' ? { slug: body.slug } : {}),
-                    ...(typeof body.sortOrder === 'number' || body.sortOrder === null
-                        ? { sortOrder: body.sortOrder }
-                        : {}),
-                    ...(typeof body.translationGroup === 'string' ? { translationGroup: body.translationGroup } : {}),
-                }),
-                { status: 201 },
-            )
-        }
-        if (method === 'POST' && path.length === 3 && path[0] === 'entries' && path[2] === 'reorder') {
-            const model = requiredString(path[1], 'model')
-            redactError = !siteAdmin.can(actor, 'model', 'readDraft', model)
-            siteAdmin.assertPermission(actor, 'model', 'sort', model)
-            const body = await bodyObject(request)
-            if (!Array.isArray(body.items))
-                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"items" must be an array.')
-            return json(await siteAdmin.setSortOrders(model, body.items))
-        }
-        if (path[0] === 'entries' && path[1]) {
-            const id = path[1]
-            if (method === 'GET' && path.length === 2) return json(await entryFor(id, 'readDraft'))
-            if (method === 'GET' && path.length === 3 && path[2] === 'revisions') {
-                const entry = await entryFor(id, 'readDraft')
-                return json((await siteAdmin.listRevisions(id)).map((revision) => storedResult(revision, entry.model)))
-            }
-            if (method === 'GET' && path.length === 3 && path[2] === 'references') {
-                await entryFor(id, 'readDraft')
-                const url = new URL(request.url)
-                const view = url.searchParams.get('view')
-                if (view !== 'current' && view !== 'published') {
-                    throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"view" must be "current" or "published".')
-                }
-                const references = await siteAdmin.referencesTo(id, {
-                    ...(url.searchParams.get('field') ? { field: url.searchParams.get('field')! } : {}),
-                    ...(url.searchParams.get('from') ? { from: url.searchParams.get('from')! } : {}),
-                    view,
-                })
+        const api = createManagementOperations<Context, Record<string, Record<string, unknown>>>(
+            () => siteAdmin,
+            request,
+            context,
+        )
+        await api.authorize()
+        const json = jsonResponse
+        if (method === 'GET' && path.length === 1) {
+            if (path[0] === 'models') return json(await api.models())
+            if (path[0] === 'diagnostics') return json(await api.inspect())
+            if (path[0] === 'routes') return json(await api.routeSnapshot())
+            if (path[0] === 'entries') {
+                const query = new URL(request.url).searchParams
                 return json(
-                    references.filter((reference) => siteAdmin.can(actor, 'model', 'readDraft', reference.model)),
-                )
-            }
-            if (method === 'PATCH' && path.length === 2) {
-                await entryFor(id, 'update')
-                const body = await bodyObject(request)
-                if (typeof body.data !== 'object' || body.data === null || Array.isArray(body.data)) {
-                    throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"data" must be an object.')
-                }
-                return json(
-                    await siteAdmin.updateEntry(id, {
-                        actorId: actor.id,
-                        data: body.data as Record<string, unknown>,
-                        expectedVersion: expectedVersion(body.expectedVersion),
-                        ...(typeof body.slug === 'string' ? { slug: body.slug } : {}),
+                    await api.listEntries((query.get('model') ?? undefined) as never, {
+                        limit: Number(query.get('limit') ?? 50),
+                        offset: Number(query.get('offset') ?? 0),
+                        ...(query.has('locale') ? { locale: query.get('locale')! } : {}),
+                        ...(query.has('q') ? { q: query.get('q')! } : {}),
                     }),
                 )
             }
+        }
+        if (method === 'POST' && path[0] === 'entries' && path.length === 2)
+            return json(await api.createEntry(path[1]!, (await bodyObject(request)) as never), { status: 201 })
+        if (method === 'POST' && path[0] === 'entries' && path[2] === 'reorder' && path.length === 3) {
+            const body = await bodyObject(request)
+            return json(await api.setSortOrders(path[1]!, body.items as never))
+        }
+        if (path[0] === 'entries' && path[1]) {
+            const id = path[1]
+            if (method === 'GET' && path.length === 2) return json(await api.getEntry(id))
+            if (method === 'GET' && path[2] === 'revisions' && path.length === 3)
+                return json(await api.listRevisions(id))
+            if (method === 'GET' && path[2] === 'references' && path.length === 3) {
+                const query = new URL(request.url).searchParams
+                return json(
+                    await api.referencesTo(id, {
+                        view: query.get('view') as 'current' | 'published',
+                        ...(query.has('from') ? { from: query.get('from')! } : {}),
+                        ...(query.has('field') ? { field: query.get('field')! } : {}),
+                    }),
+                )
+            }
+            if (method === 'PATCH' && path.length === 2)
+                return json(await api.updateEntry(id, (await bodyObject(request)) as never))
             if (method === 'DELETE' && path.length === 2) {
-                const entry = await entryFor(id, 'delete')
-                // Some HTTP adapters discard DELETE bodies. If-Match carries the same optimistic version.
                 const match = request.headers.get('if-match')
                 const body =
                     match === null
                         ? await bodyObject(request)
-                        : {
-                              expectedVersion: /^"\d+"$/u.test(match) ? Number(match.slice(1, -1)) : NaN,
-                          }
-                await siteAdmin.deleteEntry(id, {
-                    actorId: actor.id,
-                    expectedVersion: expectedVersion(body.expectedVersion),
-                })
-                return new Response(null, { status: 204, headers: { 'x-site-admin-model': entry.model } })
+                        : { expectedVersion: /^"\d+"$/u.test(match) ? Number(match.slice(1, -1)) : NaN }
+                await api.deleteEntry(id, body as never)
+                return new Response(null, { status: 204 })
             }
-            if (method === 'POST' && path[2] === 'publish') {
-                await entryFor(id, 'publish')
+            if (method === 'POST') {
                 const body = await bodyObject(request)
-                if (body.draft !== undefined) {
-                    await entryFor(id, 'update')
-                    if (
-                        !isObject(body.draft) ||
-                        !isObject(body.draft.data) ||
-                        (body.draft.slug !== undefined && typeof body.draft.slug !== 'string') ||
-                        body.revisionId !== undefined
-                    )
-                        throw new SiteAdminError(
-                            'SITE_ADMIN_INVALID_INPUT',
-                            'Publish draft requires data and an optional slug, without revisionId.',
-                        )
-                }
-                return json(
-                    await siteAdmin.publishEntry(id, {
-                        actorId: actor.id,
-                        expectedVersion: expectedVersion(body.expectedVersion),
-                        ...(body.draft !== undefined
-                            ? { draft: body.draft as { data: Record<string, unknown>; slug?: string } }
-                            : typeof body.revisionId === 'string'
-                              ? { revisionId: body.revisionId }
-                              : {}),
-                    }),
-                )
-            }
-            if (method === 'POST' && path[2] === 'unpublish') {
-                await entryFor(id, 'publish')
-                const body = await bodyObject(request)
-                return json(
-                    await siteAdmin.unpublishEntry(id, {
-                        actorId: actor.id,
-                        expectedVersion: expectedVersion(body.expectedVersion),
-                    }),
-                )
-            }
-            if (method === 'POST' && path[2] === 'schedule') {
-                await entryFor(id, 'schedule')
-                const body = await bodyObject(request)
-                if (body.draft !== undefined) {
-                    await entryFor(id, 'update')
-                    if (
-                        !isObject(body.draft) ||
-                        !isObject(body.draft.data) ||
-                        (body.draft.slug !== undefined && typeof body.draft.slug !== 'string') ||
-                        body.revisionId !== undefined
-                    )
-                        throw new SiteAdminError(
-                            'SITE_ADMIN_INVALID_INPUT',
-                            'Publish draft requires data and an optional slug, without revisionId.',
-                        )
-                }
-                return json(
-                    await siteAdmin.schedulePublish(id, {
-                        actorId: actor.id,
-                        at: requiredString(body.at, 'at'),
-                        expectedVersion: expectedVersion(body.expectedVersion),
-                        ...(body.draft !== undefined
-                            ? { draft: body.draft as { data: Record<string, unknown>; slug?: string } }
-                            : typeof body.revisionId === 'string'
-                              ? { revisionId: body.revisionId }
-                              : {}),
-                    }),
-                )
-            }
-            if (method === 'POST' && path[2] === 'cancel-schedule') {
-                await entryFor(id, 'schedule')
-                const body = await bodyObject(request)
-                return json(
-                    await siteAdmin.cancelScheduledPublish(id, {
-                        expectedVersion: expectedVersion(body.expectedVersion),
-                    }),
-                )
+                if (path[2] === 'publish') return json(await api.publishEntry(id, body as never))
+                if (path[2] === 'unpublish') return json(await api.unpublishEntry(id, body as never))
+                if (path[2] === 'schedule') return json(await api.schedulePublish(id, body as never))
+                if (path[2] === 'cancel-schedule') return json(await api.cancelScheduledPublish(id, body as never))
+                if (path[2] === 'revisions' && path[4] === 'restore')
+                    return json(await api.restoreRevision(id, path[3]!, body as never))
+                if (path[2] === 'revisions' && path[3] === 'prune')
+                    return json(await api.pruneRevisions(id, body.retain as number))
             }
             if (method === 'PATCH' && path[2] === 'sort') {
-                await entryFor(id, 'sort')
                 const body = await bodyObject(request)
-                const order = body.sortOrder
-                if (typeof order !== 'number' && order !== null) {
-                    throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"sortOrder" must be a number or null.')
-                }
-                return json(await siteAdmin.setSortOrder(id, order, expectedVersion(body.expectedVersion)))
-            }
-            if (method === 'POST' && path.length === 5 && path[2] === 'revisions' && path[4] === 'restore') {
-                await entryFor(id, 'restore')
-                const body = await bodyObject(request)
-                return json(
-                    await siteAdmin.restoreRevision(id, requiredString(path[3], 'revisionId'), {
-                        actorId: actor.id,
-                        expectedVersion: expectedVersion(body.expectedVersion),
-                    }),
-                )
-            }
-            if (method === 'POST' && path.length === 4 && path[2] === 'revisions' && path[3] === 'prune') {
-                await entryFor(id, 'prune')
-                const body = await bodyObject(request)
-                if (typeof body.retain !== 'number') {
-                    throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', '"retain" is required.')
-                }
-                return json(await siteAdmin.pruneRevisions(id, body.retain))
+                return json(await api.setSortOrder(id, body.sortOrder as number | null, body.expectedVersion as number))
             }
         }
         if (method === 'POST' && path.length === 1 && path[0] === 'assets') {
-            siteAdmin.assertPermission(actor, 'asset', 'upload')
             const contentType = request.headers.get('content-type') ?? undefined
-            if (contentType?.startsWith('multipart/form-data')) {
-                throw new SiteAdminError(
-                    'SITE_ADMIN_INVALID_INPUT',
-                    'Send the raw file body with x-filename and x-upload-size.',
-                )
-            }
-            if (!request.body) throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Upload body is required.')
+            if (contentType?.startsWith('multipart/form-data') || !request.body)
+                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Send the raw upload body.')
             const size = request.headers.get('x-upload-size')
             if (!size || !/^[1-9]\d*$/u.test(size))
                 throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'x-upload-size must be a positive byte count.')
@@ -378,63 +183,39 @@ const handleManagementRequestInner = async <Context>(
             try {
                 filename = decodeURIComponent(requiredString(request.headers.get('x-filename'), 'x-filename'))
             } catch {
-                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'x-filename must be a URL-encoded filename.')
+                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'x-filename must be URL encoded.')
             }
             return json(
-                await siteAdmin.uploadAsset({
-                    actorId: actor.id,
+                await api.upload({
                     body: request.body,
-                    ...(contentType ? { contentType } : {}),
                     filename,
                     size: Number(size),
+                    ...(contentType ? { contentType } : {}),
                 }),
                 { status: 201 },
             )
         }
         if (path[0] === 'assets' && path[1]) {
-            if (method === 'GET' && path.length === 2) {
-                siteAdmin.assertPermission(actor, 'asset', 'read')
-                return json(await siteAdmin.getAsset(path[1]))
-            }
-            if (method === 'GET' && path[2] === 'content') {
-                siteAdmin.assertPermission(actor, 'asset', 'read')
+            if (method === 'GET' && path.length === 2) return json(await api.getAsset(path[1]))
+            if (method === 'GET' && path[2] === 'content' && path.length === 3) {
+                await api.getAsset(path[1])
                 const { asset, file } = await siteAdmin.downloadAsset(path[1], false)
                 return assetResponse(request, asset, file, true)
             }
             if (method === 'DELETE' && path.length === 2) {
-                siteAdmin.assertPermission(actor, 'asset', 'delete')
-                await siteAdmin.deleteAsset(path[1])
+                await api.deleteAsset(path[1])
                 return new Response(null, { status: 204 })
             }
         }
-        if (method === 'POST' && path.length === 2 && path[0] === 'tasks' && path[1] === 'publish-due') {
-            siteAdmin.assertPermission(actor, 'system', 'publishDue')
-            const result = await siteAdmin.publishDue()
-            for (const failure of result.failed) {
-                const entry = await siteAdmin.getEntry(failure.entryId).catch(() => null)
-                if (!entry || !siteAdmin.can(actor, 'model', 'readDraft', entry.model))
-                    failure.message = 'Scheduled publication failed.'
-            }
-            return json(result)
-        }
-        if (method === 'POST' && path.length === 2 && path[0] === 'tasks' && path[1] === 'asset-gc') {
-            siteAdmin.assertPermission(actor, 'asset', 'gc')
-            return json(await siteAdmin.runAssetGC())
+        if (method === 'POST' && path[0] === 'tasks') {
+            if (path[1] === 'publish-due') return json(await api.publishDue())
+            if (path[1] === 'asset-gc') return json(await api.runAssetGC())
         }
         return json(
             { error: { code: 'SITE_ADMIN_NOT_FOUND', message: 'Management route not found.' } },
             { status: 404 },
         )
     } catch (error) {
-        if (redactError && error instanceof SiteAdminError)
-            return errorResponse(
-                new SiteAdminError(
-                    error.code,
-                    error.code === 'SITE_ADMIN_STORAGE_UNAVAILABLE'
-                        ? 'The entry was saved, but Asset synchronization needs retry.'
-                        : 'The requested operation failed.',
-                ),
-            )
         return errorResponse(error)
     }
 }
@@ -490,28 +271,57 @@ export const handlePublicRequest = async <Context>(
                         models: Object.keys((publicDescriptor(siteAdmin) as { models: object }).models),
                     })
                 } else {
-                    const content = await siteAdmin.content(modelName, locale)
                     if (path.length === 1) {
                         const mode = url.searchParams.get('markdown') ?? 'full'
                         if (mode !== 'full' && mode !== 'summary')
                             throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Unknown Markdown list mode.')
-                        const items = await content.list()
-                        response = jsonResponse(
-                            mode === 'summary'
-                                ? await projectMarkdownListSummary(
-                                      items,
-                                      modelName,
-                                      siteAdmin.config,
-                                      (id) => `${base.replace(/\/$/u, '')}/_assets/${encodeURIComponent(id)}`,
-                                  )
-                                : items,
-                        )
+                        const limit = url.searchParams.get('limit'),
+                            offset = url.searchParams.get('offset')
+                        if (limit !== null || offset !== null) {
+                            const page = { limit: Number(limit ?? 20), offset: Number(offset ?? 0) }
+                            if (
+                                !Number.isSafeInteger(page.limit) ||
+                                page.limit < 1 ||
+                                page.limit > 100 ||
+                                !Number.isSafeInteger(page.offset) ||
+                                page.offset < 0
+                            )
+                                throw new SiteAdminError('SITE_ADMIN_INVALID_INPUT', 'Invalid public page.')
+                            const result = await siteAdmin.contentPage(modelName, page, locale)
+                            response = jsonResponse({
+                                ...result,
+                                items:
+                                    mode === 'summary'
+                                        ? await projectMarkdownListSummary(
+                                              result.items,
+                                              modelName,
+                                              siteAdmin.config,
+                                              (id) => base.replace(/\/$/u, '') + '/_assets/' + encodeURIComponent(id),
+                                          )
+                                        : result.items,
+                            })
+                        } else {
+                            const generation = await siteAdmin.publicGeneration()
+                            const items = await siteAdmin.contentList(modelName, locale)
+                            if (generation !== (await siteAdmin.publicGeneration()))
+                                throw new SiteAdminError(
+                                    'SITE_ADMIN_CONFLICT',
+                                    'Publication changed during listing; refresh.',
+                                )
+                            response = jsonResponse(
+                                mode === 'summary'
+                                    ? await projectMarkdownListSummary(
+                                          items,
+                                          modelName,
+                                          siteAdmin.config,
+                                          (id) => `${base.replace(/\/$/u, '')}/_assets/${encodeURIComponent(id)}`,
+                                      )
+                                    : items,
+                            )
+                        }
                     } else {
                         const key = path.slice(1).join('/')
-                        const item = (await content.list()).find((document) => {
-                            const metadata = document.data['_siteAdmin'] as { id?: string; slug?: string } | undefined
-                            return metadata?.id === key || metadata?.slug === key
-                        })
+                        const item = await siteAdmin.contentDocument(modelName, key, locale)
                         response = item ? jsonResponse(item) : jsonResponse(null, { status: 404 })
                     }
                 }

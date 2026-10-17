@@ -7,7 +7,7 @@ export interface SiteAdminStorage extends StorageContent, StorageAssets {
     assertSchema(): Promise<void>
 }
 
-/** Applications own connections, migrations and lifecycle. Core has no SQL or ORM dependency. */
+/** Storage boundary for the domain; Void owns the native connection and migrations. */
 export interface SiteAdminDatabase {
     bind(config: SiteAdminConfig): SiteAdminStorage
 }

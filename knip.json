@@ -25,12 +25,14 @@
                 "src/runtime/*.ts!",
                 "src/server/index.ts!",
                 "src/nuxt/server.ts!",
-                "src/adapters/drizzle.ts!",
                 "src/devtools/{index,dock,client/app}.ts!",
                 "src/runtime/tasks/*.ts!",
-                "src/ai/operations.ts!",
-                "src/dependency-aliases.ts!",
-                "src/seo.ts!"
+                "src/admin-client.ts!",
+                "src/server-api.ts!",
+                "src/public-client.ts!",
+                "src/seo.ts!",
+                "src/model.ts!",
+                "src/schema.ts!"
             ],
             "project": ["src/**/*.ts!", "*.config.ts"],
             "ignoreDependencies": [

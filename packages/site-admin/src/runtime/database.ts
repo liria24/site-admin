@@ -1,92 +1,50 @@
-import type { SiteAdminDatabase } from '../adapter'
-import type { BetterAuthOptions } from 'better-auth'
+import { db } from 'void/db'
+import { getRuntimeBinding } from 'void/_env'
+import { drizzleAdapter } from '@better-auth/drizzle-adapter'
+import { createD1Database } from '../adapters/database'
 import { SiteAdminError } from '../errors'
+import { withSiteAdminContext } from './context'
 
-/** Structural native request shape, without a dependency on Nuxt or an ORM. */
-export interface SiteAdminDatabaseRequestEvent {
-    req: Request
-    context: Record<string, unknown>
-}
+type Client = Parameters<typeof createD1Database>[0]
+const databases = new WeakMap<object, WeakMap<object, ReturnType<typeof createD1Database>>>()
 
-export interface SiteAdminDatabaseContext {
-    request?: Request
-    event?: SiteAdminDatabaseRequestEvent
-    /** Explicit native task/platform context for work without an HTTP request. */
-    platformContext?: object
-}
-
-/** Applications own connections, drivers, schema, migrations, caching, and disposal. */
-export type SiteAdminDatabaseConfig =
-    | SiteAdminDatabase
-    | ((context: SiteAdminDatabaseContext) => SiteAdminDatabase | Promise<SiteAdminDatabase>)
-
-/** Invoke the application adapter only; never open, close, or migrate its database. */
-export const resolveSiteAdminDatabase = async (
-    config: SiteAdminDatabaseConfig | undefined,
-    context: SiteAdminDatabaseContext = {},
-): Promise<SiteAdminDatabase> => {
-    const database = typeof config === 'function' ? await config(context) : config
-    if (!database || typeof database.bind !== 'function')
-        throw new SiteAdminError(
-            'SITE_ADMIN_DATABASE_UNSUPPORTED',
-            '[site-admin] Provide an application-owned SiteAdminDatabase adapter in database or the site-admin:database hook.',
-        )
+/** Cache schema/storage by binding, but resolve Void's session for each operation. */
+export const useVoidDatabase = (schema: Record<string, unknown>) => {
+    const binding = getRuntimeBinding('DB')
+    if (!binding || typeof binding !== 'object')
+        throw new SiteAdminError('SITE_ADMIN_DATABASE_UNSUPPORTED', 'Site Admin requires Void with a D1 database.')
+    let schemas = databases.get(binding)
+    if (!schemas) databases.set(binding, (schemas = new WeakMap()))
+    let database = schemas.get(schema)
+    if (!database) {
+        const client = new Proxy({} as Client, {
+            get(_target, property) {
+                const native = (db as unknown as { $client: Client }).$client
+                const value = Reflect.get(native, property)
+                return typeof value === 'function' ? value.bind(native) : value
+            },
+        })
+        database = createD1Database(client, schema)
+        schemas.set(schema, database)
+    }
     return database
 }
 
-/** Request-local hook state is shared by native auth preparation and lazy CMS resolution. */
-export interface SiteAdminDatabaseScopeContext<
-    Event extends SiteAdminDatabaseRequestEvent = SiteAdminDatabaseRequestEvent,
-> extends SiteAdminDatabaseContext {
-    event?: Event
-    database?: SiteAdminDatabase
-    authDatabase?: BetterAuthOptions['database']
-}
-
-export const createSiteAdminDatabaseScope = <Event extends SiteAdminDatabaseRequestEvent>(
-    config: SiteAdminDatabaseConfig | undefined,
-    hook: (context: SiteAdminDatabaseScopeContext<Event>) => void | Promise<void>,
+/** Auth uses the same Void session without initializing CMS tables or running migrations. */
+export const createAuthDatabase = (
+    schema: Record<string, unknown>,
+    options: { usePlural?: boolean; camelCase?: boolean } = {},
+    context?: object,
 ) => {
-    type Context = SiteAdminDatabaseScopeContext<Event>
-    const contexts = new WeakMap<object, Context>()
-    const preparing = new WeakMap<object, Promise<Context>>()
-    const resolving = new WeakMap<object, Promise<Context & { database: SiteAdminDatabase }>>()
-    const prepare = (event?: Event, platformContext?: object): Promise<Context> => {
-        const key = event?.context
-        const cached = key && preparing.get(key)
-        if (cached) return cached
-        const context: Context = {
-            ...(event ? { event, request: event.req } : {}),
-            ...(platformContext ? { platformContext } : {}),
-        }
-        const result = Promise.resolve().then(async () => {
-            await hook(context)
-            if (key) contexts.set(key, context)
-            return context
-        })
-        if (key) {
-            preparing.set(key, result)
-            void result.catch(() => preparing.delete(key))
-        }
-        return result
+    const factory = drizzleAdapter(db, { ...options, provider: 'sqlite', schema, transaction: false })
+    return (authOptions: Parameters<typeof factory>[0]) => {
+        const adapter = factory(authOptions)
+        for (const [name, value] of Object.entries(adapter))
+            if (typeof value === 'function')
+                Object.assign(adapter, {
+                    [name]: (...args: unknown[]) =>
+                        withSiteAdminContext(context, () => Reflect.apply(value, adapter, args)),
+                })
+        return adapter
     }
-    const resolve = (event?: Event, platformContext?: object): Promise<Context & { database: SiteAdminDatabase }> => {
-        const key = event?.context
-        const cached = key && resolving.get(key)
-        if (cached) return cached
-        const result = prepare(event, platformContext).then(async (context) => {
-            const database = await resolveSiteAdminDatabase(context.database ?? config, {
-                ...(event ? { event, request: event.req, platformContext: event.context } : {}),
-                ...(platformContext ? { platformContext } : {}),
-            })
-            return Object.assign(context, { database })
-        })
-        if (key) {
-            resolving.set(key, result)
-            // A CMS failure must not discard an already prepared native auth provider.
-            void result.catch(() => resolving.delete(key))
-        }
-        return result
-    }
-    return { prepare, resolve, get: (context: object) => contexts.get(context) }
 }

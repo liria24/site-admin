@@ -1,18 +1,11 @@
 # @liria24/site-admin
 
-## What does it do?
+Typed content, publishing, translations and headless forms for Nuxt. Site Admin uses Void for D1 and object storage; your app supplies its UI, authentication providers and editorial policy.
 
-Site Admin adds schema-driven content management to a Nuxt application: typed models, drafts and revisions, publishing, localized routes, assets, SEO and optional AI suggestions.
-
-Build your own public pages and administration UI. Site Admin supplies public and authenticated management APIs, typed composables and headless forms. Your application owns its database connection, migrations, authentication providers and AI model.
-
-## Install
+## Start
 
 ```sh
-bun add @liria24/site-admin
-# For the application-owned Drizzle example and schema generation below:
-bun add drizzle-orm@1.0.0-rc.4 @better-auth/drizzle-adapter
-bun add -D drizzle-kit@1.0.0-rc.4
+bun add @liria24/site-admin void
 ```
 
 ```ts
@@ -20,157 +13,162 @@ bun add -D drizzle-kit@1.0.0-rc.4
 export default defineNuxtConfig({
     modules: ['@liria24/site-admin/nuxt'],
     site: { name: 'Example', url: 'https://example.com' },
-    i18n: { defaultLocale: 'en', locales: ['en'] },
-    llms: { domain: 'https://example.com', title: 'Example' },
+    i18n: { defaultLocale: 'ja', locales: ['ja', 'en'], strategy: 'prefix_except_default' },
+    routeRules: { '/admin/**': { auth: { user: { role: 'admin' } } } },
+    siteAdmin: { ai: false, ogImage: false, llms: false },
 })
 ```
 
-The module installs its integrations. Configure their native Nuxt options as needed; use `siteAdmin` switches to disable integrations you do not use. Database drivers and AI providers remain application-selected dependencies.
+```ts
+// void.config.ts
+import { defineConfig } from 'void/config'
+export default defineConfig({
+    inference: { bindings: { db: true, storage: true } },
+    cloudflare: { name: 'example', compatibility_flags: ['nodejs_compat'] },
+})
+```
 
-## Define content
+Disable unused integrations with `siteAdmin.auth`, `ai`, `i18n`, `markdown`, `seo`, `sitemap`, `robots`, `schemaOrg`, `ogImage` or `llms`. Use native `files: false` to disable Files.
 
-Keep models and server configuration together in `site-admin.config.ts`:
+## Models
 
 ```ts
-import { defineSiteAdminConfig, markdown, text, textarea } from '@liria24/site-admin'
-import { drizzleAdapter } from '@liria24/site-admin/adapters/drizzle'
+// site-admin.config.ts
+import { defineSiteAdminConfig, image, markdown, text } from '@liria24/site-admin'
 
 export default defineSiteAdminConfig({
-    database: async () => {
-        const [{ getAppDb }, schema] = await Promise.all([
-            import('./server/database'),
-            import('./server/database/schema'),
-        ])
-        return drizzleAdapter(await getAppDb(), { schema })
-    },
-    seo: { titleTemplate: '%s | Example' },
+    assets: {},
+    tasks: { publishDue: '* * * * *', rebuildSearch: true },
     models: {
         posts: {
+            meta: ({ t }) => ({ label: t('models.post'), plural: t('models.posts'), icon: 'book' }),
             route: '/posts/:slug',
-            displayFields: { title: 'title', description: 'excerpt' },
+            displayFields: { title: 'title', description: 'body', image: 'image' },
             fields: {
-                title: text({ required: true }),
-                excerpt: textarea({ maxLength: 180 }),
-                body: markdown({ required: true }),
+                slug: text({ i18n: true }),
+                title: text({ required: true, i18n: true, label: ({ t }) => t('fields.title') }),
+                body: markdown({ required: true, i18n: true }),
+                image: image(),
             },
         },
+        links: {
+            meta: { label: 'Link', plural: 'Links' },
+            publishing: false,
+            scheduling: false,
+            revisions: false,
+            fields: { title: text({ required: true }) },
+        },
     },
+    routeRules: { '/admin/**': { seo: { title: 'Admin', robots: 'noindex' } } },
 })
 ```
 
-Create the application helper `server/database.ts` to return your chosen Drizzle SQLite or D1 connection. The resolver runs when a request or task needs the adapter; use its `{ event, request, platformContext }` argument for request-bound connections. Your application controls caching and disposal. See the [application connection example](https://github.com/liria24/site-admin/blob/main/test/fixtures/nuxt/server/database.ts) and [adapter protocol](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/adapter.ts).
-
-Management search queries accept at most 512 Unicode code points before and after lowercase mapping; longer queries return INVALID_INPUT (HTTP 400). Unicode management search keeps bounded derived-text chunks in existing metadata, leaving canonical columns and history unchanged. Cold projections use at most 24 preparation statements per request (up to 256 small heads); the management client resumes search GETs only while reported preparation progresses. Filtering, counts and pages remain in one native database snapshot, including matches across chunk boundaries. Other requests are not retried.
-
-For example, a Node application can own a lazily opened SQLite connection:
+Labels and SEO accept strings or synchronous `({ t, locale }) => value` resolvers. `t` uses Nuxt i18n messages; configuration is evaluated on the server. Configured route SEO applies automatically.
 
 ```ts
-// server/database.ts
-import { drizzle } from 'drizzle-orm/node-sqlite'
-import * as schema from './database/schema'
-
-let db: ReturnType<typeof drizzle> | undefined
-export const getAppDb = () => (db ??= drizzle('./.data/content.sqlite3', { relations: schema.authRelations }))
+// server/auth.config.ts — configure providers here with native Better Auth options
+import { defineServerAuth } from '@nuxtjs/better-auth/config'
+export default defineServerAuth({ appName: 'Example' })
 ```
-
-Create the data directory and close the connection in your application's lifecycle. For D1, replace this helper with one that reads the current application's binding.
-
-Configure Better Auth directly in `server/auth.config.ts`, using `defineServerAuth` from `#nuxtjs/better-auth/config` and your application-owned auth adapter. Keep its connection and generated schema consistent with the content adapter. Add `app/auth.config.ts` with the native client configuration, and set `NUXT_BETTER_AUTH_SECRET`. The [server](https://github.com/liria24/site-admin/blob/main/test/fixtures/nuxt/server/auth.config.ts) and [client](https://github.com/liria24/site-admin/blob/main/test/fixtures/nuxt/app/auth.config.ts) fixtures show these native configurations. Defer opening connections during schema inspection.
 
 ```sh
-# Bootstrap the content schema before auth configuration imports it.
-bun x site-admin generate --out server/database/schema.ts
-# Then include the native Better Auth tables and plugins.
-bun x site-admin generate --auth server/auth.config.ts --out server/database/schema.ts
-bun x drizzle-kit generate --config drizzle.config.ts
-bun x drizzle-kit migrate --config drizzle.config.ts
+bun x site-admin generate       # CMS + Better Auth → db/schema.ts; no DB connection
+bun x void db generate          # Review and commit db/migrations/
+bun run dev                    # Void applies local migrations
+bun x void deploy --platform cloudflare
 ```
 
-Point your application-owned `drizzle.config.ts` at that schema and your chosen migration directory/database. Review generated migrations and apply them explicitly; Site Admin never opens a built-in connection or applies migrations. For D1, apply SQL with your deployment tooling. Auth generation uses the native adapter and its provider/table options from your auth configuration; combined content schemas currently support SQLite/D1.
+Void owns connections and migrations. Server-side application queries use `db` from `void/db` and tables from `@schema`. The SDK initially supports D1/SQLite only. Deployment applies reviewed SQL; back up and migrate existing data before adopting a new baseline. Builds and HTTP reads never migrate. `tasks.rebuildSearch: true` rebuilds local indexes at development startup; after a remote data migration, explicitly run `useAdmin().tasks.rebuildSearch()` in that migration's server context.
 
-Saves create drafts until publication; set a model's `publishing: false` for immediate publication. Models are public by default; `public: false` removes anonymous access. Fields include relations, files, images, arrays and objects, with optional Standard Schema validation. See [model/config types](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/config.ts).
-
-## Use it in the app
-
-Nuxt infers model names and field types from the common configuration:
+## Read
 
 ```ts
-// Inside a page's <script setup>
+const { data: posts } = await useContent('posts')
+const { data: post } = await useContent('posts', { id: postId })
+const offset = ref(0)
+const { data: page } = await useContent('posts', {
+    page: () => ({ limit: 20, offset: offset.value }),
+    markdown: 'summary',
+})
+// page.value: { items, total, limit, offset }
+```
+
+Native AsyncData options, transforms, status and errors are supported. Locale resolves from an explicit option, Nuxt i18n, then the article's original. Missing translations and fields inherit the original; fallback pages keep the original canonical.
+
+## Edit
+
+```vue
+<script setup lang="ts">
 const route = useRoute()
-const entry = await useSiteAdminEntry('posts', () => String(route.params.slug), {
-    default: () => null,
+const pendingReview = ref(false)
+const uploadedName = ref('')
+const { form, data, meta, error, status, operation, draft, publish, schedule, upload } = useAdminForm('posts', {
+    id: () => route.params.id as string | undefined, // omit for a new entry
+    onBeforeSubmit: ({ operation }) => {
+        if (operation !== 'save' && pendingReview.value) throw new Error('Review the suggestion first.')
+    },
+    onUpload: ({ files }) => {
+        uploadedName.value = files[0]?.name ?? ''
+    },
+    onSuccess: () => navigateTo('/admin/posts'),
 })
-const posts = await useSiteAdminList('posts', { default: () => [], lazy: true })
-const summary = computed(() => entry.data.value?.data.body.meta.summary)
-const batch = await useSiteAdminBatch({
-    posts: { list: 'posts' },
-    featured: { entry: 'posts', slugOrId: () => String(route.params.slug) },
-})
-useSeo(() => entry.data.value?.seo)
+</script>
+
+<template>
+    <form @submit.prevent="form.handleSubmit()">
+        <fieldset :disabled="status === 'idle' || status === 'pending' || operation !== null">
+            <form.Field name="title" v-slot="{ field }">
+                <input :value="field.state.value" @input="field.handleChange($event.target.value)" />
+            </form.Field>
+            <button type="submit">Save draft</button>
+            <button type="button" @click="publish()">Publish</button>
+        </fieldset>
+    </form>
+</template>
 ```
 
-Pages using explicit `useSeo()` can set `siteAdmin.routing.metadata: false` in `nuxt.config.ts` to disable automatic route metadata while retaining routing and the SEO helpers.
+`useAdminForm` exposes its handles immediately; `await useAdminForm(...)` waits for the initial load. Pass a stable `instance` string or getter for independent editors of the same model/entry. Instances separate input, saved IDs, errors and operations while sharing descriptors and clients. Reopening an instance restores its session draft; changing instance selects another draft, and authentication changes clear the previous actor's drafts. Explicit instances also retain a newly saved ID, so reopening does not create a duplicate. Omit `instance` for the default model/entry draft.
 
-These composables return native Nuxt `AsyncData`: `data`, `error`, `status`, `refresh`, `execute` and `clear`. They accept native options such as `transform`, `pick`, `default`, `watch`, `server`, `lazy`, `dedupe` and `timeout`, plus a reactive `locale`. With `siteAdmin.i18n` enabled, an omitted locale follows the installed i18n locale; otherwise set `locale` explicitly when needed. Reactive slugs/locales update the request and SSR payload is reused during hydration.
-
-Shared `useSiteAdminEntry`, `useSiteAdminList`, `useSiteAdminBatch` and management composables keep a single native `AsyncData` subscription per key. Additional callers attach to that entry, including after a reactive slug or locale changes, so an application does not patch Nuxt for the shared-key construction race in Nuxt 4.6.1.
-
-Public entries have typed `entry.data.value?.data.title`; Markdown fields are parsed Comark documents; see [Markdown handling](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/markdown/content.ts). A batch preserves each named model's type and exposes its own `{ data, error }`, for example `batch.data.value?.featured.data?.data.title`. A missing entry is `null`; unknown/private model names are rejected by the generated types. See [public data examples and inference checks](https://github.com/liria24/site-admin/blob/main/test/nuxt-public-data-types.test.ts).
-
-`entry.data.value?.data.body.meta.summary` is typed as `Node[] | undefined`. An explicit native Comark summary before `<!-- more -->` wins, including an empty summary. Otherwise it contains up to two body paragraphs and 280 graphemes, excluding images, code and raw HTML. The body AST is unchanged; `markdown.summary.enabled: false` disables both. Render the AST with Comark and use CSS for the visible line limit; no AI runs.
-
-Use `useSiteAdminList('posts', { markdown: 'summary' })` or `{ list: 'posts', markdown: 'summary' }` in a batch to send rendering documents whose `nodes` contain only the summary, including nested and related Markdown. Missing summaries and `summary.enabled: false` have empty nodes, including when custom plugins provide summaries. Source, frontmatter and other Markdown plugin metadata are omitted on the server before HTTP/SSR serialization; default lists and details retain full content and separate native cache keys. This reduces payloads, not database reads or parsing.
-
-Native transformations preserve their output type:
+`upload(field, files)` updates the field and returns uploaded assets. It accepts native TanStack paths such as `sections[0].image`, including nested galleries. Array rows must exist; if a target row changes during an upload, the result is not applied. `onUpload.field` uses the same path type. Disable array editing while uploading. `schedule(date)` accepts a `Date` or date string. `draft.ensure()` persists a draft without firing `onSuccess`. Hooks share `error`; `operation` is `save | publish | schedule | upload | null`. Unsaved input and active operations enable `beforeunload`; use `beforeUnload: () => otherWorkIsRunning.value` to include app work, or `false` to opt out.
 
 ```ts
-const titles = await useSiteAdminList('posts', {
-    transform: (entries) => entries.map((entry) => entry.data.title),
-    default: () => [],
+// app/plugins/prepare-content.ts — application-owned slug policy
+export default defineNuxtPlugin((app) => {
+    app.hook('site-admin:entry:prepare', async (context) => {
+        if (context.operation === 'save' || context.model !== 'posts') return
+        context.value.slug ||= String(context.value.title)
+            .normalize('NFKC')
+            .toLowerCase()
+            .replace(/[^\p{L}\p{N}]+/gu, '-')
+            .replace(/^-|-$/g, '')
+    })
 })
-// titles.data.value is string[].
 ```
 
-For editing, use the typed management client:
+A committed write remains committed if asset synchronization fails: its receipt updates the ID/version and the common error exposes the pending effect. Retry `useAdmin().tasks.syncAssets()`; do not resend the save. Imperative APIs throw failures; form resources retain input and report `error`.
+
+## Translations and imperative operations
 
 ```ts
-const management = useSiteAdminManagementClient()
-const entries = await management.listAllEntries('posts')
+const admin = useAdminClient() // server: useAdmin(event)
+const models = await admin.models() // authorized name, meta, features, fields and displayFields
+let post = await admin.entries.create('posts', {
+    defaultLocale: 'ja',
+    data: { slug: 'hello', title: 'こんにちは', body: '日本語本文' },
+    translations: { en: { title: 'Hello', body: 'English content' } },
+})
+post = await admin.entries.update(
+    'posts',
+    { id: post.id, version: post.version },
+    {
+        translations: { en: { title: 'Updated' } },
+    },
+)
+await admin.entries.publish('posts', { id: post.id, version: post.version })
 ```
 
-Management APIs cover drafts, revisions, publishing, scheduling, ordering, assets and AI proposals. Pass the current `expectedVersion` for direct client edits and publication. Install the optional `@tanstack/vue-form` peer and await the model form during component setup:
+Each locale supplied in an update replaces its sparse overrides; omitted fields inherit the original, omitted locales stay unchanged, and `null` removes a translation. Shared fields stay in `data`. Original and translations share one version/revision and publish, schedule and restore together. Forms retain unsaved input per locale without storing untouched fallback values.
 
-```ts
-const create = await useSiteAdminForm('posts', {})
-const editor = await useSiteAdminForm('posts', { id: () => props.id })
-const list = await useSiteAdminManagementList('posts') // locale is explicit for management
-await editor.form.handleSubmit() // save a draft, without AI
-// After any app-selected action and explicit apply:
-await editor.publish() // atomically stores and publishes the current candidate
-// Or: await editor.schedule(atISOString)
-// editor.form fields and list.data.value?.items infer the selected model.
-// Assets expose field.value.url / item.data.image.url / uploaded.url.
-```
+## Guides
 
-The form loads its descriptor and entry, retains session drafts, tracks `dirty` and `baseVersion`, and saves with optimistic concurrency. Draft saves never invoke AI. Empty draft slugs require a final slug before publication. Native `ai.actions` returning `{ data, slug? }` proposals connect to `editor.ai.run(action, props)` with inferred input types, including new entries; explicitly `apply({ fields, slug })` or discard. Prompts, output schemas, metadata generation and proofreading policies belong to your application. `ai.proposal`, `busy`, `error` and `stale` support explicit apply/discard without saving. A dirty refresh preserves edits and reports version conflicts. Drafts are isolated by connection, actor, model, locale and ID; use `key` to separate simultaneous new entries. Layout, editor rendering, toasts and navigation remain application-owned. The `{ entry }` and Core descriptor overloads remain available; see the [headless form API](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/form.ts).
-
-Migration: `controller.metadata.modes`, `setMode()` and session-draft `metadata` are removed. Keep generation choices in application UI and reactive props passed to `ai.run()`. `controller.metadata.slug` is unchanged.
-
-Direct `publishEntry` and `schedulePublish` accept either `revisionId` or an optional `draft: { data, slug }`, with `expectedVersion`; candidates require update permission as well as publish/schedule permission. Revision, route and version writes are atomic. `draft.serialize()` returns a typed raw snapshot and its base version. A new form must first save its draft to establish an ID before an entry action, publication or scheduling.
-
-Successful Nuxt management-client mutations clear and refresh affected model lists, entry data and dependent batches through native Nuxt APIs. Refresh failures do not undo a successful save. Nuxt's public key enumeration covers serialized payload data; `serialize: false` reads need explicit refresh, and an application-owned `getCachedData` or extracted static cache must invalidate its own cache. Native options and manual `refresh` remain available. Display URLs use the authenticated asset route and are stripped from schema-declared asset values on save; they do not grant public access.
-
-## Optional settings and reference
-
-- **Files:** put native Files SDK `storage` and environment overrides in the common file. `assets` controls upload/publication policy. An existing `files.config.ts` takes precedence for physical storage. See [Files selection](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/nuxt/files-source.ts) and [asset policy](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/assets-config.ts).
-- **AI:** `ai.actions` defines schema-backed `props`, per-action/shared models, and native text-generation `prompt`/`Output` or decision `state`/`questions`. `useAiAction(name, { props, immediate: false })`, management client `runAiAction(name, { props })` and server `runAiAction(event, name, { props })` infer input/output. Sessions and role `ai: [name]` permissions protect execution. Native Nuxt `createUseFetch` owns SSR/hydration and status/error: POST, `watch: false`, zero retries; `execute()` reports failure in `error`, and `execute({ signal })` / `clear()` cancel. `server: false` cannot await client data during setup. Output factories receive validated input for app-owned preservation/DB guards. AI-free config omits the capability. One-off `createSiteAdminAI(model, context).generateText()` stays native. See [AI types](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/ai.ts).
-- **SEO and routes:** common `seo` supplies defaults; `models.posts.seo` accepts an object or synchronous entry resolver. Top-level common `routeRules` applies `seo`, `sitemap` and `llms` rules to actual pathnames, including i18n prefixes such as `/ja/posts/**`. `useSeo()` applies reactive entry metadata and optional page overrides. See [SEO/route types](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/seo.ts).
-- **OG images:** configure the native `nuxt-og-image` renderer and install its renderer dependencies in your application. `useSeo()` accepts its component/props/options descriptor when that integration is enabled.
-- **Tasks:** opt in with `tasks: { publishDue: '* * * * *', syncAssets: true }`. A cron string schedules the native Nitro task; `true` allows manual runs. Your application supplies database/platform context. See [task API](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/runtime/tasks.ts).
-- **Owned imports:** use the seven `#better-auth`, `#nuxtjs/better-auth`, `#nuxt-files-sdk`, `#files-sdk`, `#comark`, `#comark-content` and `#ai` namespaces for their [24 supported entrypoints](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/dependency-aliases.ts). They work after module setup and in the schema CLI; use ordinary imports in `nuxt.config.ts`. Standalone runners can opt into the exported dependency plugin/type paths. Jiti configuration aliases retain Jiti's prefix semantics.
-
-Management defaults to `/api/site-admin/**`; public content uses `/api/content/**`. Missing sessions receive `401` and insufficient permissions `403`. Grant the first administrator its native Better Auth `admin` role through a trusted setup path; signup is not automatically elevated. Disabling `siteAdmin.auth` disables management HTTP routes.
-
-Published-asset checks do not make a public bucket private. For private originals, explicitly enable `assets.separateDrafts` and provide a genuinely private `draft` storage. Keep draft/management responses out of shared caches.
-
-Supported integration: Nuxt 4.6 with its default Nitro 2 builder. Check the package's Node engine requirement. For implementation details, use the [Nuxt options](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/nuxt.ts), [core server API](https://github.com/liria24/site-admin/blob/main/packages/site-admin/src/server/site-admin.ts) and [test suite](https://github.com/liria24/site-admin/tree/main/test/). Contributors run `bun run check`; [CI](https://github.com/liria24/site-admin/blob/main/.github/workflows/ci.yml) also validates packed consumers and native runtimes. Releases use the existing [release workflow](https://github.com/liria24/site-admin/blob/main/.github/workflows/release.yml).
+[Void](https://void.cloud/integrations/frameworks/nuxt) · [Nuxt Better Auth](https://better-auth.nuxt.dev/) · [Better Auth](https://www.better-auth.com/docs) · [Nuxt i18n](https://i18n.nuxtjs.org/) · [Files SDK](https://files-sdk.dev/) · [Comark](https://comark.dev/) · [AI SDK](https://ai-sdk.dev/docs) · [Nuxt SEO](https://nuxtseo.com/)

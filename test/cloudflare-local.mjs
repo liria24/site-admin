@@ -26,7 +26,12 @@ await writeFile(
     migrations + '/0001_initial.sql',
     await generateFixtureSQL(
         defineSiteAdminConfig({
-            models: { posts: { fields: { attachment: file(), title: text({ required: true }) }, route: true } },
+            models: {
+                posts: {
+                    fields: { slug: text(), attachment: file(), title: text({ required: true }) },
+                    route: '/posts/:slug',
+                },
+            },
         }),
         fixture + '/.data/schema',
     ),
@@ -112,19 +117,27 @@ try {
     const seeded = await (await fetch(origin + '/search-cold/seed')).json()
     if (seeded.seeded !== 257) throw new Error(`Native D1 cold-search seeding failed: ${JSON.stringify(seeded)}`)
     const before = await (await fetch(origin + '/search-cold/state')).text()
-    const calls = [],
-        remaining = []
+    const calls = []
     const client = createSiteAdminManagementClient({
         origin,
         basePath: '/search-cold/manage',
         fetch: async (input, init) => {
-            const nativeResponse = await fetch(input, init)
-            calls.push(Number(nativeResponse.headers.get('x-native-query-calls')))
-            if (nativeResponse.status === 503)
-                remaining.push((await nativeResponse.clone().json()).error.searchRemaining)
-            return nativeResponse
+            const nativeResult = await fetch(input, init)
+            calls.push(Number(nativeResult.headers.get('x-native-query-calls')))
+            return nativeResult
         },
     })
+    let required = false
+    try {
+        await client.listEntries('posts', { q: 'école', limit: 1, offset: 256 })
+    } catch (error) {
+        required = error.code === 'SITE_ADMIN_MIGRATION_REQUIRED'
+    }
+    if (!required) throw new Error('Incomplete native D1 search must require explicit rebuild.')
+    const rebuilt = await (await fetch(origin + '/search-cold/rebuild', { method: 'POST' })).json()
+    if (rebuilt.indexed < 257)
+        throw new Error('Explicit D1 rebuild did not index all revisions: ' + JSON.stringify(rebuilt))
+    calls.length = 0
     const page = await client.listEntries('posts', {
         q: 'école',
         limit: 1,
@@ -132,19 +145,14 @@ try {
         signal: AbortSignal.timeout(30000),
     })
     const after = await (await fetch(origin + '/search-cold/state')).text()
-    if (
-        page.total !== 257 ||
-        page.items.length !== 1 ||
-        before !== after ||
-        calls.length < 2 ||
-        calls.some((value) => value < 10 || value > 50) ||
-        remaining.some((value, index) => !(value > 0) || (index > 0 && value >= remaining[index - 1]))
-    )
+    if (page.total !== 257 || page.items.length !== 1 || before !== after || calls.length !== 1 || calls[0] > 50)
         throw new Error(
-            `Native D1 fresh-request search preparation failed: ${JSON.stringify({ page, calls, remaining, unchanged: before === after })}`,
+            'Native D1 readonly search failed: ' + JSON.stringify({ page, calls, unchanged: before === after }),
         )
     console.log(
-        `Native local D1 search: chunk boundaries/history passed; fresh request calls ${calls.join(',')}, progress ${remaining.join(',')}.`,
+        'Native local D1 search: Unicode/chunk boundaries/history, explicit rebuild and one readonly request passed (' +
+            calls[0] +
+            ' SQL calls).',
     )
     const reorder = await (await fetch(`http://127.0.0.1:${port}/reorder`)).json()
     if (!reorder.conflict || !reorder.unchanged || reorder.generation !== 1 || String(reorder.sorted) !== '0,1')

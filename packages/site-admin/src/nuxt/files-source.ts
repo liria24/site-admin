@@ -1,8 +1,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-import { directoryToURL, loadNuxtModuleInstance, resolveModuleWithOptions, tryResolveModule } from 'nuxt/kit'
+import { loadNuxtModuleInstance, resolveModuleWithOptions } from 'nuxt/kit'
 import type { ModuleDependencies, Nuxt, NuxtModule } from 'nuxt/schema'
 
 import { moduleMeta } from '../meta'
@@ -27,7 +26,6 @@ export const allowGeneratedFilesConfig = (exclude: unknown, directory: string): 
 interface ConfiguredModule {
     module: NuxtModule
     inline: Record<string, unknown>
-    modulePath?: string
 }
 
 /** Resolve metadata and tuple options with Nuxt's own public loader, including function/path entries. */
@@ -35,36 +33,22 @@ const configuredModule = async (nuxt: Nuxt, name: string): Promise<ConfiguredMod
     for (const entry of nuxt.options.modules ?? []) {
         const resolved = resolveModuleWithOptions(entry, nuxt)
         if (!resolved) continue
-        const { nuxtModule, resolvedModulePath } = await loadNuxtModuleInstance(resolved.module, nuxt)
+        const { nuxtModule } = await loadNuxtModuleInstance(resolved.module, nuxt)
         if ((await nuxtModule.getMeta?.())?.name === name) {
             return {
                 module: nuxtModule,
                 inline: resolved.options,
-                ...(resolvedModulePath ? { modulePath: resolvedModulePath } : {}),
             }
         }
     }
     return undefined
 }
 
-/** Use the actual configured native module owner, including a directly imported function. */
-export const resolveSiteAdminFilesModulePath = async (nuxt: Nuxt): Promise<string> => {
-    const configured = await configuredModule(nuxt, 'nuxt-files-sdk')
-    if (configured?.modulePath) return configured.modulePath
-    const roots = [nuxt.options.rootDir, ...nuxt.options.modulesDir.map((dir) => resolve(dir, '..'))]
-    const candidates = await Promise.all(
-        roots.map((root) => tryResolveModule('nuxt-files-sdk', [directoryToURL(root)])),
-    )
-    for (const path of [
-        ...new Set(
-            [...candidates, fileURLToPath(import.meta.resolve('nuxt-files-sdk'))].filter(
-                (candidate): candidate is string => Boolean(candidate),
-            ),
-        ),
-    ]) {
-        if (!configured || (await loadNuxtModuleInstance(path, nuxt)).nuxtModule === configured.module) return path
-    }
-    throw new Error('[site-admin] Cannot verify the configured native Files module owner.')
+export const siteAdminModuleOptions = async (nuxt: Nuxt) => {
+    const configured = await configuredModule(nuxt, moduleMeta.name)
+    return configured?.module.getOptions
+        ? await configured.module.getOptions(configured.inline, nuxt)
+        : nuxt.options.siteAdmin
 }
 
 const topLevelFiles = (nuxt: Nuxt): { config?: unknown } | undefined =>
@@ -80,7 +64,7 @@ const configFilename = (value: unknown, owner: string): string => {
     return value
 }
 
-/** Register a fallback before any module setups; optional dependencies never install Files by themselves. */
+/** Register the enabled Files integration and its fallback before module setup. */
 export const siteAdminFilesModuleDependencies = async (nuxt: Nuxt): Promise<ModuleDependencies> => {
     // Nuxt merges dependency defaults into config keys; preserve its explicit module opt-out.
     if ((nuxt.options as typeof nuxt.options & { files?: unknown }).files === false) return {}
@@ -90,7 +74,7 @@ export const siteAdminFilesModuleDependencies = async (nuxt: Nuxt): Promise<Modu
         : (nuxt.options as typeof nuxt.options & { siteAdmin?: { configFile?: string } }).siteAdmin
     if (ownOptions && 'enabled' in ownOptions && ownOptions.enabled === false) return {}
     const configFile = configFilename(ownOptions?.configFile ?? './site-admin.config.ts', 'Site Admin')
-    return { 'nuxt-files-sdk': { optional: true, defaults: { config: fallbackSource(nuxt, configFile) } } }
+    return { 'nuxt-files-sdk': { defaults: { config: fallbackSource(nuxt, configFile) } } }
 }
 
 /** Resolve exactly one effective Files filename, preserving explicit native inline and top-level options. */

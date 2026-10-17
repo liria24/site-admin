@@ -14,11 +14,13 @@ it('accepts shared reactive DTOs and validates native second overrides without r
     await writeFile(join(directory, 'disabled.ts'), siteAdminNuxtSeoTemplate({ ogImage: false }))
     await writeFile(
         join(directory, 'imports.d.ts'),
-        `declare module '#imports' {
+        `declare module '#app' { export * from '#imports' }
+declare module '#imports' {
   export const useRequestURL: () => URL
   export const useRuntimeConfig: () => { public: { siteAdmin?: unknown } }
   export const useRoute: () => { path: string }
   export const useNuxtApp: () => { runWithContext: <Value>(callback: () => Value) => Value }
+  export const tryUseNuxtApp: () => ReturnType<typeof useNuxtApp> | null
   export const useSeoMeta: (input: unknown, options?: { tagPriority?: string }) => unknown
   export { useHead } from '@unhead/vue'
   export const defineOgImage: (component: 'Default.takumi' | 'Home.takumi', props?: { title?: string | import('vue').Ref<string> }, options?: { width?: number; height?: number; key?: string } | Array<{ width?: number; height?: number; key?: string }>) => string[]
@@ -28,8 +30,8 @@ it('accepts shared reactive DTOs and validates native second overrides without r
         join(directory, 'consumer.ts'),
         `import { computed, ref } from 'vue'
 import type { PublicEntrySeo } from '@liria24/site-admin'
-import { useSeo } from './enabled'
-import { useSeo as useSeoWithoutOg } from './disabled'
+import { useSiteAdminSeoMetadata as useSeo } from './enabled'
+import { useSiteAdminSeoMetadata as useSeoWithoutOg } from './disabled'
 const dto = ref<PublicEntrySeo>()
 useSeo(dto)
 useSeo(() => dto.value, { titleTemplate: null, robots: 'noindex, follow', image: false })
@@ -56,7 +58,8 @@ useSeoWithoutOg(dto, { image: { component: 'Default.takumi' } })
             compilerOptions: {
                 paths: {
                     '@liria24/site-admin': [resolve('packages/site-admin/src/index.ts')],
-                    '@liria24/site-admin/seo': [resolve('packages/site-admin/src/seo.ts')],
+                    '@liria24/site-admin/internal/seo': [resolve('packages/site-admin/src/seo.ts')],
+                    '@liria24/site-admin/internal/runtime/seo': [resolve('packages/site-admin/src/runtime/seo.ts')],
                     vue: [resolve('node_modules/vue/dist/vue.d.ts')],
                     '@unhead/vue': [requireNuxt.resolve('@unhead/vue')],
                 },

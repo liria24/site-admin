@@ -2,32 +2,47 @@ import type { SiteAdminConfig } from './config'
 import { contentTableName, fieldStorage, validateContentNames } from './schema-model'
 import { commonSchemaSource } from './schema-template'
 import type { BetterAuthOptions } from 'better-auth'
-import { admin } from 'better-auth/plugins'
 
 type NativeAuthConfig =
     | BetterAuthOptions
     | ((context: { db: unknown; requestOrigin?: string; runtimeConfig: Record<string, unknown> }) => BetterAuthOptions)
 
 /** Uses Better Auth's schema generator without initializing auth or connecting to a database. */
-export async function generateCombinedSchema(config: SiteAdminConfig, auth: NativeAuthConfig): Promise<string> {
+export async function generateCombinedSchema(
+    config: SiteAdminConfig,
+    auth: NativeAuthConfig,
+    schema: { usePlural?: boolean; casing?: 'camelCase' | 'snake_case' } = {},
+): Promise<string> {
     const resolved = typeof auth === 'function' ? auth({ db: undefined, runtimeConfig: {} }) : auth
-    if (typeof resolved.database !== 'function')
-        throw new Error(
-            'Auth generation requires the application-selected native adapter factory with createSchema. Defer opening its database during schema inspection.',
-        )
+    const { drizzleAdapter } = await import('@better-auth/drizzle-adapter')
+    const { admin } = await import('better-auth/plugins')
     const plugins = [...(resolved.plugins ?? [])]
     if (!plugins.some((plugin) => plugin.id === 'admin')) plugins.push(admin())
     const authOptions: BetterAuthOptions = {
         ...resolved,
         plugins,
     }
-    const adapter = resolved.database(authOptions)
-    if (!adapter.createSchema)
-        throw new Error('The application-selected native auth adapter does not implement createSchema.')
-    const { getAuthTables } = await import('better-auth/db')
-    const generated = await adapter.createSchema({ tables: getAuthTables(authOptions), file: 'schema.ts' })
+    const adapter = drizzleAdapter(
+        {},
+        {
+            provider: 'sqlite',
+            transaction: false,
+            usePlural: schema.usePlural ?? false,
+            camelCase: schema.casing !== 'snake_case',
+        },
+    )(authOptions)
+    const { generateDrizzleSchema } = await import('auth/api')
+    const generated = await generateDrizzleSchema({ adapter, options: authOptions, file: 'schema.ts' })
     if (!generated?.code) throw new Error('Better Auth returned no schema source.')
-    return mergeSchemaSources(generateSiteAdminSchema(config), generated.code)
+    // The CMS relation table already exports `relations`; preserve its schema identity.
+    const source = generated.code
+        .replace(
+            /import\s*\{([^}]+)\}\s*from\s*(['"])drizzle-orm\2/gu,
+            (_match, names: string) =>
+                `import { ${names.replace(/\brelations\b/gu, 'relations as authRelations')} } from 'drizzle-orm'`,
+        )
+        .replace(/\brelations\(/gu, 'authRelations(')
+    return mergeSchemaSources(generateSiteAdminSchema(config), source)
 }
 
 // Both generators emit named imports. Reject unsupported syntax rather than silently producing a broken schema.
@@ -48,15 +63,32 @@ function mergeSchemaSources(...sources: string[]): string {
         const body = source.replace(
             /import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"];?/g,
             (_, names: string, module: string) => {
-                if (!['drizzle-orm', 'drizzle-orm/sqlite-core'].includes(module))
+                if (
+                    ![
+                        'drizzle-orm',
+                        'drizzle-orm/sqlite-core',
+                        'void/db',
+                        'void/schema-d1',
+                        '@liria24/site-admin/internal/schema',
+                    ].includes(module)
+                )
                     throw new Error('Combined schema generation supports Drizzle SQLite only.')
-                const bindings = imports.get(module) ?? new Set<string>()
                 for (const name of names
                     .split(',')
                     .map((binding) => binding.trim())
-                    .filter(Boolean))
+                    .filter(Boolean)) {
+                    const target =
+                        module === 'drizzle-orm/sqlite-core'
+                            ? 'void/schema-d1'
+                            : module === 'drizzle-orm'
+                              ? /^relations(?:\s+as\s+\w+)?$/.test(name)
+                                  ? '@liria24/site-admin/internal/schema'
+                                  : 'void/db'
+                              : module
+                    const bindings = imports.get(target) ?? new Set<string>()
                     bindings.add(name)
-                imports.set(module, bindings)
+                    imports.set(target, bindings)
+                }
                 return ''
             },
         )
@@ -94,5 +126,5 @@ export const generateSiteAdminSchema = (config: SiteAdminConfig): string => {
             `export const ${identifier} = sqliteTable(${JSON.stringify(contentTableName(name))}, {\n  revisionId: text('revision_id').primaryKey().references(() => revisions.id, { onDelete: 'cascade' }),\n  ${columns.join(',\n  ')}\n})`,
         )
     }
-    return result.join('\n') + '\n'
+    return mergeSchemaSources(result.join('\n'))
 }

@@ -1,86 +1,48 @@
+import { resolveTranslation } from './i18n'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import { useForm } from '@tanstack/vue-form'
+import { useForm, type DeepKeys } from '@tanstack/vue-form'
 import {
     computed,
+    getCurrentInstance,
     getCurrentScope,
+    onMounted,
     onScopeDispose,
-    ref,
+    readonly,
     shallowRef,
     toRaw,
     toValue,
     watch,
     type MaybeRefOrGetter,
-    type Ref,
 } from 'vue'
-
-import { createSiteAdminManagementClient, SiteAdminClientError } from './client'
-import type {
-    SiteAdminDraftProposal,
-    SiteAdminEntryMutation,
-    SiteAdminManagementClient,
-    SiteAdminNamedAiActions,
-} from './client'
-import { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset, type SiteAdminAsset } from './management-assets'
+import { SiteAdminClientError, type SiteAdminEntry, type SiteAdminEntryMutation } from './client'
+import { presentSiteAdminData, serializeSiteAdminData, siteAdminAsset } from './management-assets'
 import { projectStoredFields } from './stored-data'
 import type { FieldDescriptor, ModelDescriptor } from './descriptor'
 import type { SiteAdminIssue } from './errors'
-import type { AssetRecord, EntryRecord } from './server/types'
 import { isRecord, validateBuiltinValue } from './validation-builtin'
+import { siteAdminModelContext, siteAdminSnapshot, type SiteAdminModel } from './model'
 
-export interface SiteAdminFormError {
-    code: string
-    issues?: SiteAdminIssue[]
-    message: string
-}
+export type { SiteAdminAsset } from './management-assets'
+export type { SiteAdminSessionDraft } from './model'
 
-export interface UseSiteAdminFormOptions<Data extends Record<string, unknown>> {
+export interface UseEntryFormOptions<Data extends Record<string, unknown>> {
+    beforeUnload?: false | MaybeRefOrGetter<boolean>
     defaultValues?: Partial<Data>
-    descriptor: ModelDescriptor
-    entry?: EntryRecord
-    fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-    locale?: MaybeRefOrGetter<string | undefined>
-    managementBase?: string
-    modelName: string
-    origin?: string
-    onSuccess?: (entry: SiteAdminEntryMutation<Data>) => Promise<void> | void
-    /** Optional controlled slug source; omit to edit controller.slug directly. */
-    slug?: MaybeRefOrGetter<string | undefined>
-    id?: MaybeRefOrGetter<string | null | undefined>
-    authScope?: MaybeRefOrGetter<string>
-    key?: string
-    /** Optional request/app-scoped session store. Never writes to storage or the database. */
-    drafts?: Record<string, SiteAdminSessionDraft>
-    /** Nuxt supplies the initial raw response without applying user transform/pick options. */
-    initialEntry?: EntryRecord
-    client?: SiteAdminManagementClient<Record<string, Record<string, unknown>>>
-    presentation?: boolean
-    loadDescriptor?: (signal: AbortSignal) => Promise<ModelDescriptor>
-    loadEntry?: (id: string, signal: AbortSignal) => Promise<EntryRecord>
+    onBeforeSubmit?: (context: {
+        operation: 'save' | 'publish' | 'schedule'
+        locale?: string
+        defaultLocale?: string
+    }) => void | Promise<void>
+    onUpload?: (context: {
+        field: DeepKeys<Data>
+        files: File[]
+        assets: import('./management-assets').SiteAdminAsset[]
+    }) => void | Promise<void>
+    onSuccess?: (
+        entry: SiteAdminEntryMutation<Data>,
+        context: { operation: 'save' | 'publish' | 'schedule' },
+    ) => void | Promise<void>
 }
-
-export interface SiteAdminSessionDraft {
-    data: Record<string, unknown>
-    baseline: Record<string, unknown>
-    baseSlug: string
-    slug: string
-    entryId: string | null
-    baseVersion: number | null
-}
-
-export { presentSiteAdminData, serializeSiteAdminData }
-export type { SiteAdminAsset }
-
-/** Only native actions returning model-compatible proposals can be applied by a typed form. */
-export type SiteAdminFormActionNames<Data> = string extends keyof SiteAdminNamedAiActions
-    ? string
-    : {
-          [Name in keyof SiteAdminNamedAiActions]: SiteAdminNamedAiActions[Name]['data'] extends {
-              data: { [Field in keyof Data]?: Data[Field] | undefined }
-          }
-              ? Name
-              : never
-      }[keyof SiteAdminNamedAiActions] &
-          string
 
 const fieldDefault = (field: FieldDescriptor): unknown => {
     if (field.default !== undefined) return structuredClone(toRaw(field.default))
@@ -143,609 +105,574 @@ const descriptorSchema = <Data extends Record<string, unknown>>(
     },
 })
 
-const uploadWithProgress = (url: string, file: File, progress: Ref<number | null>): Promise<AssetRecord> =>
-    new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', url)
-        xhr.withCredentials = true
-        xhr.upload.addEventListener('progress', (event) => {
-            if (event.lengthComputable) progress.value = event.loaded / event.total
-        })
-        xhr.addEventListener('load', () => {
-            let payload: AssetRecord | { error?: SiteAdminFormError } | null
-            try {
-                payload = JSON.parse(xhr.responseText || 'null') as typeof payload
-            } catch {
-                reject(new Error(`Upload returned an invalid response (${xhr.status}).`))
-                return
-            }
-            if (xhr.status >= 200 && xhr.status < 300 && payload && 'id' in payload) resolve(payload)
-            else
-                reject(
-                    new Error(
-                        payload && 'error' in payload ? payload.error?.message : `Upload failed (${xhr.status}).`,
-                    ),
-                )
-        })
-        xhr.addEventListener('error', () => reject(new Error('Upload failed.')))
-        xhr.setRequestHeader('x-filename', encodeURIComponent(file.name))
-        xhr.setRequestHeader('x-upload-size', String(file.size))
-        xhr.send(file)
-    })
-
-export const useSiteAdminForm = <
-    Data extends Record<string, unknown>,
-    Action extends Extract<keyof SiteAdminNamedAiActions, string> = SiteAdminFormActionNames<Data>,
-    RawData extends Record<string, unknown> = Data,
->(
-    options: UseSiteAdminFormOptions<Data>,
+/** Native TanStack form, with only model-aware fields, uploads and draft operations added. */
+export const useEntryForm = <Data extends Record<string, unknown>>(
+    resource: Pick<SiteAdminModel<Data>, 'data' | 'status' | 'error' | 'refresh' | typeof siteAdminModelContext>,
+    options: UseEntryFormOptions<Data> = {},
 ) => {
-    const basePath = `/${(options.managementBase ?? '/api/site-admin').split('/').filter(Boolean).join('/')}`
-    const base = `${options.origin?.replace(/\/$/u, '') ?? ''}${basePath}`
-    const client =
-        options.client ??
-        createSiteAdminManagementClient<Record<string, Record<string, unknown>>>({
-            basePath,
-            ...(options.fetch ? { fetch: options.fetch } : {}),
-            ...(options.origin ? { origin: options.origin } : {}),
-        })
-    const descriptor = shallowRef(options.descriptor)
-    const suppliedInitial = options.initialEntry ?? options.entry
-    const initial =
-        options.id === undefined || suppliedInitial?.id === toValue(options.id) ? suppliedInitial : undefined
-    const entryId = ref(initial?.id ?? toValue(options.id) ?? null)
-    const version = ref(initial?.version ?? null)
-    const hasSlugInput = 'slug' in options
-    const slug = ref(toValue(options.slug) ?? initial?.slug ?? '')
-    const drafts = options.drafts ?? (Object.create(null) as Record<string, SiteAdminSessionDraft>)
-    const assetUrl = (id: string) => client.assetUrl(id)
-    const present = (data: Record<string, unknown>): Data =>
-        options.presentation ? presentSiteAdminData<Data>(descriptor.value, data, assetUrl) : (data as Data)
-    const serialize = (data: Record<string, unknown>): Record<string, unknown> =>
-        serializeSiteAdminData(descriptor.value, data)
-    const initialData = initial ? projectStoredFields(descriptor.value.fields, initial.data) : options.defaultValues
-    const clone = <Value>(value: Value): Value => JSON.parse(JSON.stringify(value)) as Value
-    const canonical = (value: unknown): string =>
-        JSON.stringify(value, (_name, item: unknown) =>
-            item && typeof item === 'object' && !Array.isArray(item)
-                ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)))
-                : item,
+    if (resource.data.value && 'items' in resource.data.value)
+        throw new TypeError(
+            '[site-admin] Forms require an entry resource. Use useAdminEntry(model, null) for a new entry.',
         )
-    const sourceId = () => (options.id === undefined ? (options.entry?.id ?? null) : (toValue(options.id) ?? null))
-    const sourceIdentity = computed(() =>
-        JSON.stringify([
-            base,
-            toValue(options.authScope) ?? '',
-            options.modelName,
-            toValue(options.locale) ?? '',
-            sourceId(),
-            sourceId() === null ? (options.key ?? 'new') : null,
-        ]),
+    const lifetime = new AbortController()
+    if (getCurrentScope()) onScopeDispose(() => lifetime.abort())
+    const context = resource[siteAdminModelContext]
+    let cachedDescriptor = context.descriptor.value
+    const descriptor = () => {
+        cachedDescriptor = context.descriptor.value ?? cachedDescriptor
+        return (
+            cachedDescriptor ?? {
+                fields: {},
+                public: true,
+                publishing: true,
+                scheduling: true,
+                revisions: true,
+                route: false,
+                serverValidation: false,
+                sortable: false,
+            }
+        )
+    }
+    const present = (data: Record<string, unknown>) =>
+        presentSiteAdminData<Data>(descriptor(), data, (id) => context.client.assetUrl(id))
+    const clone = <Value>(value: Value): Value => JSON.parse(JSON.stringify(value)) as Value
+    const serialize = (value: Data) => serializeSiteAdminData(descriptor(), value)
+    const currentEntry = () =>
+        resource.data.value && 'id' in resource.data.value && resource.data.value.id === context.id.value
+            ? resource.data.value
+            : null
+    const initial = currentEntry()
+    const draftKey = () => toValue(context.identity)
+    let storedKey = draftKey()
+    let storedLocale = toValue(context.locale) ?? context.defaultLocale
+    const stored = context.drafts[storedKey]
+    let pendingPublication = stored?.pendingPublication ?? false
+    const version = shallowRef(stored ? stored.version : (initial?.version ?? null))
+    const entryId = shallowRef(initial?.id ?? stored?.entryId ?? null)
+    // A new route can resume the draft created while running an app-owned AI action.
+    if (entryId.value) context.id.value = entryId.value
+    const defaultValue = (): Data => present(siteAdminFormDefaults(descriptor(), options.defaultValues))
+    const draftGroup = (key: string) => {
+        try {
+            return JSON.stringify(JSON.parse(key.slice('site-admin-management:'.length)).slice(0, 6))
+        } catch {
+            return key
+        }
+    }
+    const originalDraft = () =>
+        Object.entries(context.drafts).find(
+            ([key, draft]) => draftGroup(key) === draftGroup(draftKey()) && draft.locale === context.defaultLocale,
+        )?.[1]
+    const newDefaultValue = () => present(originalDraft()?.value ?? serialize(defaultValue()))
+    const newSnapshot = (value: Data) => {
+        if (currentEntry() || !context.defaultLocale) return undefined
+        const locale = toValue(context.locale) ?? context.defaultLocale
+        const data = {
+            ...(locale === context.defaultLocale
+                ? serialize(value)
+                : (originalDraft()?.value ?? serialize(defaultValue()))),
+        }
+        const translations: import('./i18n').TranslationInput<Data> = {}
+        const drafts = Object.entries(context.drafts).filter(([key]) => draftGroup(key) === draftGroup(draftKey()))
+        for (const [, draft] of drafts) {
+            if (!draft.locale || draft.locale === context.defaultLocale) continue
+            const override = Object.fromEntries(
+                Object.entries(descriptor().fields)
+                    .filter(
+                        ([key, field]) =>
+                            field.i18n &&
+                            siteAdminSnapshot(draft.value[key]) !== siteAdminSnapshot(draft.baseline[key]),
+                    )
+                    .map(([key]) => [key, draft.value[key]]),
+            ) as Partial<Data>
+            if (Object.keys(override).length) translations[draft.locale] = override
+        }
+        // Shared fields keep their single value even when edited in a translated view.
+        for (const [key, field] of Object.entries(descriptor().fields))
+            if (!field.i18n) data[key] = serialize(value)[key]
+        return { data: data as Partial<Data>, translations }
+    }
+
+    const entryValue = (entry: SiteAdminEntry<Data>): Data =>
+        present(
+            siteAdminFormDefaults(
+                descriptor(),
+                projectStoredFields(
+                    descriptor().fields,
+                    resolveTranslation(entry, toValue(context.locale)).data,
+                ) as Partial<Data>,
+            ),
+        )
+    const storedValue = (value: Record<string, unknown>) => {
+        const fields = (context.descriptor.value ?? cachedDescriptor)?.fields
+        // An unloaded descriptor cannot decide which trusted draft fields to discard.
+        return present(fields ? projectStoredFields(fields, value) : value)
+    }
+    const baseline = shallowRef(
+        stored ? serialize(storedValue(stored.baseline)) : serialize(initial ? entryValue(initial) : defaultValue()),
     )
-    const identity = ref(sourceIdentity.value)
-    const baseline = shallowRef(serialize(present(siteAdminFormDefaults(descriptor.value, initialData))))
-    let baseSlug = slug.value
-    const serverError = ref<SiteAdminFormError | null>(null)
-    const conflict = ref(false)
-    const loading = ref(false)
-    const loadError = shallowRef<unknown>(null)
-    const callbackError = shallowRef<unknown>(null)
-    let loadRequest: AbortController | undefined
-    let generation = 0
-    let aiRequest: AbortController | undefined
     let switching = false
-    let authorized = true
-    const uploadProgress = ref<number | null>(null)
-    const uploadError = ref<string | null>(null)
-    let submitIntent: 'save' | 'publish' | 'schedule' = 'save'
-    let scheduleAt: string | undefined
-    let publishedResult: SiteAdminEntryMutation<Data> | undefined
+    let intent: { kind: 'save' | 'publish' | 'schedule'; at?: string } = { kind: 'save' }
+    let published: SiteAdminEntryMutation<Data> | undefined
     let publishing: Promise<SiteAdminEntryMutation<Data> | undefined> | undefined
-    const publishBusy = ref(false)
+    let ensuring = false
+    let ensurePending: Promise<{ id: string; version: number } | undefined> | undefined
+    const submitting = shallowRef(false)
+    const completed = shallowRef(false)
+    const uploading = shallowRef(false)
+    const operation = computed(() =>
+        uploading.value ? 'upload' : submitting.value && !completed.value ? intent.kind : null,
+    )
     const form = useForm({
-        defaultValues: present(siteAdminFormDefaults(descriptor.value, initialData)),
+        defaultValues: stored ? storedValue(stored.value) : initial ? entryValue(initial) : defaultValue(),
         validators: [
             {
                 run: {
                     '~standard': {
+                        version: 1,
                         vendor: 'site-admin',
-                        version: 1 as const,
-                        validate: (value: unknown) => {
-                            return descriptorSchema<Data>(descriptor.value)['~standard'].validate(value)
-                        },
+                        validate: (value: unknown) => descriptorSchema<Data>(descriptor())['~standard'].validate(value),
                     },
                 },
                 triggers: [],
             },
         ],
-        onSubmit: async ({ createValidationError, parseIssues, value }) => {
-            serverError.value = null
-            callbackError.value = null
-            conflict.value = false
-            if (!authorized || loading.value || loadError.value)
-                return createValidationError({ fields: {}, form: 'Load the current entry before saving.' })
-            const intent = submitIntent
-            const submittedIdentity = identity.value
-            const submittedVersion = version.value
-            const submittedId = entryId.value
-            // Core callers have always been able to supply a getter evaluated at submission.
-            const submittedSlug = hasSlugInput ? toValue(options.slug) : slug.value
-            if (hasSlugInput) slug.value = submittedSlug ?? ''
-            const submittedInputSlug = slug.value
-            const submittedLocale = toValue(options.locale)
-            const submittedData = clone(serialize(value))
-            const submittedInputData = clone(submittedData)
-            const updating = entryId.value !== null
-            let entry: SiteAdminEntryMutation<Record<string, unknown>>
+        onSubmit: async ({ value, createValidationError }) => {
+            if (lifetime.signal.aborted) return
+            const identity = draftKey()
+            const submitted = clone(serialize(value))
+            const selectedIntent = { ...intent }
+            let creationDrafts: Array<[string, import('./model').SiteAdminSessionDraft]> = []
+            const clearCreatedDrafts = () => {
+                for (const [key, draft] of creationDrafts)
+                    if (siteAdminSnapshot(context.drafts[key]) === siteAdminSnapshot(draft)) delete context.drafts[key]
+            }
+            if (selectedIntent.kind !== 'save' && !entryId.value) pendingPublication = true
             try {
-                const input = {
-                    data: submittedData,
-                    ...(hasSlugInput
-                        ? submittedSlug === undefined
-                            ? {}
-                            : { slug: submittedSlug }
-                        : !updating && !descriptor.value.publishing && submittedSlug === ''
-                          ? {}
-                          : { slug: submittedSlug ?? '' }),
-                }
+                if (!context.descriptor.value || (context.id.value && !currentEntry() && !entryId.value))
+                    throw (
+                        resource.error.value ??
+                        new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Load the entry before submitting.', 400)
+                    )
+                await options.onBeforeSubmit?.({
+                    operation: selectedIntent.kind,
+                    ...(toValue(context.locale) ? { locale: toValue(context.locale)! } : {}),
+                    ...((currentEntry()?.defaultLocale ?? context.defaultLocale)
+                        ? { defaultLocale: currentEntry()?.defaultLocale ?? context.defaultLocale! }
+                        : {}),
+                })
+                lifetime.signal.throwIfAborted()
                 if (
-                    intent !== 'save' &&
-                    (!submittedId ||
-                        submittedVersion === null ||
-                        aiBusy.value ||
-                        aiStale.value ||
-                        aiError.value ||
-                        conflict.value)
+                    resource.error.value?.data?.committed &&
+                    resource.error.value.data.code === 'SITE_ADMIN_INVALID_RESPONSE'
+                )
+                    throw resource.error.value
+                if (
+                    resource.error.value?.data?.code === 'SITE_ADMIN_CONFLICT' ||
+                    (currentEntry() && version.value !== currentEntry()!.version)
                 )
                     throw new SiteAdminClientError(
                         'SITE_ADMIN_CONFLICT',
-                        'Save a current draft and apply or discard pending AI proposals before publishing.',
+                        'Reload the current entry before saving.',
                         409,
                     )
-                entry =
-                    intent === 'publish'
-                        ? await client.publishEntry(submittedId!, { expectedVersion: submittedVersion!, draft: input })
-                        : intent === 'schedule'
-                          ? await client.schedulePublish(submittedId!, {
-                                expectedVersion: submittedVersion!,
-                                at: scheduleAt!,
-                                draft: input,
-                            })
-                          : updating
-                            ? await client.updateEntry(submittedId!, { ...input, expectedVersion: submittedVersion! })
-                            : await client.createEntry(options.modelName, {
-                                  ...input,
-                                  ...(submittedLocale ? { locale: submittedLocale } : {}),
-                              })
-            } catch (cause) {
-                const error: SiteAdminFormError = {
-                    code: cause instanceof SiteAdminClientError ? cause.code : 'SITE_ADMIN_REQUEST_FAILED',
-                    ...(cause instanceof SiteAdminClientError && cause.issues ? { issues: cause.issues } : {}),
-                    message: cause instanceof Error ? cause.message : 'Save failed.',
-                }
-                if (identity.value !== submittedIdentity) return
-                serverError.value = error
-                conflict.value = error.code === 'SITE_ADMIN_CONFLICT'
-                if (error.issues?.length) {
-                    const parsed = parseIssues(
-                        error.issues.map((issue) => ({ message: issue.message, path: issue.path.split('.') })),
+                remember()
+                if (!currentEntry())
+                    creationDrafts = clone(
+                        Object.entries(context.drafts).filter(([key]) => draftGroup(key) === draftGroup(identity)),
                     )
-                    return createValidationError({ fields: parsed.fields, form: error.message })
-                }
-                return createValidationError({ fields: {}, form: error.message })
-            }
-            const result: SiteAdminEntryMutation<Data> =
-                'data' in entry ? { ...entry, data: present(entry.data) } : entry
-            const currentIdentity = identity.value === submittedIdentity
-            if (currentIdentity) {
-                const currentData = clone(serialize(form.state.values))
-                const currentSlug = slug.value
-                const editedDuringSave =
-                    canonical(currentData) !== canonical(submittedInputData) || currentSlug !== submittedInputSlug
+                const result = await context.submit(
+                    selectedIntent.kind,
+                    value,
+                    selectedIntent.at,
+                    () => {
+                        if (
+                            identity !== draftKey() ||
+                            siteAdminSnapshot(submitted) !== siteAdminSnapshot(serialize(form.state.values))
+                        )
+                            throw new SiteAdminClientError(
+                                'SITE_ADMIN_CONFLICT',
+                                'Input changed during preparation. Your edits are kept.',
+                                409,
+                            )
+                    },
+                    newSnapshot(value),
+                )
+                if (!result || lifetime.signal.aborted || identity !== draftKey()) return
+                const edited = clone(serialize(form.state.values))
+                clearCreatedDrafts()
+                pendingPublication = false
+                entryId.value = result.id
+                version.value = result.version
+                const saved = 'data' in result ? (result as SiteAdminEntry<Data>) : undefined
+                baseline.value = saved ? serialize(entryValue(saved)) : submitted
                 switching = true
-                entryId.value = entry.id
-                version.value = entry.version
-                slug.value = 'slug' in entry ? entry.slug : (submittedSlug ?? '')
-                baseline.value = serialize('data' in result ? result.data : value)
-                baseSlug = slug.value
                 form.reset(present(baseline.value))
-                if (editedDuringSave) {
-                    const edited = present(currentData)
-                    for (const name of new Set([...Object.keys(submittedInputData), ...Object.keys(currentData)]))
-                        if (canonical(currentData[name]) !== canonical(submittedInputData[name]))
-                            form.setFieldValue(name as never, edited[name] as never)
-                    if (currentSlug !== submittedInputSlug) slug.value = currentSlug
-                }
-                conflict.value = false
-                discardProposal()
-                if (!updating) {
-                    delete drafts[submittedIdentity]
-                    identity.value = JSON.stringify([
-                        base,
-                        toValue(options.authScope) ?? '',
-                        options.modelName,
-                        toValue(options.locale) ?? '',
-                        entry.id,
-                        null,
-                    ])
-                }
+                // Preserve edits made while the request was in flight, including nested field changes.
+                for (const name of new Set([...Object.keys(submitted), ...Object.keys(edited)]))
+                    if (siteAdminSnapshot(submitted[name]) !== siteAdminSnapshot(edited[name]))
+                        setFieldValue(name, present(edited)[name])
                 switching = false
                 remember()
-            }
-            if (currentIdentity) {
+                published = result
+                completed.value = true
                 try {
-                    await options.onSuccess?.(result)
+                    if (!ensuring) await options.onSuccess?.(result, { operation: selectedIntent.kind })
                 } catch (error) {
-                    callbackError.value = error
+                    if (!lifetime.signal.aborted && identity === draftKey()) throw context.report(error, true)
                 }
-            }
-            if (intent !== 'save' && currentIdentity) publishedResult = result
-            return result
-        },
-    })
-    const values = shallowRef(form.state.values)
-    const valueSubscription = form.atom.subscribe((state) => {
-        values.value = state.values
-    })
-    const dirty = computed(
-        () => canonical(serialize(values.value)) !== canonical(baseline.value) || slug.value !== baseSlug,
-    )
-    const remember = (): void => {
-        if (switching || !authorized) return
-        drafts[identity.value] = clone({
-            data: serialize(form.state.values),
-            baseline: baseline.value,
-            baseSlug,
-            slug: slug.value,
-            entryId: entryId.value,
-            baseVersion: version.value,
-        })
-    }
-    const restore = (draft: SiteAdminSessionDraft): void => {
-        switching = true
-        baseline.value = draft.baseline
-        baseSlug = draft.baseSlug
-        entryId.value = draft.entryId
-        version.value = draft.baseVersion
-        slug.value = draft.slug
-        form.reset(present(baseline.value))
-        const data = present(draft.data)
-        for (const name of new Set([...Object.keys(baseline.value), ...Object.keys(data)]))
-            form.setFieldValue(name as never, data[name] as never)
-        switching = false
-    }
-    const validateEntry = (entry: EntryRecord): void => {
-        if (
-            entry.model !== options.modelName ||
-            (toValue(options.locale) !== undefined && entry.locale !== toValue(options.locale))
-        )
-            throw new SiteAdminClientError(
-                'SITE_ADMIN_INVALID_RESPONSE',
-                'Entry does not belong to the requested model and locale.',
-                502,
-            )
-    }
-    const refresh = async (): Promise<void> => {
-        loadRequest?.abort()
-        const request = new AbortController()
-        loadRequest = request
-        const capturedIdentity = identity.value
-        const capturedId = entryId.value
-        loading.value = true
-        loadError.value = null
-        try {
-            if (options.loadDescriptor) {
-                const currentDescriptor = await options.loadDescriptor(request.signal)
-                request.signal.throwIfAborted()
-                if (identity.value !== capturedIdentity) return
-                descriptor.value = currentDescriptor
-            }
-            authorized = true
-            if (capturedId === null) {
-                if (!dirty.value) {
-                    baseline.value = serialize(present(siteAdminFormDefaults(descriptor.value, options.defaultValues)))
-                    form.reset(present(baseline.value))
+                return result
+            } catch (cause) {
+                if (lifetime.signal.aborted || identity !== draftKey()) return
+                if (context.receipt) {
+                    entryId.value = context.receipt.id
+                    version.value = context.receipt.version
+                    if (resource.error.value?.data?.committed && currentEntry()) {
+                        clearCreatedDrafts()
+                        baseline.value = serialize(entryValue(currentEntry()!))
+                        pendingPublication = false
+                    }
                     remember()
                 }
-                return
-            }
-            const entry = options.loadEntry
-                ? await options.loadEntry(capturedId, request.signal)
-                : await client.getEntry(capturedId, { signal: request.signal })
-            request.signal.throwIfAborted()
-            if (identity.value !== capturedIdentity) return
-            validateEntry(entry)
-            if (dirty.value) {
-                if (entry.version !== version.value) conflict.value = true
-                return
-            }
-            baseline.value = serialize(present(projectStoredFields(descriptor.value.fields, entry.data)))
-            baseSlug = entry.slug
-            slug.value = entry.slug
-            version.value = entry.version
-            form.reset(present(baseline.value))
-            remember()
-        } catch (error) {
-            if (!request.signal.aborted && identity.value === capturedIdentity) loadError.value = error
-        } finally {
-            if (loadRequest === request) loading.value = false
-        }
-    }
-    const switchIdentity = async (next: string, previous: string): Promise<void> => {
-        remember()
-        loadRequest?.abort()
-        discardProposal()
-        identity.value = next
-        conflict.value = false
-        serverError.value = null
-        loadError.value = null
-        const authChanged = JSON.parse(next)[1] !== JSON.parse(previous)[1]
-        if (authChanged) {
-            for (const key of Object.keys(drafts))
-                if (JSON.parse(key)[0] === base && JSON.parse(key)[1] === JSON.parse(previous)[1]) delete drafts[key]
-            authorized = false
-        }
-        const draft = drafts[next]
-        if (draft) restore(draft)
-        else {
-            const data = authChanged
-                ? ({} as Data)
-                : present(siteAdminFormDefaults(descriptor.value, options.defaultValues))
-            restore({
-                data: serialize(data),
-                baseline: serialize(data),
-                baseSlug: toValue(options.slug) ?? '',
-                slug: toValue(options.slug) ?? '',
-                entryId: sourceId(),
-                baseVersion: null,
-            })
-        }
-        await refresh()
-    }
-    const proposal = shallowRef<SiteAdminDraftProposal<Data> | null>(null)
-    const aiBusy = ref<string | null>(null)
-    const aiError = shallowRef<unknown>(null)
-    const aiStale = ref(false)
-    let proposalSnapshot: string | null = null
-    let proposalProps: unknown
-    let proposalPropsSnapshot: string | null = null
-    const inputSnapshot = () => canonical([identity.value, serialize(values.value), slug.value, version.value])
-    const propose = async <Name extends Action>(
-        kind: Name,
-        props: SiteAdminNamedAiActions[Name]['props'],
-    ): Promise<void> => {
-        aiRequest?.abort()
-        const transportRequest = new AbortController()
-        aiRequest = transportRequest
-        const request = ++generation
-        const snapshot = inputSnapshot()
-        const propsSnapshot = canonical(props)
-        const snapshotVersion = version.value
-        aiBusy.value = kind
-        aiError.value = null
-        aiStale.value = false
-        proposal.value = null
-        try {
-            const data = serialize(form.state.values)
-            const result: unknown = await client.runAiAction(kind, { props }, { signal: transportRequest.signal })
-            if (request !== generation) return
-            if (
-                transportRequest.signal.aborted ||
-                snapshot !== inputSnapshot() ||
-                propsSnapshot !== canonical(props) ||
-                (isRecord(result) && result.version !== undefined && result.version !== snapshotVersion)
-            ) {
-                aiStale.value = true
-                return
-            }
-            if (
-                !isRecord(result) ||
-                !isRecord(result.data) ||
-                (result.slug !== undefined && typeof result.slug !== 'string') ||
-                (result.issues !== undefined &&
-                    (!Array.isArray(result.issues) ||
-                        result.issues.some(
-                            (issue) =>
-                                !isRecord(issue) || typeof issue.path !== 'string' || typeof issue.message !== 'string',
-                        )))
-            )
-                throw new SiteAdminClientError(
-                    'SITE_ADMIN_INVALID_RESPONSE',
-                    'A form action must return a data proposal.',
-                    502,
+                const error = context.report(
+                    cause,
+                    Boolean((cause as { data?: { committed?: boolean } })?.data?.committed),
                 )
-            const issues = descriptorIssues(descriptor.value.fields, {
-                ...data,
-                ...serialize(result.data as Data),
-            })
-            proposalSnapshot = snapshot
-            proposalProps = props
-            proposalPropsSnapshot = propsSnapshot
-            proposal.value = {
-                data: present(result.data),
-                issues: [...((result.issues as SiteAdminIssue[] | undefined) ?? []), ...issues],
-                ...(typeof result.slug === 'string' ? { slug: result.slug } : {}),
+                const issues = error.data?.issues ?? []
+                const fields = Object.fromEntries(
+                    issues.map(({ message, path }) => [path.replace(/^data\./u, ''), message]),
+                )
+                return createValidationError({ fields: fields as never, form: error.message })
             }
-        } catch (error) {
-            if (request === generation) aiError.value = error
-        } finally {
-            if (request === generation) aiBusy.value = null
-        }
-    }
-    const discardProposal = (): void => {
-        generation += 1
-        aiRequest?.abort()
-        proposal.value = null
-        proposalSnapshot = null
-        proposalProps = undefined
-        proposalPropsSnapshot = null
-        aiBusy.value = null
-        aiStale.value = false
-        aiError.value = null
-    }
-    const applyProposal = (
-        selection: { fields?: readonly Extract<keyof Data, string>[]; slug?: boolean } = {},
-    ): boolean => {
-        if (
-            !proposal.value ||
-            aiStale.value ||
-            proposalSnapshot !== inputSnapshot() ||
-            proposalPropsSnapshot !== canonical(proposalProps)
-        ) {
-            aiStale.value = true
-            return false
-        }
-        const selected = proposal.value
-        if (selected.issues.length) return false
-        discardProposal()
-        for (const [name, value] of Object.entries(selected.data))
-            if (!selection.fields || selection.fields.includes(name as Extract<keyof Data, string>))
-                form.setFieldValue(name as never, value as never)
-        if (selection.slug !== false && selected.slug !== undefined) slug.value = selected.slug
-        remember()
-        return true
-    }
-    if (initial) validateEntry(initial)
-    if (drafts[identity.value]) restore(drafts[identity.value]!)
-    if (hasSlugInput)
-        watch(
-            () => toValue(options.slug),
-            (value) => {
-                slug.value = value ?? ''
-            },
-            { flush: 'sync' },
-        )
-    watch(
-        [values, slug, version, () => (proposal.value ? canonical(proposalProps) : null)],
-        () => {
-            if (
-                proposal.value &&
-                (proposalSnapshot !== inputSnapshot() || proposalPropsSnapshot !== canonical(proposalProps))
-            )
-                aiStale.value = true
-            remember()
         },
-        { deep: true, flush: 'sync' },
+    })
+    const setFieldValue = (form as unknown as { setFieldValue: (name: string, value: unknown) => void }).setFieldValue
+    const values = shallowRef(form.state.values)
+    const subscription = form.atom.subscribe((state) => {
+        if (state.isSubmitting && !submitting.value) completed.value = false
+        submitting.value = state.isSubmitting
+        values.value = state.values
+    })
+    const isDirty = computed(() => siteAdminSnapshot(serialize(values.value)) !== siteAdminSnapshot(baseline.value))
+    function remember() {
+        if (switching) return
+        if (!isDirty.value && !pendingPublication && !(toValue(context.instance) !== undefined && entryId.value)) {
+            delete context.drafts[storedKey]
+            return
+        }
+        context.drafts[storedKey] = clone({
+            value: serialize(form.state.values),
+            baseline: baseline.value,
+            ...(storedLocale ? { locale: storedLocale } : {}),
+            entryId: entryId.value,
+            version: version.value,
+            ...(pendingPublication ? { pendingPublication: true } : {}),
+        })
+    }
+    watch(values, remember, { deep: true, flush: 'sync' })
+    watch(
+        () => toValue(context.identity),
+        (next, previous) => {
+            let authChanged = false
+            try {
+                authChanged =
+                    JSON.parse(next.slice('site-admin-management:'.length))[2] !==
+                    JSON.parse(previous.slice('site-admin-management:'.length))[2]
+            } catch {}
+            if (!authChanged) remember()
+            // An identity switch must never display the previous actor's input.
+            switching = true
+            storedKey = draftKey()
+            storedLocale = toValue(context.locale) ?? context.defaultLocale
+            const restored = context.drafts[storedKey]
+            pendingPublication = restored?.pendingPublication ?? false
+            entryId.value = restored?.entryId ?? null
+            version.value = restored?.version ?? null
+            if (entryId.value) context.id.value = entryId.value
+            const fallback = currentEntry() ? entryValue(currentEntry()!) : newDefaultValue()
+            baseline.value = restored?.baseline ?? serialize(fallback)
+            form.reset(restored ? present(restored.value) : fallback)
+            switching = false
+        },
+        { flush: 'sync' },
     )
     watch(
-        sourceIdentity,
-        (next, previous) => {
-            void switchIdentity(next, previous)
+        [resource.data, resource.status],
+        () => {
+            const current = currentEntry()
+            if (!current || form.state.isSubmitting) return
+            if (isDirty.value) {
+                if (resource.status.value === 'success' && version.value !== null && version.value !== current.version)
+                    context.report(
+                        new SiteAdminClientError(
+                            'SITE_ADMIN_CONFLICT',
+                            'The saved entry changed. Your input is kept.',
+                            409,
+                        ),
+                    )
+                return
+            }
+            entryId.value = current.id
+            version.value = current.version
+            baseline.value = serialize(entryValue(current))
+            form.reset(entryValue(current))
+            remember()
+        },
+        { immediate: true, flush: 'sync' },
+    )
+    watch(
+        context.descriptor,
+        (value, previous) => {
+            if (!value || previous) return
+            if (!currentEntry() && !context.id.value && !isDirty.value) {
+                baseline.value = serialize(defaultValue())
+                form.reset(defaultValue())
+            } else {
+                baseline.value = serialize(storedValue(baseline.value))
+                form.reset(storedValue(form.state.values))
+            }
         },
         { flush: 'sync' },
     )
     if (getCurrentScope())
         onScopeDispose(() => {
             remember()
-            valueSubscription.unsubscribe()
-            loadRequest?.abort()
-            aiRequest?.abort()
-            generation += 1
+            subscription.unsubscribe()
         })
-    const ready = options.id !== undefined && !initial ? refresh() : Promise.resolve()
-    const upload = async (file: File): Promise<AssetRecord & SiteAdminAsset> => {
-        uploadProgress.value = 0
-        uploadError.value = null
-        try {
-            let asset: AssetRecord
-            if (!options.fetch && typeof XMLHttpRequest !== 'undefined') {
-                asset = await uploadWithProgress(`${base}/assets`, file, uploadProgress)
-            } else {
-                asset = await client.uploadAsset(file)
-            }
-            uploadProgress.value = 1
-            return { ...asset, ...siteAdminAsset(asset, assetUrl) }
-        } catch (error) {
-            uploadError.value = error instanceof Error ? error.message : 'Upload failed.'
-            throw error
-        }
-    }
-    const setAsset = (field: string, asset: AssetRecord | string | null): void => {
-        const writable = form as typeof form & { setFieldValue: (name: string, value: unknown) => void }
-        writable.setFieldValue(
-            field,
-            options.presentation && asset
-                ? siteAdminAsset(asset, assetUrl)
-                : typeof asset === 'object' && asset
-                  ? asset.id
-                  : asset,
-        )
-    }
     const publish = (at?: string): Promise<SiteAdminEntryMutation<Data> | undefined> => {
-        if (publishing) return publishing
+        if (publishing) return intent.at === at ? publishing : publishing.then(() => publish(at))
         if (form.state.isSubmitting) {
-            serverError.value = { code: 'SITE_ADMIN_CONFLICT', message: 'Wait for the current save before publishing.' }
+            context.report(
+                new SiteAdminClientError('SITE_ADMIN_CONFLICT', 'Wait for the current save before publishing.', 409),
+            )
             return Promise.resolve(undefined)
         }
-        submitIntent = at === undefined ? 'publish' : 'schedule'
-        scheduleAt = at
-        publishedResult = undefined
-        publishBusy.value = true
+        intent = at === undefined ? { kind: 'publish' } : { kind: 'schedule', at }
+        published = undefined
         publishing = (async () => {
             try {
                 await form.handleSubmit()
-                return publishedResult
+                return published
             } finally {
-                submitIntent = 'save'
-                publishBusy.value = false
+                intent = { kind: 'save' }
                 publishing = undefined
             }
         })()
         return publishing
     }
-    return {
-        asset: {
-            clear: (field: string) => setAsset(field, null),
-            error: uploadError,
-            progress: uploadProgress,
-            set: setAsset,
-            upload,
-        },
-        conflict,
-        publish: () => publish(),
-        schedule: (at: string) => publish(at),
-        publishBusy,
-        callbackError,
-        descriptor,
-        dirty,
-        drafts,
-        identity,
-        loading,
-        loadError,
-        refresh,
-        ready,
-        draft: {
-            discard: async () => {
-                delete drafts[identity.value]
-                form.reset(present(baseline.value))
-                slug.value = baseSlug
-                discardProposal()
-                await refresh()
-            },
-            serialize: () =>
-                clone({ data: serialize(form.state.values) as RawData, slug: slug.value, baseVersion: version.value }),
-        },
-        metadata: { slug },
-        ai: {
-            proposal,
-            busy: aiBusy,
-            error: aiError,
-            stale: aiStale,
-            apply: applyProposal,
-            discard: discardProposal,
-            run: <Name extends Action>(action: Name, props: SiteAdminNamedAiActions[Name]['props']) =>
-                propose(action, props),
-        },
-        entryId,
-        form,
-        relation: {
-            search: async (model: string, query = '', locale?: string, limit = 20): Promise<EntryRecord[]> => {
-                return (await client.listEntries(model, { q: query, limit, ...(locale ? { locale } : {}) })).items
-            },
-        },
-        serverError,
-        upload,
-        version,
-        baseVersion: version,
+    let uploadSequence = 0
+    const uploadIds = new WeakMap<File, number>()
+    const uploadTarget = (path: string) => {
+        const invalid = () =>
+            new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Select an existing asset field.', 400)
+        if (!/^[^.[\]]+(?:\.[^.[\]]+|\[(?:0|[1-9]\d*)\])*$/u.test(path)) throw invalid()
+        let definition: FieldDescriptor | undefined
+        let fields = descriptor().fields
+        let value: unknown = form.state.values
+        const rows: unknown[] = []
+        for (const match of path.matchAll(/([^.[\]]+)|\[(\d+)\]/gu)) {
+            if (match[2] !== undefined) {
+                const index = Number(match[2])
+                if (definition?.kind !== 'array' || !Array.isArray(value) || !Object.hasOwn(value, index))
+                    throw invalid()
+                definition = definition.item
+                value = value[index]
+                rows.push(toRaw(value))
+            } else {
+                const key = match[1]!
+                if (['__proto__', 'prototype', 'constructor'].includes(key)) throw invalid()
+                if (definition) {
+                    if (definition.kind !== 'object') throw invalid()
+                    fields = definition.fields ?? {}
+                }
+                if (!Object.hasOwn(fields, key)) throw invalid()
+                definition = fields[key]
+                value = isRecord(value) && Object.hasOwn(value, key) ? value[key] : undefined
+            }
+            if (!definition) throw invalid()
+        }
+        if (!definition || !['image', 'images', 'file'].includes(definition.kind)) throw invalid()
+        return { definition, rows, value }
     }
+    const fieldPriority = (field: { key: string; kind: string }) =>
+        field.key === (context.descriptor.value?.displayFields?.title ?? 'title')
+            ? 0
+            : ['image', 'images'].includes(field.kind)
+              ? 1
+              : 2
+    const result = {
+        form,
+        operation: readonly(operation),
+        fields: computed(() =>
+            Object.entries(context.descriptor.value?.fields ?? {})
+                .map(([key, field]) => ({
+                    ...field,
+                    key,
+                    name: key as Extract<keyof Data, string>,
+                    label:
+                        field.label ??
+                        key.replace(/([a-z])([A-Z])/gu, '$1 $2').replace(/^./u, (letter) => letter.toUpperCase()),
+                }))
+                .sort((a, b) => fieldPriority(a) - fieldPriority(b)),
+        ),
+        publish: () => publish(),
+        schedule: (value: Date | string) => {
+            const at = new Date(value)
+            if (!Number.isFinite(at.getTime()) || at.getTime() <= Date.now()) {
+                context.report(
+                    new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Choose a future publication time.', 400),
+                )
+                return Promise.resolve(undefined)
+            }
+            return publish(at.toISOString())
+        },
+        upload: (field: DeepKeys<Data>, files: File | File[] | null | undefined) => {
+            if (lifetime.signal.aborted) return Promise.resolve(undefined)
+            const selected = files ? (Array.isArray(files) ? files : [files]) : []
+            if (!selected.length) return Promise.resolve([])
+            let target: ReturnType<typeof uploadTarget>
+            try {
+                target = uploadTarget(field)
+            } catch (cause) {
+                context.report(cause)
+                return Promise.resolve(undefined)
+            }
+            const currentTarget = () => {
+                const current = uploadTarget(field)
+                if (current.rows.some((row, index) => row !== target.rows[index]))
+                    throw new SiteAdminClientError(
+                        'SITE_ADMIN_CONFLICT',
+                        'The upload target changed. Select the image again.',
+                        409,
+                    )
+                return current
+            }
+            const token = selected
+                .map((file) => {
+                    if (!uploadIds.has(file)) uploadIds.set(file, ++uploadSequence)
+                    return uploadIds.get(file)
+                })
+                .join(',')
+            return context
+                .run(
+                    'upload:' + field + ':' + token,
+                    async (signal) => {
+                        uploading.value = true
+                        try {
+                            const { definition } = currentTarget()
+                            const identity = toValue(context.identity)
+                            const records = []
+                            for (const file of definition.kind === 'images' ? selected : selected.slice(0, 1)) {
+                                const asset = siteAdminAsset(
+                                    await context.client.uploadAsset(file, { filename: file.name, signal }),
+                                    (id) => context.client.assetUrl(id),
+                                )
+                                signal.throwIfAborted()
+                                lifetime.signal.throwIfAborted()
+                                if (identity !== toValue(context.identity))
+                                    throw new DOMException('Resource identity changed during upload.', 'AbortError')
+                                records.push(asset)
+                                const current = currentTarget().value
+                                setFieldValue(
+                                    field,
+                                    definition.kind === 'images'
+                                        ? [...(Array.isArray(current) ? current : []), asset]
+                                        : asset,
+                                )
+                                target = uploadTarget(field)
+                            }
+                            signal.throwIfAborted()
+                            lifetime.signal.throwIfAborted()
+                            try {
+                                await options.onUpload?.({
+                                    field,
+                                    files: definition.kind === 'images' ? selected : selected.slice(0, 1),
+                                    assets: records,
+                                })
+                            } catch (cause) {
+                                if (!lifetime.signal.aborted && identity === toValue(context.identity))
+                                    context.report(cause, true)
+                            }
+                            return records
+                        } finally {
+                            uploading.value = false
+                        }
+                    },
+                    false,
+                )
+                .catch(() => undefined)
+        },
+        draft: {
+            ensure: () => {
+                if (ensurePending) return ensurePending
+                if (entryId.value && version.value !== null)
+                    return Promise.resolve({ id: entryId.value, version: version.value })
+                ensuring = true
+                ensurePending = (async () => {
+                    try {
+                        await form.handleSubmit()
+                        return !resource.error.value && entryId.value && version.value !== null
+                            ? { id: entryId.value, version: version.value }
+                            : undefined
+                    } finally {
+                        ensuring = false
+                        ensurePending = undefined
+                    }
+                })()
+                return ensurePending
+            },
+            isDirty: computed(
+                () =>
+                    isDirty.value ||
+                    Object.entries(context.drafts).some(
+                        ([key, draft]) =>
+                            draftGroup(key) === draftGroup(draftKey()) &&
+                            siteAdminSnapshot(draft.value) !== siteAdminSnapshot(draft.baseline),
+                    ),
+            ),
+            snapshot: () =>
+                clone({
+                    entryId: entryId.value,
+                    version: version.value,
+                    locale: toValue(context.locale),
+                    draft: serialize(values.value),
+                }),
+            isStale: (snapshot: unknown) =>
+                siteAdminSnapshot(snapshot) !==
+                siteAdminSnapshot({
+                    entryId: entryId.value,
+                    version: version.value,
+                    locale: toValue(context.locale),
+                    draft: serialize(values.value),
+                }),
+            discard: async () => {
+                delete context.drafts[storedKey]
+                form.reset(present(baseline.value))
+                await resource.refresh()
+            },
+        },
+    }
+    const setupUnload = () => {
+        if (typeof window === 'undefined') return () => {}
+        const handler = (event: BeforeUnloadEvent) => event.preventDefault()
+        const stop = watch(
+            () =>
+                options.beforeUnload !== false &&
+                (result.draft.isDirty.value || operation.value !== null || toValue(options.beforeUnload) === true),
+            (active) => window[active ? 'addEventListener' : 'removeEventListener']('beforeunload', handler),
+            { immediate: true, flush: 'sync' },
+        )
+        return () => {
+            stop()
+            window.removeEventListener('beforeunload', handler)
+        }
+    }
+    if (getCurrentInstance()) {
+        let cleanup: (() => void) | undefined
+        onMounted(() => {
+            cleanup = setupUnload()
+        })
+        onScopeDispose(() => cleanup?.())
+    }
+    return result
 }

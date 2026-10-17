@@ -6,11 +6,8 @@ import type { ModelDefinition } from './config'
 import type { AnyField, AssetInput, FieldRecord } from './fields'
 import type { SiteAdminIssue } from './errors'
 
-export interface IndexedReference {
-    id: string
-    path: string
-    position: number
-}
+import type { IndexedReference } from './storage'
+export type { IndexedReference } from './storage'
 
 export { projectStoredFields } from './stored-data'
 

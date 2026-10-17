@@ -1,3 +1,4 @@
+import { translatedRouteFields } from '../packages/site-admin/src/i18n'
 import type { SiteAdminConfig } from '../packages/site-admin/src/config'
 import type {
     SiteAdminDatabase,
@@ -43,14 +44,20 @@ export function createMemoryDatabase() {
     }
     const materializeEntry = (value: StorageEntryState): EntryRecord => {
         const revision = state.revisions.get(value.currentRevisionId)!
-        return clone({ ...value, revisionId: revision.id, data: revision.data, slug: revision.slug })
+        return clone({
+            ...value,
+            locale: value.defaultLocale,
+            translations: revision.translations,
+            revisionId: revision.id,
+            data: { ...revision.data },
+        })
     }
     const matches = (value: EntryRecord, filter: StorageEntryFilter) =>
         (filter.models ?? Object.keys(config.models)).includes(value.model) &&
-        (filter.locale === undefined || filter.locale === value.locale) &&
         (!filter.q ||
-            value.slug.toLowerCase().includes(filter.q) ||
-            JSON.stringify(value.data).toLowerCase().includes(filter.q))
+            JSON.stringify({ ...value.data, ...value.translations[filter.locale ?? value.defaultLocale] })
+                .toLowerCase()
+                .includes(filter.q))
     const entries = (filter: StorageEntryFilter = {}) => {
         const q = searchQuery(filter.q, (value) => value.toLowerCase())
         filter = { ...filter, ...(q === undefined ? {} : { q }) }
@@ -183,9 +190,7 @@ export function createMemoryDatabase() {
                         entry.publishedRevisionId &&
                         entry.publishedAt &&
                         (!filter.model || entry.model === filter.model) &&
-                        (!filter.ids || filter.ids.includes(entry.id)) &&
-                        (filter.locale === undefined || entry.locale === filter.locale) &&
-                        (!filter.translationGroups || filter.translationGroups.includes(entry.translationGroup)),
+                        (!filter.ids || filter.ids.includes(entry.id)),
                 )
                 .sort(
                     (a, b) =>
@@ -196,21 +201,50 @@ export function createMemoryDatabase() {
                 )
                 .flatMap((entry) => {
                     const revision = state.revisions.get(entry.publishedRevisionId!)!
-                    return filter.key === undefined || filter.key === entry.id || filter.key === revision.slug
-                        ? [
-                              clone({
-                                  id: entry.id,
-                                  model: entry.model,
-                                  locale: entry.locale,
-                                  publishedAt: entry.publishedAt!,
-                                  revisionId: revision.id,
-                                  data: revision.data,
-                                  slug: revision.slug,
-                                  translationGroup: entry.translationGroup,
-                              }),
-                          ]
-                        : []
+                    return [
+                        clone({
+                            id: entry.id,
+                            model: entry.model,
+                            locale: entry.defaultLocale,
+                            defaultLocale: entry.defaultLocale,
+
+                            translations:
+                                filter.locale === undefined
+                                    ? revision.translations
+                                    : Object.fromEntries(
+                                          Object.entries(revision.translations).filter(
+                                              ([locale]) => locale === filter.locale,
+                                          ),
+                                      ),
+                            publishedAt: entry.publishedAt!,
+                            revisionId: revision.id,
+                            data: { ...revision.data },
+                        }),
+                    ]
                 }),
+        pagePublished: async (filter, page) => {
+            const items = await storage.published(filter)
+            return { items: items.slice(page.offset, page.offset + page.limit), total: items.length }
+        },
+        publicTranslations: async (ids) =>
+            ids.flatMap((id) => {
+                const entry = state.entries.get(id)
+                const revision = entry?.publishedRevisionId && state.revisions.get(entry.publishedRevisionId)
+                return entry && revision
+                    ? Object.entries(revision.translations).map(([locale, data]) => ({
+                          entryId: id,
+                          locale,
+                          data: Object.fromEntries(
+                              Object.entries(data).filter(([key]) =>
+                                  translatedRouteFields(config.models[entry.model]!).includes(key),
+                              ),
+                          ),
+                          assets: revision.assets.filter((ref) => ref.locale === locale),
+                          relations: revision.relations.filter((ref) => ref.locale === locale),
+                      }))
+                    : []
+            }),
+        rebuildSearch: async () => ({ indexed: state.revisions.size }),
         routes: async (filter = {}) =>
             clone(
                 [...state.routes.values()]
@@ -269,6 +303,7 @@ export function createMemoryDatabase() {
                     if (!value) conflict()
                     state.entries.set(update.id, { ...value!, ...clone(update.patch), version: value!.version + 1 })
                 }
+                for (const id of input.prune ?? []) await storage.pruneRevisions(id, await storage.revisionIds(id))
                 if (input.delete) {
                     if (!state.entries.delete(input.delete)) conflict()
                     for (const [id, revision] of state.revisions)

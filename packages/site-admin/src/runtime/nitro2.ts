@@ -4,6 +4,8 @@ import type { RequestEvent } from 'nuxt/server'
 
 // Only Better Auth 0.3.x and Nitro 2's input bridge need the actual backend event.
 const events = new WeakMap<object, H3Event>()
+export const getNitroContextEvent = (context: object | undefined): H3Event | undefined =>
+    context ? events.get(context) : undefined
 
 /** Nitro 2's Cloudflare bridge otherwise buffers before the H3 request hook. */
 export const transformNitroCloudflareRequest = (code: string, id: string) => {

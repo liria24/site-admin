@@ -24,8 +24,13 @@ const setup = async (maxUploadSize?: number) => {
         config: defineSiteAdminConfig({
             assets: { storage: 'content', ...(maxUploadSize === undefined ? {} : { maxUploadSize }) },
             models: {
-                posts: { fields: { title: text() }, sortable: true, publishing: false, route: true },
-                private: { fields: { title: text() }, sortable: true },
+                posts: {
+                    fields: { slug: text(), title: text() },
+                    sortable: true,
+                    publishing: false,
+                    route: '/posts/:id',
+                },
+                private: { fields: { slug: text(), title: text() }, sortable: true },
             },
         }),
         database,
@@ -94,7 +99,7 @@ it('rejects cross-origin mutations and non-JSON bodies, while permitting same-or
 
 it('validates direct view arguments and rejects unsupported route locales', async () => {
     const { admin } = await setup()
-    const entry = await admin.createEntry('posts', { data: { title: 'safe' } })
+    const entry = await admin.createEntry('posts', { data: { slug: 'safe', title: 'safe' } })
     for (const view of ["current' || (SELECT name FROM sqlite_master) || '", 'invalid'])
         await expect(admin.referencesTo(entry.id, { view: view as 'current' })).rejects.toMatchObject({
             code: 'SITE_ADMIN_INVALID_INPUT',
@@ -109,7 +114,7 @@ it('validates direct view arguments and rejects unsupported route locales', asyn
                 )
             ).status,
         ).toBe(400)
-    expect(await admin.resolvePath('/posts/safe', 'en')).toMatchObject({ kind: 'page' })
+    expect(await admin.resolvePath(`/posts/${entry.id}`, 'en')).toMatchObject({ kind: 'page' })
 })
 
 it('reorders atomically with conflicts, wrong models and duplicate IDs', async () => {
@@ -212,11 +217,15 @@ it('evicts public snapshots and routes after 64 locale keys without a locale whi
     const database = createDatabase(nodeSqlite({ name: ':memory:' }))
     databases.push(database)
     const config = defineSiteAdminConfig({
-        models: { posts: { localized: true, fields: { title: text() }, route: true } },
+        models: { posts: { localized: true, fields: { slug: text(), title: text() }, route: '/posts/:slug' } },
     })
     await migrateTestDatabase(database, config)
     const storage = (await testAdapter(database, config)).bind(config)
-    const admin = createSiteAdmin({ config, database: { bind: () => storage } })
+    const admin = createSiteAdmin({
+        config,
+        database: { bind: () => storage },
+        locales: { defaultLocale: 'locale-0', supported: Array.from({ length: 65 }, (_, i) => 'locale-' + i) },
+    })
     const first = await admin.content('posts', 'locale-0')
     for (let i = 1; i <= 64; i++) await admin.content('posts', `locale-${i}`)
     expect(await admin.content('posts', 'locale-0')).not.toBe(first)

@@ -1,4 +1,6 @@
+import { stripRuntimeImports } from './nuxt-native-runtime'
 import { stripTypeScriptTypes } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { ref, toValue } from 'vue'
 
@@ -8,7 +10,6 @@ import {
     type SiteAdminClient,
     type PublicEntry,
 } from '../packages/site-admin/src/client'
-import { siteAdminNuxtBatchTransportTemplate } from '../packages/site-admin/src/nuxt/client-templates'
 
 interface ResolvedRequest {
     name: string
@@ -25,8 +26,8 @@ interface BatchHelpers {
     snapshot(
         requests: Record<
             string,
-            | { list: string; markdown?: 'full' | 'summary' }
-            | { entry: string; slugOrId: string | ReturnType<typeof ref<string>> | (() => string) }
+            | { list: string; markdown?: 'full' | 'summary'; page?: { limit: number; offset: number } }
+            | { entry: string; id: string | ReturnType<typeof ref<string>> | (() => string) }
         >,
     ): ResolvedRequest[]
     key(
@@ -42,18 +43,47 @@ interface BatchHelpers {
     ): Promise<Record<string, BatchItem>>
 }
 
-// Execute only the generated bounded transport helpers. No factory or AsyncData/cache implementation is mocked.
-const source = stripTypeScriptTypes(siteAdminNuxtBatchTransportTemplate('/content')).replace(/^export /gmu, '')
+// Execute the production transport without instantiating AsyncData or mocking its cache.
+const source = stripRuntimeImports(
+    stripTypeScriptTypes(
+        readFileSync(new URL('../packages/site-admin/src/runtime/composables.ts', import.meta.url), 'utf8'),
+    ),
+)
+    .replace(/^export /gmu, '')
+    .replaceAll('import.meta.server', 'false')
 const initialize = new Function(
     'SiteAdminClientError',
     'toValue',
-    `${source}\nreturn { snapshot: siteAdminSnapshotBatchRequests, key: siteAdminBatchDataKey, resolve: siteAdminResolveBatch }`,
+    'defineUseFetchAddon',
+    `${source}; const api = createSiteAdminComposables({basePath:'/content',managementBase:'/manage'}, undefined, undefined); return { snapshot: api.siteAdminSnapshotBatchRequests, key: api.siteAdminBatchDataKey, resolve: api.siteAdminResolveBatch }`,
 ) as (...dependencies: unknown[]) => BatchHelpers
-const helpers = initialize(SiteAdminClientError, toValue)
+const helpers = initialize(SiteAdminClientError, toValue, (addon: unknown) => addon)
 
 const document = (model: string, id: string) => ({ data: { _siteAdmin: { id, model, slug: id }, title: id } })
 
 describe('generated public batch transport', () => {
+    it('includes a DB page in batch keys and preserves page metadata', async () => {
+        const client = createSiteAdminClient({
+            fetch: async (input) => {
+                const url = new URL(String(input), 'http://localhost')
+                expect(url.searchParams.get('limit')).toBe('1')
+                expect(url.searchParams.get('offset')).toBe('1')
+                expect(url.searchParams.get('locale')).toBe('ja')
+                expect(url.searchParams.get('markdown')).toBe('summary')
+                return Response.json({ items: [document('posts', 'second')], total: 2, limit: 1, offset: 1 })
+            },
+        })
+        const first = helpers.snapshot({ posts: { list: 'posts', page: { limit: 1, offset: 0 }, markdown: 'summary' } })
+        const second = helpers.snapshot({
+            posts: { list: 'posts', page: { limit: 1, offset: 1 }, markdown: 'summary' },
+        })
+        expect(helpers.key({}, first, 'ja')).not.toBe(helpers.key({}, second, 'ja'))
+        const result = await helpers.resolve(client, second, 'ja', new AbortController().signal)
+        expect(result.posts).toMatchObject({
+            error: null,
+            data: { items: [{ id: 'second' }], total: 2, limit: 1, offset: 1 },
+        })
+    })
     it('captures list summary mode in transport and native keys without changing full/detail requests', async () => {
         const modes: Array<string | null> = []
         const client = createSiteAdminClient({
@@ -65,10 +95,10 @@ describe('generated public batch transport', () => {
                 )
             },
         })
-        const full = helpers.snapshot({ posts: { list: 'posts' }, featured: { entry: 'posts', slugOrId: 'entry' } })
+        const full = helpers.snapshot({ posts: { list: 'posts' }, featured: { entry: 'posts', id: 'entry' } })
         const summary = helpers.snapshot({
             posts: { list: 'posts', markdown: 'summary' },
-            featured: { entry: 'posts', slugOrId: 'entry' },
+            featured: { entry: 'posts', id: 'entry' },
         })
         expect(helpers.key({}, full)).not.toBe(helpers.key({}, summary))
         expect(helpers.key({}, full)).toBe(
@@ -76,7 +106,7 @@ describe('generated public batch transport', () => {
                 {},
                 helpers.snapshot({
                     posts: { list: 'posts', markdown: 'full' },
-                    featured: { entry: 'posts', slugOrId: 'entry' },
+                    featured: { entry: 'posts', id: 'entry' },
                 }),
             ),
         )
@@ -113,9 +143,9 @@ describe('generated public batch transport', () => {
             helpers.snapshot({
                 arts: { list: 'arts' },
                 posts: { list: 'posts' },
-                featured: { entry: 'posts', slugOrId: 'good' },
-                missing: { entry: 'posts', slugOrId: 'missing' },
-                failedEntry: { entry: 'posts', slugOrId: 'failed' },
+                featured: { entry: 'posts', id: 'good' },
+                missing: { entry: 'posts', id: 'missing' },
+                failedEntry: { entry: 'posts', id: 'failed' },
             }),
             'ja',
             signal,
@@ -173,8 +203,8 @@ describe('generated public batch transport', () => {
 
     it('uses canonical named tuples and tracks reactive slugs, locale and connection isolation', () => {
         const slug = ref('first')
-        const first = helpers.snapshot({ z: { entry: 'posts', slugOrId: slug }, a: { list: 'arts' } })
-        const reversed = helpers.snapshot({ a: { list: 'arts' }, z: { entry: 'posts', slugOrId: () => slug.value } })
+        const first = helpers.snapshot({ z: { entry: 'posts', id: slug }, a: { list: 'arts' } })
+        const reversed = helpers.snapshot({ a: { list: 'arts' }, z: { entry: 'posts', id: () => slug.value } })
         expect(first).toEqual(reversed)
         const connection = { origin: 'https://a.example', basePath: '/content' }
         const key = helpers.key(connection, first, 'ja')
@@ -184,11 +214,7 @@ describe('generated public batch transport', () => {
         expect(key).not.toBe(helpers.key({ ...connection, basePath: '/other' }, first, 'ja'))
         slug.value = 'second'
         expect(key).not.toBe(
-            helpers.key(
-                connection,
-                helpers.snapshot({ z: { entry: 'posts', slugOrId: slug }, a: { list: 'arts' } }),
-                'ja',
-            ),
+            helpers.key(connection, helpers.snapshot({ z: { entry: 'posts', id: slug }, a: { list: 'arts' } }), 'ja'),
         )
     })
 

@@ -3,9 +3,13 @@
     "compilerOptions": {
         "paths": {
             "@liria24/site-admin": ["../packages/site-admin/src/index.ts"],
+            "@liria24/site-admin/internal/*": ["../packages/site-admin/src/*"],
             "@liria24/site-admin/*": ["../packages/site-admin/src/*"],
-            "@liria24/site-admin/server": ["../packages/site-admin/src/server/index.ts"]
+            "@liria24/site-admin/server": ["../packages/site-admin/src/server-api.ts"],
+            "#app": ["../node_modules/nuxt/dist/app/index.d.ts"],
+            "#app/*": ["../node_modules/nuxt/dist/app/*"]
         }
     },
+    "exclude": ["**/.data/**", "**/.nuxt/**", "**/.output/**", "**/node_modules/**"],
     "include": ["**/*.ts", "../vite.config.ts"]
 }

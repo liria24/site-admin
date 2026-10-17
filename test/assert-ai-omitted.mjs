@@ -18,9 +18,9 @@ export async function assertAiOmitted(fixture) {
     const runtime = await readFile(join(fixture, '.nuxt/site-admin/runtime.mjs'), 'utf8')
     const client = await readFile(join(fixture, '.nuxt/site-admin/client.ts'), 'utf8')
     if (
-        runtime.includes('@liria24/site-admin/ai') ||
+        runtime.includes('@liria24/site-admin/internal/ai') ||
         runtime.includes('runAiAction:') ||
-        client.includes('useAiAction')
+        client.includes('useAi')
     )
         throw new Error('Unused AI capability was generated.')
     const handlers = await readFile(join(fixture, '.nuxt/nitro.json'), 'utf8').catch(() => '')

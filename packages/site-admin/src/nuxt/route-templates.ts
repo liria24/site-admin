@@ -4,8 +4,7 @@ export const siteAdminNuxtRouteTemplate = (
     options: Pick<ModuleOptions, 'i18n'>,
     locales: { supported: readonly string[]; strategy: string; defaultLocale?: string },
 ): string => {
-    const imports = ['defineNuxtRouteMiddleware', 'navigateTo', 'useState']
-    if (options.i18n) imports.push('useNuxtApp')
+    const imports = ['defineNuxtRouteMiddleware', 'navigateTo', 'useState', 'useRequestURL', 'useNuxtApp']
     const i18nLocale = options.i18n
         ? `const i18n = useNuxtApp().$i18n
   const currentLocale = typeof i18n?.locale === 'string' ? i18n.locale : i18n?.locale?.value
@@ -21,33 +20,60 @@ export const siteAdminNuxtRouteTemplate = (
   if (locale && locale !== currentLocale && typeof i18n?.locale === 'object') i18n.locale.value = locale`
         : 'const locale = undefined'
     return `import { ${imports.join(', ')} } from '#imports'
-import { useSiteAdminClient } from '#build/site-admin/client'
+import { siteAdminPublicClientOptions } from '#build/site-admin/client'
+import { createSiteAdminClient } from '@liria24/site-admin/internal/client'
 
+const requests = new WeakMap()
 export default defineNuxtRouteMiddleware(async (to) => {
-  const client = useSiteAdminClient()
+  const nuxtApp = useNuxtApp()
+  const request = Symbol()
+  requests.set(nuxtApp, request)
+  const origin = useRequestURL().origin
+  const client = createSiteAdminClient(siteAdminPublicClientOptions())
   const state = useState('site-admin-route', () => null)
   state.value = null
   ${i18nLocale}
   const result = await client.resolveRoute(to.path, { locale })
+  if (requests.get(nuxtApp) !== request) return
   if (!result) return
   if (result.kind === 'redirect') return navigateTo(result.target, { external: result.target.startsWith('http://') || result.target.startsWith('https://'), redirectCode: result.status })
-  state.value = result
+  state.value = { ...result, path: to.path, origin }
 })
 `
 }
 
 export const siteAdminNuxtMetadataTemplate = (
-    options: Pick<ModuleOptions, 'seo' | 'ogImage' | 'schemaOrg'>,
+    options: Pick<ModuleOptions, 'seo' | 'ogImage' | 'schemaOrg'> & { i18n?: boolean; presentationBase?: string },
 ): string => {
-    const imports = ['defineNuxtPlugin', 'useState']
+    const imports = ['defineNuxtPlugin', 'useState', 'useRoute', 'computed']
     if (options.seo) imports.push('useHead')
-    if (options.schemaOrg) imports.push('computed', 'useSchemaOrg')
+    if (options.i18n) imports.push('useSetI18nParams', 'watch')
+    if (options.schemaOrg) imports.push('useSchemaOrg')
+    if (options.presentationBase) imports.push('useFetch', 'useNuxtApp', 'toValue')
     return `import { ${imports.join(', ')} } from '#imports'
-${options.seo || options.ogImage ? "import { useSeo } from '#build/site-admin/seo'" : ''}
+${options.seo || options.ogImage ? "import { useSiteAdminSeoMetadata } from '#build/site-admin/seo'" : ''}
 
-export default defineNuxtPlugin(() => {
-  const route = useState('site-admin-route', () => null)
-  ${options.seo || options.ogImage ? 'useSeo(() => route.value?.entry?.seo)' : ''}
+export default defineNuxtPlugin(${options.presentationBase ? 'async ' : ''}() => {
+  const resolved = useState('site-admin-route', () => null)
+  const current = useRoute()
+  const route = computed(() => resolved.value?.path === current.path ? resolved.value : null)
+  ${
+      options.presentationBase
+          ? `const nuxtApp = useNuxtApp()
+  const uiLocale = computed(() => ${options.i18n ? 'toValue(nuxtApp.$i18n?.locale)' : 'undefined'})
+  const { data: metadata } = await useFetch(${JSON.stringify(options.presentationBase + '/_presentation')}, {
+    query: computed(() => ({ path: current.path, uiLocale: uiLocale.value })),
+  })
+  const presentation = computed(() => metadata.value?.path === current.path && (!uiLocale.value || metadata.value.locale === uiLocale.value) ? metadata.value : undefined)`
+          : ''
+  }
+  ${
+      options.i18n
+          ? `const setI18nParams = useSetI18nParams()
+  watch(() => route.value?.entry?.localeParams, params => setI18nParams(params ?? {}), { immediate: true })`
+          : ''
+  }
+  ${options.seo || options.ogImage ? `useSiteAdminSeoMetadata(() => route.value?.entry?.seo${options.presentationBase ? ', undefined, undefined, presentation' : ''})` : ''}
   ${options.seo ? 'useHead(() => ({ htmlAttrs: route.value?.entry?.locale ? { lang: route.value.entry.locale } : {} }))' : ''}
   ${
       options.schemaOrg

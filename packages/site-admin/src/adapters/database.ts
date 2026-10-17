@@ -1,4 +1,4 @@
-import { is, getTableName, getTableColumns, entityKind } from 'drizzle-orm'
+import { is, getTableName, getTableColumns } from 'drizzle-orm'
 import { SQLiteTable } from 'drizzle-orm/sqlite-core'
 import { SiteAdminError } from '../errors'
 import type { SiteAdminDatabase } from '../adapter'
@@ -7,53 +7,34 @@ import { queryRows, runAtomic } from './drizzle-database'
 import { assertSiteAdminSchema, contentTables } from './drizzle-schema'
 import { sqliteStorage } from './sqlite-storage'
 
-// Structural input also accepts a consumer's separately installed copy of Drizzle.
-type DrizzleDatabase = { $client: unknown; insert: (...args: never[]) => unknown }
 interface Statement {
     all(...params: Primitive[]): unknown
     run(...params: Primitive[]): unknown
-    bind?(...params: Primitive[]): Statement
+    bind(...params: Primitive[]): Statement
 }
 interface Client {
     prepare(sql: string): Statement
-    exec?(sql: string): unknown
-    batch?: (statements: Statement[]) => Promise<unknown[]>
+    batch: (
+        statements: Statement[],
+    ) => Promise<Array<{ results?: unknown[]; success?: boolean; error?: string; meta?: { changes?: number } }>>
 }
 
-/** Uses the application's Drizzle instance and its native SQLite/D1 transaction boundary. */
+const adapters = new WeakMap<object, WeakMap<object, DrizzleSiteAdminDatabase>>()
+
+/** Internal storage operations backed by the Void D1 binding. */
 export interface DrizzleSiteAdminDatabase extends SiteAdminDatabase {
     query(sql: string, params?: Primitive[]): Promise<unknown[]>
     atomic(statements: AtomicStatement[]): Promise<AtomicResult[]>
 }
 
-export function drizzleAdapter(
-    db: DrizzleDatabase,
-    options: { schema: Record<string, unknown> },
-): DrizzleSiteAdminDatabase {
-    const client = db?.$client as Client | undefined
-    if (
-        !client ||
-        typeof db.insert !== 'function' ||
-        typeof client.prepare !== 'function' ||
-        (typeof client.batch !== 'function' && typeof client.exec !== 'function')
-    )
-        throw new SiteAdminError(
-            'SITE_ADMIN_DATABASE_UNSUPPORTED',
-            'Provide a Drizzle SQLite/D1 instance with a native transactional client.',
-        )
+export function createD1Database(client: Client, schema: Record<string, unknown>): DrizzleSiteAdminDatabase {
+    if (!client || typeof client.prepare !== 'function' || typeof client.batch !== 'function')
+        throw new SiteAdminError('SITE_ADMIN_DATABASE_UNSUPPORTED', 'Site Admin requires the Void D1 database binding.')
+    const cached = adapters.get(client)?.get(schema)
+    if (cached) return cached
     const native = client
-    const driver = (db.constructor as unknown as Record<symbol, string>)[entityKind]
-    if (
-        native.batch
-            ? driver !== 'D1Database'
-            : !['NodeSQLiteDatabase', 'BetterSQLite3Database', 'SQLiteBunDatabase'].includes(driver ?? '')
-    )
-        throw new SiteAdminError(
-            'SITE_ADMIN_DATABASE_UNSUPPORTED',
-            'Supported Drizzle drivers are D1 and synchronous SQLite (node-sqlite, better-sqlite3, bun-sqlite).',
-        )
     const tables = new Map<string, SQLiteTable>()
-    for (const value of Object.values(options.schema)) {
+    for (const value of Object.values(schema)) {
         if (!is(value, SQLiteTable)) continue
         const name = getTableName(value)
         if (tables.has(name) && tables.get(name) !== value) throw new Error(`Duplicate schema table: ${name}`)
@@ -62,20 +43,16 @@ export function drizzleAdapter(
     const connection: DrizzleConnection = {
         tables,
         lockKey: native,
-        dialect: 'sqlite',
         getInstance: async () => native,
         prepare: (sql: string) => ({
             all: async (...params: Primitive[]): Promise<unknown[]> => {
                 const statement = native.prepare(sql)
-                if (native.batch) {
-                    const result = (await statement.bind!(...params).all()) as { results: unknown[] }
-                    return result.results
-                }
-                return (await statement.all(...params)) as unknown[]
+                const result = (await statement.bind(...params).all()) as { results: unknown[] }
+                return result.results
             },
         }),
     }
-    return {
+    const adapter: DrizzleSiteAdminDatabase = {
         query: (sql, params) => queryRows(connection, sql, params),
         atomic: async (statements) => {
             try {
@@ -120,13 +97,16 @@ export function drizzleAdapter(
             }
         },
     }
+    let schemas = adapters.get(native)
+    if (!schemas) adapters.set(native, (schemas = new WeakMap()))
+    schemas.set(schema, adapter)
+    return adapter
 }
 
 /** Adapter-private native connection. Not part of the Core storage contract. */
 export interface DrizzleConnection {
     tables: Map<string, SQLiteTable>
     lockKey: object
-    dialect: string
     getInstance(): Promise<Client>
     prepare(sql: string): {
         all(...params: Primitive[]): Promise<unknown[]>

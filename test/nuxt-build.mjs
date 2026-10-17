@@ -1,35 +1,37 @@
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { stopProcess } from './stop-process.ts'
-import { access, rm, readdir, readFile } from 'node:fs/promises'
+import { access, rm, readdir, readFile, mkdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 
 import { buildNuxt, loadNuxt } from 'nuxt/kit'
 import domain from './fixtures/nuxt/site-admin.config.ts'
-import { createDatabase } from 'db0'
-import nodeSqlite from 'db0/connectors/node-sqlite'
 import { generateFixtureSQL } from './generate-fixture.mjs'
 import { admin } from 'better-auth/plugins'
 
 const fixture = fileURLToPath(new URL('./fixtures/nuxt/', import.meta.url))
-process.env.SITE_ADMIN_TEST_DATABASE = fixture + '/.data/content.sqlite3'
+process.env.WRANGLER_LOG_PATH = fixture + '/.data/wrangler-logs'
+process.env.XDG_CONFIG_HOME = fixture + '/.data/wrangler-config'
+process.env.WRANGLER_SEND_METRICS = 'false'
 const authSecret = 'site-admin-integration-test-secret-0000000000000000'
 process.env.NUXT_BETTER_AUTH_SECRET = authSecret
 process.env.NUXT_PUBLIC_SITE_URL = 'http://127.0.0.1:3000'
+await rm(fixture + '/db', { force: true, recursive: true })
 await Promise.all([
     rm(fileURLToPath(new URL('./fixtures/nuxt/.nuxt/', import.meta.url)), { force: true, recursive: true }),
     rm(fileURLToPath(new URL('./fixtures/nuxt/.output/', import.meta.url)), { force: true, recursive: true }),
     rm(fileURLToPath(new URL('./fixtures/nuxt/.data/', import.meta.url)), { force: true, recursive: true }),
+    rm(fixture + '/.wrangler', { force: true, recursive: true }),
 ])
 
 // Generate source before native auth config inspection; applying SQL remains a separate application step.
-const migrationSQL = await generateFixtureSQL(domain, fixture + '/.data/schema', [
+const migrationSQL = await generateFixtureSQL(domain, fixture + '/db', [
     admin({ schema: { user: { fields: { role: 'accessRole' } } } }),
 ])
 const devNuxt = await loadNuxt({ cwd: fixture, dev: true, ready: true })
 try {
     if (
-        await access(fixture + '/.data/content.sqlite3').then(
+        await access(fixture + '/.wrangler/state/v3/d1').then(
             () => true,
             () => false,
         )
@@ -39,9 +41,44 @@ try {
     await devNuxt.close()
 }
 await rm(fileURLToPath(new URL('./fixtures/nuxt/.nuxt/', import.meta.url)), { force: true, recursive: true })
-const database = createDatabase(nodeSqlite({ path: fixture + '/.data/content.sqlite3' }))
-await database.exec(migrationSQL)
-await database.dispose()
+const wrangler = fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url))
+await mkdir(fixture + '/.data/migrations', { recursive: true })
+await writeFile(fixture + '/.data/migrations/0001.sql', migrationSQL)
+const wranglerConfig = fixture + '/.data/wrangler.json'
+await writeFile(
+    wranglerConfig,
+    JSON.stringify({
+        name: 'site-admin-nuxt-test',
+        main: '../.output/server/index.mjs',
+        compatibility_date: '2026-10-15',
+        compatibility_flags: ['nodejs_compat'],
+        d1_databases: [
+            {
+                binding: 'DB',
+                database_name: 'test',
+                database_id: '00000000-0000-4000-8000-000000000004',
+                migrations_dir: './migrations',
+            },
+        ],
+        vars: { NUXT_BETTER_AUTH_SECRET: authSecret },
+    }),
+)
+execFileSync(
+    process.execPath,
+    [
+        wrangler,
+        'd1',
+        'migrations',
+        'apply',
+        'DB',
+        '--local',
+        '--config',
+        wranglerConfig,
+        '--persist-to',
+        '.wrangler/state',
+    ],
+    { cwd: fixture, stdio: 'pipe' },
+)
 
 const nuxt = await loadNuxt({ cwd: fixture, dev: false, ready: true })
 try {
@@ -72,23 +109,41 @@ const port = await new Promise((resolve, reject) => {
     })
 })
 const output = []
-const server = spawn(process.execPath, [entry], {
-    cwd: fixture,
-    env: {
-        ...process.env,
-        HOST: '127.0.0.1',
-        NUXT_BETTER_AUTH_SECRET: authSecret,
-        NUXT_PUBLIC_SITE_URL: `http://127.0.0.1:${port}`,
-        PORT: String(port),
+const server = spawn(
+    process.execPath,
+    [
+        wrangler,
+        'dev',
+        '--local',
+        '--config',
+        wranglerConfig,
+        '--persist-to',
+        '.wrangler/state',
+        '--ip',
+        '127.0.0.1',
+        '--port',
+        String(port),
+        '--var',
+        `NUXT_PUBLIC_SITE_URL:http://127.0.0.1:${port}`,
+    ],
+    {
+        cwd: fixture,
+        env: {
+            ...process.env,
+            HOST: '127.0.0.1',
+            NUXT_BETTER_AUTH_SECRET: authSecret,
+            NUXT_PUBLIC_SITE_URL: `http://127.0.0.1:${port}`,
+            PORT: String(port),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-})
+)
 server.stdout.on('data', (chunk) => output.push(String(chunk)))
 server.stderr.on('data', (chunk) => output.push(String(chunk)))
 
 try {
     let response
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
         try {
             response = await fetch(`http://127.0.0.1:${port}/api/content/settings`)
             break
@@ -149,6 +204,18 @@ try {
     if (!adminModels.ok || Object.keys((await adminModels.json()).models).length !== 3) {
         throw new Error('Nuxt admin role integration failed.')
     }
+    for (const [locale, label, title] of [
+        ['ja', '記事', 'タイトル'],
+        ['en', 'Post', 'Title'],
+    ]) {
+        const metadata = await fetch(`http://127.0.0.1:${port}/api/site-admin/models?uiLocale=${locale}`, {
+            headers: { cookie, 'x-site-admin-test-role': 'admin' },
+        }).then((metadataResponse) => metadataResponse.json())
+        if (metadata.models?.posts?.meta?.label !== label || metadata.models?.posts?.fields?.title?.label !== title)
+            throw new Error('Native Nuxt i18n model and field presentation failed: ' + JSON.stringify(metadata))
+    }
+    const invalidLocale = await fetch(`http://127.0.0.1:${port}/api/content/_presentation?uiLocale=fr`)
+    if (invalidLocale.status !== 400) throw new Error('Unsupported presentation locales must be rejected.')
     const routeProbe = await fetch(
         `http://127.0.0.1:${port}/api/content/_route?path=/ja/posts/%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF&locale=ja`,
     )
@@ -170,7 +237,7 @@ try {
         fetch(`http://127.0.0.1:${port}/api/site-admin/ai/actions/${name}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...headers },
-            body: JSON.stringify({ props }),
+            body: JSON.stringify({ input: props }),
         })
     if ((await aiRequest('proofread')).status !== 401)
         throw new Error('Named AI action did not require a native session.')
@@ -206,6 +273,10 @@ try {
     }).then((entriesResponse) => entriesResponse.json())
     const formId = formEntries.items[0]?.id
     if (!formId) throw new Error('Form SSR fixture did not find its existing entry.')
+    const listResponse = await fetch(`http://127.0.0.1:${port}/admin-list-probe`, { headers: formHeaders })
+    const listHtml = await listResponse.text()
+    if (!listResponse.ok || !/data-admin-entry[^>]*>Hello<\/li>/u.test(listHtml))
+        throw new Error(`Admin list SSR did not render its awaited items: ${listResponse.status}`)
     const formResponse = await fetch(`http://127.0.0.1:${port}/form-probe?id=${encodeURIComponent(formId)}`, {
         headers: formHeaders,
     })
@@ -247,12 +318,13 @@ try {
     const seoHtml = await seoResponse.text()
     if (
         !seoResponse.ok ||
+        (seoHtml.match(/property="og:image"/gu) ?? []).length !== 1 ||
         !seoHtml.includes('<title>SEO helper probe | Test</title>') ||
         !seoHtml.includes('content="Shared SEO description"') ||
         !/property="og:type"[^>]+content="article"/u.test(seoHtml) ||
         !/name="twitter:card"[^>]+content="summary"/u.test(seoHtml)
     ) {
-        throw new Error(`Shared useSeo SSR probe failed: ${seoResponse.status} ${seoHtml.slice(0, 1000)}`)
+        throw new Error(`Automatic routeRules SEO SSR probe failed: ${seoResponse.status} ${seoHtml.slice(0, 1000)}`)
     }
     const localizedSeoResponse = await fetch(`http://127.0.0.1:${port}/ja/seo-probe`)
     const localizedSeoHtml = await localizedSeoResponse.text()
@@ -296,7 +368,10 @@ try {
     const summaryJson = await summaryHttp.text()
     if (!summaryHttp.ok || summaryJson.includes('FULL_SSR_') || !summaryJson.includes('Native summary'))
         throw new Error('Summary HTTP response contains body/frontmatter or lacks native summary nodes.')
-    const detailHttp = await fetch(`http://127.0.0.1:${port}/api/content/posts/hello?locale=en`)
+    const postId = (
+        await fetch(`http://127.0.0.1:${port}/api/content/posts?locale=en`).then((result) => result.json())
+    )[0].data['_siteAdmin'].id
+    const detailHttp = await fetch(`http://127.0.0.1:${port}/api/content/posts/${postId}?locale=en`)
     if (!(await detailHttp.text()).includes('FULL_SSR_BODY_SENTINEL'))
         throw new Error('Summary SSR must not modify the subsequent full detail cache.')
     if (redirect.status !== 302 || redirect.headers.get('location') !== 'https://example.com/destination') {

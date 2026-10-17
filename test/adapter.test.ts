@@ -11,7 +11,7 @@ import { createSiteAdmin, handleManagementRequest } from '../packages/site-admin
 import { defineSiteAdminConfig, text, file, relation, array, object } from '../packages/site-admin/src'
 import { migrateTestDatabase, testAdapter } from './migrate'
 import { createMemoryDatabase } from './memory-storage'
-import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
+import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/database'
 import { queryRows, runAtomic } from './sqlite-queries'
 import { createSiteAdminManagementClient } from '../packages/site-admin/src/client'
 
@@ -34,6 +34,7 @@ const config = defineSiteAdminConfig({
     models: {
         posts: {
             fields: {
+                slug: text(),
                 title: text({ required: true }),
                 attachment: file(),
                 parent: relation('parents'),
@@ -41,16 +42,16 @@ const config = defineSiteAdminConfig({
             },
             route: '/posts/:slug',
             sortable: true,
-            localized: true,
         },
-        parents: { fields: { title: text({ required: true }) }, route: '/parents/:slug' },
+        parents: { fields: { slug: text(), title: text({ required: true }) }, route: '/parents/:slug' },
         dependencies: {
             fields: {
+                slug: text(),
                 requiredParent: relation('parents', { required: true }),
                 optionalParent: relation('parents'),
             },
         },
-        secrets: { fields: { title: text() }, public: false },
+        secrets: { fields: { slug: text(), title: text() }, public: false },
     },
 })
 async function backend(
@@ -162,7 +163,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         it('guards all commit effects with the public generation, including the initial generation', async () => {
             const { core, storage } = await setup(kind)
             await storage.commit({ conditions: [{ kind: 'publicGeneration', generation: 0 }], publicGeneration: true })
-            let entry = await core.createEntry('posts', { data: { title: 'Keep' } })
+            let entry = await core.createEntry('posts', { data: { slug: 'keep', title: 'Keep' } })
             entry = await core.publishEntry(entry.id, { expectedVersion: entry.version })
             const before = await graph(storage)
             await expect(
@@ -177,7 +178,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         })
         it('audit: retries route reconciliation after two interleaved publications', async () => {
             const { core, storage } = await setup(kind)
-            let entry = await core.createEntry('posts', { slug: 'original', data: { title: 'Original' } })
+            let entry = await core.createEntry('posts', { data: { slug: 'original', title: 'Original' } })
             entry = await core.publishEntry(entry.id, { expectedVersion: entry.version })
             const routes = storage.routes.bind(storage),
                 published = storage.published.bind(storage)
@@ -189,7 +190,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                     readRoutes = true
                     entry = await core.publishEntry(entry.id, {
                         expectedVersion: entry.version,
-                        draft: { slug: 'middle', data: { title: 'Middle' } },
+                        draft: { data: { slug: 'middle', title: 'Middle' } },
                     })
                 }
                 return result
@@ -200,12 +201,16 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                     readPublished = true
                     entry = await core.publishEntry(entry.id, {
                         expectedVersion: entry.version,
-                        draft: { slug: 'latest', data: { title: 'Latest' } },
+                        draft: { data: { slug: 'latest', title: 'Latest' } },
                     })
                 }
                 return result
             }
-            const restarted = createSiteAdmin({ config, database: { bind: () => storage } })
+            const restarted = createSiteAdmin({
+                config,
+                database: { bind: () => storage },
+                locales: { defaultLocale: 'en', supported: ['en', 'ja'] },
+            })
             await restarted.initialize()
             expect(await routes({ entryId: entry.id, kinds: ['page'] })).toMatchObject([
                 { path: '/posts/latest', revisionId: entry.publishedRevisionId },
@@ -249,14 +254,16 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         })
         it('audit: restores a draft with an unpublished required relation while preserving CAS and publication', async () => {
             const { core, storage } = await setup(kind)
-            const parent = await core.createEntry('parents', { data: { title: 'Draft parent' } })
-            let publicParent = await core.createEntry('parents', { data: { title: 'Public parent' } })
+            const parent = await core.createEntry('parents', { data: { slug: 'draft-parent', title: 'Draft parent' } })
+            let publicParent = await core.createEntry('parents', {
+                data: { slug: 'public-parent', title: 'Public parent' },
+            })
             publicParent = await core.publishEntry(publicParent.id, { expectedVersion: publicParent.version })
             let entry = await core.createEntry('dependencies', { data: { requiredParent: parent.id } })
             const original = entry.revisionId
             entry = await core.updateEntry(entry.id, {
                 expectedVersion: entry.version,
-                data: { requiredParent: publicParent.id },
+                data: { slug: entry.data.slug, requiredParent: publicParent.id },
             })
             entry = await core.publishEntry(entry.id, { expectedVersion: entry.version })
             const generation = await storage.publicGeneration()
@@ -293,7 +300,11 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         ] as const) {
             it(`audit: checks the target model of numeric relation field ${path}`, async () => {
                 const definition = defineSiteAdminConfig({
-                    models: { posts: { fields }, parents: { fields: {} }, other: { fields: {} } },
+                    models: {
+                        posts: { fields },
+                        parents: { fields: { slug: text() } },
+                        other: { fields: { slug: text() } },
+                    },
                 })
                 const core = createSiteAdmin({ config: definition, database: await backend(kind, definition) })
                 const wrong = await core.createEntry('other', { data: {} })
@@ -304,7 +315,9 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 expect(await core.listEntries('posts')).toEqual([])
             })
             it(`audit: requires publication of numeric relation field ${path}`, async () => {
-                const definition = defineSiteAdminConfig({ models: { posts: { fields }, parents: { fields: {} } } })
+                const definition = defineSiteAdminConfig({
+                    models: { posts: { fields }, parents: { fields: { slug: text() } } },
+                })
                 const core = createSiteAdmin({ config: definition, database: await backend(kind, definition) })
                 let parent = await core.createEntry('parents', { data: {} })
                 const entry = await core.createEntry('posts', { data: data(parent.id) })
@@ -350,21 +363,19 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             const events: string[] = []
             const definition = defineSiteAdminConfig({
                 assets: { storage: 'content', separateDrafts: true },
-                hooks: {
-                    afterCommit: (event) => {
-                        events.push(event.type)
-                    },
-                },
                 models: {
-                    posts: { fields: { title: text() }, route: '/posts/:slug' },
-                    auto: { fields: { title: text() }, publishing: false },
-                    private: { fields: { title: text() }, publishing: false, public: false },
+                    posts: { fields: { slug: text(), title: text() }, route: '/posts/:slug' },
+                    auto: { fields: { slug: text(), title: text() }, publishing: false },
+                    private: { fields: { slug: text(), title: text() }, publishing: true, public: false },
                 },
             })
             const storage = (await backend(kind, definition)).bind(definition)
             const stores = { draft: new Files({ adapter: memory() }), content: new Files({ adapter: memory() }) }
             const core = createSiteAdmin({
                 config: definition,
+                afterCommit: (event) => {
+                    events.push(event.type)
+                },
                 database: { bind: () => storage },
                 getFiles: async (name) => (name === 'draft' ? stores.draft : stores.content),
                 now: () => new Date('2026-10-09T10:00:00Z'),
@@ -376,26 +387,32 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 syncs++
                 return claim(...args)
             }
-            let draft = await core.createEntry('posts', { slug: 'first', data: { title: 'First' } })
+            let draft = await core.createEntry('posts', { data: { slug: 'first', title: 'First' } })
             const original = draft.revisionId
-            draft = await core.updateEntry(draft.id, { expectedVersion: draft.version, data: { title: 'Edit' } })
+            draft = await core.updateEntry(draft.id, {
+                expectedVersion: draft.version,
+                data: { slug: draft.data.slug, title: 'Edit' },
+            })
             draft = await core.restoreRevision(draft.id, original, { expectedVersion: draft.version })
             draft = await core.schedulePublish(draft.id, { expectedVersion: draft.version, at: '2026-10-09T12:00:00Z' })
             draft = await core.cancelScheduledPublish(draft.id, { expectedVersion: draft.version })
             await core.pruneRevisions(draft.id, 0)
-            let privateEntry = await core.createEntry('private', { data: { title: 'Private' } })
-            privateEntry = await core.updateEntry(privateEntry.id, { expectedVersion: privateEntry.version, data: {} })
+            let privateEntry = await core.createEntry('private', { data: { slug: 'private', title: 'Private' } })
+            privateEntry = await core.updateEntry(privateEntry.id, {
+                expectedVersion: privateEntry.version,
+                data: { slug: privateEntry.data.slug },
+            })
             privateEntry = await core.unpublishEntry(privateEntry.id, { expectedVersion: privateEntry.version })
             privateEntry = await core.publishEntry(privateEntry.id, { expectedVersion: privateEntry.version })
             await core.deleteEntry(privateEntry.id, { expectedVersion: privateEntry.version })
             expect(await core.publicGeneration()).toBe(0)
             expect(syncs).toBe(0)
-            let auto = await core.createEntry('auto', { data: { title: 'Auto' } })
-            auto = await core.updateEntry(auto.id, { expectedVersion: auto.version, data: {} })
+            let auto = await core.createEntry('auto', { data: { slug: 'auto', title: 'Auto' } })
+            auto = await core.updateEntry(auto.id, { expectedVersion: auto.version, data: { slug: auto.data.slug } })
             expect(syncs).toBe(2)
             expect(await core.publicGeneration()).toBe(2)
             draft = await core.schedulePublish(draft.id, { expectedVersion: draft.version, at: '2026-10-09T12:00:00Z' })
-            const second = await core.createEntry('posts', { slug: 'second', data: { title: 'Second' } })
+            const second = await core.createEntry('posts', { data: { slug: 'second', title: 'Second' } })
             await core.schedulePublish(second.id, { expectedVersion: second.version, at: '2026-10-09T12:00:00Z' })
             const publishes = events.filter((event) => event === 'publish').length
             expect((await core.publishDue(new Date('2026-10-09T13:00:00Z'))).published.sort()).toEqual(
@@ -407,30 +424,30 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         })
         it('keeps draft slugs semantic, validates publication and preserves raw records', async () => {
             const { core } = await setup(kind)
-            let entry = await core.createEntry('posts', { slug: '', data: { title: 'Draft' } })
-            expect(entry.slug).toBe('')
-            expect((await core.listRevisions(entry.id))[0]?.slug).toBe('')
+            let entry = await core.createEntry('posts', { data: { slug: '', title: 'Draft' } })
+            expect(entry.data.slug).toBe('')
+            expect((await core.listRevisions(entry.id))[0]?.data.slug).toBe('')
             await expect(core.publishEntry(entry.id, { expectedVersion: entry.version })).rejects.toMatchObject({
                 code: 'SITE_ADMIN_INVALID_INPUT',
             })
             entry = await core.publishEntry(entry.id, {
                 expectedVersion: entry.version,
-                draft: { slug: 'live', data: { title: 'Published' } },
+                draft: { data: { slug: 'live', title: 'Published' } },
             })
             expect(entry.version).toBe(2)
-            expect((await core.getPublicEntry('posts', 'live', 'en'))?.data.title).toBe('Published')
+            expect((await core.getPublicEntry('posts', entry.id, 'en'))?.data.title).toBe('Published')
             expect((await core.getEntry(entry.id)).data.title).toBe('Published')
         })
         it('rolls back stale candidates, revision references, route changes and generation together', async () => {
             const { core, storage } = await setup(kind)
-            const parent = await core.createEntry('parents', { data: { title: 'Parent' } })
-            let entry = await core.createEntry('posts', { slug: 'first', data: { title: 'First' } })
+            const parent = await core.createEntry('parents', { data: { slug: 'parent', title: 'Parent' } })
+            let entry = await core.createEntry('posts', { data: { slug: 'first', title: 'First' } })
             entry = await core.publishEntry(entry.id, { expectedVersion: entry.version })
             const before = await graph(storage)
             await expect(
                 core.publishEntry(entry.id, {
                     expectedVersion: 0,
-                    draft: { slug: 'stale', data: { title: 'Stale', parent: parent.id } },
+                    draft: { data: { slug: 'stale', title: 'Stale', parent: parent.id } },
                 }),
             ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
             expect(await graph(storage)).toEqual(before)
@@ -438,35 +455,35 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         })
         it('rolls back a conflicting route without leaving a candidate revision', async () => {
             const { core, storage } = await setup(kind)
-            let first = await core.createEntry('posts', { slug: 'taken', data: { title: 'First' } })
+            let first = await core.createEntry('posts', { data: { slug: 'taken', title: 'First' } })
             first = await core.publishEntry(first.id, { expectedVersion: first.version })
-            const second = await core.createEntry('posts', { slug: 'second', data: { title: 'Second' } })
+            const second = await core.createEntry('posts', { data: { slug: 'second', title: 'Second' } })
             const before = await graph(storage)
             await expect(
                 core.publishEntry(second.id, {
                     expectedVersion: second.version,
-                    draft: { slug: 'taken', data: { title: 'Rejected' } },
+                    draft: { data: { slug: 'taken', title: 'Rejected' } },
                 }),
             ).rejects.toMatchObject({ code: 'SITE_ADMIN_ROUTE_CONFLICT' })
             expect(await graph(storage)).toEqual(before)
         })
         it('rejects a missing update target before applying any independent candidate', async () => {
             const { core, storage } = await setup(kind)
-            const entry = await core.createEntry('posts', { data: { title: 'Before' } })
+            const entry = await core.createEntry('posts', { data: { slug: 'before', title: 'Before' } })
             const before = await graph(storage)
             await expect(
                 storage.commit({
                     revisions: [
                         {
+                            translations: {},
                             id: 'candidate',
                             entryId: entry.id,
                             model: 'posts',
                             actorId: null,
                             createdAt: entry.createdAt,
-                            slug: '',
-                            data: { title: 'Rejected' },
                             assets: [],
                             relations: [],
+                            data: { slug: '', title: 'Rejected' },
                         },
                     ],
                     updates: [{ id: 'missing', patch: {} }],
@@ -479,9 +496,12 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             'evaluates mixed update/delete candidates against one pre-state (stale: %s)',
             async (stale) => {
                 const { core, storage, database } = await setup(kind)
-                const a = await core.createEntry('posts', { data: { title: 'Update' } })
-                let b = await core.createEntry('posts', { data: { title: 'Delete' } })
-                b = await core.updateEntry(b.id, { expectedVersion: b.version, data: { title: 'Latest deleted' } })
+                const a = await core.createEntry('posts', { data: { slug: 'update', title: 'Update' } })
+                let b = await core.createEntry('posts', { data: { slug: 'delete', title: 'Delete' } })
+                b = await core.updateEntry(b.id, {
+                    expectedVersion: b.version,
+                    data: { slug: b.data.slug, title: 'Latest deleted' },
+                })
                 const before = await graph(storage)
                 const pending = storage.commit({
                     conditions: [
@@ -555,7 +575,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 'AΣ\u0345',
             ]) {
                 tick()
-                await core.createEntry('posts', { locale: 'en', data: { title } })
+                await core.createEntry('posts', { defaultLocale: 'en', data: { title } })
             }
             const entries = await storage.entries({ models: ['posts'], locale: 'en' })
             for (const q of [
@@ -582,7 +602,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             ]) {
                 const expected = entries.filter(
                     (entry) =>
-                        entry.slug.toLocaleLowerCase().includes(q.toLocaleLowerCase()) ||
+                        String(entry.data.slug).toLocaleLowerCase().includes(q.toLocaleLowerCase()) ||
                         JSON.stringify(entry.data).toLocaleLowerCase().includes(q.toLocaleLowerCase()),
                 )
                 const first = await storage.pageEntries({ models: ['posts'], locale: 'en', q }, { limit: 1, offset: 0 })
@@ -605,7 +625,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
 
         it('searches a normal 1000-character Greek title through management HTTP without long SQL work', async () => {
             const { core } = await setup(kind)
-            await core.createEntry('posts', { locale: 'en', data: { title: 'ΣΟΣ '.repeat(250) } })
+            await core.createEntry('posts', { defaultLocale: 'en', data: { title: 'ΣΟΣ '.repeat(250) } })
             const started = performance.now()
             const response = await handleManagementRequest(
                 core,
@@ -622,50 +642,51 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         })
 
         if (kind !== 'memory') {
-            it('backfills legacy search values in bounded batches without changing data/history or other authorized scopes', async () => {
-                const { core, storage, database, tick } = await setup(kind)
-                for (let index = 0; index < 65; index++) {
-                    tick()
-                    await core.createEntry('posts', { locale: 'en', data: { title: `École ${index}` } })
-                }
-                await core.createEntry('posts', { locale: 'ja', data: { title: 'École Japanese' } })
-                await core.createEntry('secrets', { data: { title: 'École private' } })
+            it('requires explicit repeatable rebuilding without changing content, history or authorized scope', async () => {
+                const { core, storage, database } = await setup(kind)
+                for (let index = 0; index < 65; index++)
+                    await core.createEntry('posts', { data: { title: 'École ' + index } })
+                await core.createEntry('secrets', { data: { title: 'Private' } })
                 const physical = database as DrizzleSiteAdminDatabase
-                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                await runAtomic(physical, [{ sql: 'DELETE FROM site_admin_search' }])
                 const before = await graph(storage)
-                const result = await storage.pageEntries(
-                    { models: ['posts'], locale: 'en', q: 'école' },
-                    { limit: 1, offset: 64 },
-                )
+                await expect(
+                    storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 64 }),
+                ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+                expect(await queryRows(physical, 'SELECT * FROM site_admin_search')).toEqual([])
+                expect(await core.rebuildSearch()).toEqual({ indexed: 66 })
+                const result = await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 64 })
                 expect(result.total).toBe(65)
-                expect(result.items[0]!.data.title).toBe('École 0')
+                expect(result.items).toHaveLength(1)
                 expect(await graph(storage)).toEqual(before)
-                const indexed = await queryRows(
-                    physical,
-                    "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'",
-                )
-                expect(indexed).toHaveLength(130)
-                expect((await storage.entries({ models: ['posts'], locale: 'en', q: 'ÉCOLE' })).length).toBe(65)
-                expect(
-                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
-                ).toEqual(indexed)
+                expect(await core.rebuildSearch()).toEqual({ indexed: 66 })
+                expect((await storage.entries({ models: ['posts'], q: 'ÉCOLE' })).length).toBe(65)
             })
 
             it('keeps old/new projections separate and updates, restores, prunes and deletes search values atomically', async () => {
                 const original = defineSiteAdminConfig({
-                    models: { posts: { fields: { title: text(), excerpt: text() } } },
+                    models: { posts: { fields: { slug: text(), title: text(), excerpt: text() } } },
                 })
-                const current = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+                const current = defineSiteAdminConfig({
+                    models: { posts: { fields: { slug: text(), title: text() } } },
+                })
                 const database = await backend(kind, original)
                 const old = createSiteAdmin({ config: original, database })
-                const first = await old.createEntry('posts', { data: { title: 'École', excerpt: 'RetiredSecret' } })
+                const first = await old.createEntry('posts', {
+                    data: { slug: 'école', title: 'École', excerpt: 'RetiredSecret' },
+                })
                 const active = createSiteAdmin({ config: current, database })
                 const storage = database.bind(current)
                 const physical = database as DrizzleSiteAdminDatabase
+                await expect(
+                    storage.pageEntries({ models: ['posts'], q: 'RetiredSecret' }, { limit: 1, offset: 0 }),
+                ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
+                await active.rebuildSearch()
                 expect(
                     (await storage.pageEntries({ models: ['posts'], q: 'RetiredSecret' }, { limit: 1, offset: 0 }))
                         .total,
                 ).toBe(0)
+                await old.rebuildSearch()
                 expect(
                     (
                         await database
@@ -673,10 +694,11 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                             .pageEntries({ models: ['posts'], q: 'RetiredSecret' }, { limit: 1, offset: 0 })
                     ).total,
                 ).toBe(1)
+                await active.rebuildSearch()
                 const historical = await old.listRevisions(first.id)
                 let entry = await active.updateEntry(first.id, {
                     expectedVersion: first.version,
-                    data: { title: 'Changed' },
+                    data: { slug: 'changed', title: 'Changed' },
                 })
                 expect(
                     (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 0 })).total,
@@ -690,72 +712,60 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 )
                 const indexed = await queryRows(
                     physical,
-                    "SELECT key,value FROM site_admin_meta WHERE key LIKE 'content_search:v1:%' ORDER BY key",
+                    'SELECT * FROM site_admin_search ORDER BY revision_id,locale,part',
                 )
                 await expect(
                     storage.commit({
                         conditions: [{ kind: 'entryVersion', id: entry.id, version: entry.version - 1 }],
                         revisions: [
                             {
+                                translations: {},
                                 id: 'conflict-revision',
                                 entryId: entry.id,
                                 model: 'posts',
-                                slug: '',
-                                data: { title: 'No partial cache' },
                                 actorId: null,
                                 createdAt: '2026-10-09T10:00:00Z',
                                 assets: [],
                                 relations: [],
+                                data: { slug: '', title: 'No partial cache' },
                             },
                         ],
                         updates: [{ id: entry.id, patch: { currentRevisionId: 'conflict-revision' } }],
                     }),
                 ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
                 expect(
-                    await queryRows(
-                        physical,
-                        "SELECT key,value FROM site_admin_meta WHERE key LIKE 'content_search:v1:%' ORDER BY key",
-                    ),
+                    await queryRows(physical, 'SELECT * FROM site_admin_search ORDER BY revision_id,locale,part'),
                 ).toEqual(indexed)
                 await active.pruneRevisions(entry.id, 0)
-                expect(
-                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
-                ).toHaveLength(2)
+                expect(await queryRows(physical, 'SELECT * FROM site_admin_search')).toHaveLength(2)
                 await active.deleteEntry(entry.id, { expectedVersion: entry.version })
-                expect(
-                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
-                ).toEqual([])
+                expect(await queryRows(physical, 'SELECT * FROM site_admin_search')).toEqual([])
             })
         }
 
         if (kind !== 'memory')
-            it('finishes the exact cold-search budget and resumes larger legacy sets without returning a partial total', async () => {
+            it('reads a large indexed search without index writes or progress retries', async () => {
                 const { core, storage, database } = await setup(kind)
-                for (let index = 0; index < 256; index++)
-                    await core.createEntry('posts', { data: { title: `École ${index}` } })
+                for (let index = 0; index < 257; index++)
+                    await core.createEntry('posts', { data: { title: 'École ' + index } })
                 const physical = database as DrizzleSiteAdminDatabase
-                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                const before = await queryRows(
+                    physical,
+                    'SELECT * FROM site_admin_search ORDER BY revision_id,locale,part',
+                )
+                const result = await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 256 })
+                expect(result.total).toBe(257)
+                expect(result.items).toHaveLength(1)
                 expect(
-                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 255 })).total,
-                ).toBe(256)
-                await core.createEntry('posts', { data: { title: 'École last' } })
-                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
-                const before = await graph(storage)
-                await expect(
-                    storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 256 }),
-                ).rejects.toMatchObject({ code: 'SITE_ADMIN_SEARCH_PREPARING', status: 503, searchRemaining: 1 })
-                expect(
-                    await queryRows(physical, "SELECT key FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'"),
-                ).toHaveLength(512)
-                expect(
-                    (await storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 256 })).total,
-                ).toBe(257)
-                expect(await graph(storage)).toEqual(before)
+                    await queryRows(physical, 'SELECT * FROM site_admin_search ORDER BY revision_id,locale,part'),
+                ).toEqual(before)
             })
 
         if (kind !== 'memory')
             it('preserves a D1-sized canonical value whose lowercase metadata exceeds the native row limit', async () => {
-                const definition = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+                const definition = defineSiteAdminConfig({
+                    models: { posts: { fields: { slug: text(), title: text() } } },
+                })
                 const database = await backend(kind, definition),
                     physical = database as DrizzleSiteAdminDatabase
                 const controls = batchControls.get(database)
@@ -765,7 +775,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 // The JSON prefix plus case expansion places the literal marker across a chunk boundary.
                 const marker = 'A😀B%_[]C'
                 const title = 'İ'.repeat(65_528) + marker + 'İ'.repeat(634_472)
-                const entry = await core.createEntry('posts', { slug: 'large-value', data: { title } })
+                const entry = await core.createEntry('posts', { data: { slug: 'large-value', title } })
                 const before = await graph(storage)
                 expect((await core.getEntry(entry.id)).data.title).toBe(title)
                 for (const q of [marker, 'i\u0307'.repeat(100) + marker + 'i\u0307'.repeat(100)])
@@ -773,6 +783,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 expect(
                     (await storage.pageEntries({ models: ['posts'], q: 'A😀B%_[]X' }, { limit: 1, offset: 0 })).total,
                 ).toBe(0)
+                await core.rebuildSearch()
                 expect(
                     (await storage.pageEntries({ models: ['posts'], q: 'i\u0307' }, { limit: 1, offset: 0 })).total,
                 ).toBe(1)
@@ -794,11 +805,12 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 ).toBe(0)
                 const sizes = await queryRows<{ bytes: number }>(
                     physical,
-                    "SELECT length(CAST(key AS BLOB))+length(CAST(value AS BLOB)) AS bytes FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'",
+                    'SELECT length(CAST(value AS BLOB)) AS bytes FROM site_admin_search WHERE part>=0',
                 )
                 expect(sizes.length).toBeGreaterThan(2)
                 expect(sizes.every(({ bytes }) => bytes < 2_000_000)).toBe(true)
-                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
+                await runAtomic(physical, [{ sql: 'DELETE FROM site_admin_search' }])
+                await core.rebuildSearch()
                 expect(
                     (await storage.pageEntries({ models: ['posts'], q: 'i\u0307' }, { limit: 1, offset: 0 })).total,
                 ).toBe(1)
@@ -807,85 +819,54 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             }, 20_000)
 
         if (kind === 'd1')
-            it('resumes a large cold search through the standard client within each fresh request budget', async () => {
-                const definition = defineSiteAdminConfig({
-                    authorization: { roles: { reader: { models: { posts: ['readDraft'] } } } },
-                    models: { posts: { fields: { title: text() } } },
-                })
-                const database = await backend(kind, definition),
-                    physical = database as DrizzleSiteAdminDatabase
-                const original = createSiteAdmin({ config: definition, database })
-                for (let index = 0; index < 2_049; index++)
-                    await original.createEntry('posts', { slug: `cold-${index}`, data: { title: `École ${index}` } })
-                const before = await graph(database.bind(definition))
-                await runAtomic(physical, [{ sql: "DELETE FROM site_admin_meta WHERE key LIKE 'content_search:v1:%'" }])
-                const controls = batchControls.get(database)!,
-                    requests: number[] = [],
-                    remaining: number[] = []
+            it('executes a standard indexed D1 search in one bounded read-only request', async () => {
+                const { core, database } = await setup(kind)
+                for (let index = 0; index < 110; index++)
+                    await core.createEntry('posts', { data: { title: 'École ' + index } })
+                const controls = batchControls.get(database)!
+                controls.calls = 0
+                controls.maxCalls = 50
+                controls.trace = []
+                let requests = 0
                 const client = createSiteAdminManagementClient({
                     basePath: '/manage',
-                    fetch: async (input, init) => {
-                        controls.calls = 0
-                        controls.maxCalls = 50
-                        controls.trace = []
-                        for (let index = 0; index < 10; index++) await physical.query('SELECT 1')
-                        const fresh = createSiteAdmin({
-                            config: definition,
-                            database,
-                            authorize: () => ({ id: 'reader', roles: ['reader'] }),
-                        })
-                        const response = await handleManagementRequest(
-                            fresh,
+                    fetch: (input, init) => {
+                        requests++
+                        return handleManagementRequest(
+                            core,
                             new Request(new URL(String(input), 'https://example.test'), init),
                             '/manage',
                         )
-                        requests.push(controls.calls!)
-                        expect(controls.trace.every((sql) => !/^\s*(?:UPDATE|DELETE)/iu.test(sql))).toBe(true)
-                        if (response.status === 503)
-                            remaining.push((await response.clone().json()).error.searchRemaining)
-                        return response
                     },
                 })
-                const page = await client.listEntries('posts', { q: 'école', limit: 1, offset: 2_048 })
-                expect(page.total).toBe(2_049)
-                expect(page.items).toHaveLength(1)
-                expect(requests.length).toBeGreaterThan(1)
-                expect(requests.every((calls) => calls <= 50)).toBe(true)
-                expect(remaining.every((value, index) => index === 0 || value < remaining[index - 1]!)).toBe(true)
+                const result = await client.listEntries('posts', { q: 'école', limit: 1, offset: 109 })
+                expect(result.total).toBe(110)
+                expect(requests).toBe(1)
+                expect(controls.trace.every((sql) => !/^\s*(?:INSERT|UPDATE|DELETE)/iu.test(sql))).toBe(true)
                 delete controls.maxCalls
-                delete controls.trace
-                expect(await graph(database.bind(definition))).toEqual(before)
             }, 30_000)
 
         if (kind === 'd1')
-            it('retries when another schema writer installs an unindexed head before the page snapshot', async () => {
-                const original = defineSiteAdminConfig({
-                    models: { posts: { fields: { title: text(), excerpt: text() } } },
-                })
-                const current = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
-                const database = await backend(kind, original)
-                const old = createSiteAdmin({ config: original, database })
-                await old.createEntry('posts', { data: { title: 'École initial', excerpt: 'old' } })
+            it('rejects an incomplete index from the same read snapshot as its page', async () => {
+                const { core, database, storage } = await setup(kind)
+                await core.createEntry('posts', { data: { title: 'École' } })
                 const controls = batchControls.get(database)!
-                const writer = createSiteAdmin({ config: original, database: await controls.otherConnection!() })
+                const physical = (await batchControls.get(database)!.otherConnection!()) as DrizzleSiteAdminDatabase
                 let injected = false
                 controls.beforeBatch = async (queries) => {
-                    if (injected || !queries.some((sql) => sql.includes('AS missing'))) return
+                    if (injected || !queries.some((sql) => sql.includes('fingerprint.key'))) return
                     injected = true
-                    await writer.createEntry('posts', { data: { title: 'École concurrent', excerpt: 'old writer' } })
+                    await runAtomic(physical, [{ sql: 'DELETE FROM site_admin_search' }])
                 }
-                const result = await database
-                    .bind(current)
-                    .pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 1 })
+                await expect(
+                    storage.pageEntries({ models: ['posts'], q: 'école' }, { limit: 1, offset: 0 }),
+                ).rejects.toMatchObject({ code: 'SITE_ADMIN_MIGRATION_REQUIRED' })
                 expect(injected).toBe(true)
-                expect(result.total).toBe(2)
-                expect(result.items).toHaveLength(1)
-                expect(result.items[0]!.data).toEqual({ title: 'École initial' })
             })
 
         it('filters authorized models, locale and search before paging and counts empty pages', async () => {
             const { core, storage, tick } = await setup(kind)
-            await core.createEntry('secrets', { data: { title: 'Needle private' } })
+            await core.createEntry('secrets', { data: { slug: 'needle-private', title: 'Needle private' } })
             for (const [locale, title] of [
                 ['ja', 'Needle Japanese'],
                 ['en', 'Other'],
@@ -893,7 +874,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 ['en', 'Needle two'],
             ] as const) {
                 tick()
-                await core.createEntry('posts', { locale, data: { title } })
+                await core.createEntry('posts', { defaultLocale: locale, data: { title } })
             }
             const original = core.listEntries.bind(core)
             core.listEntries = async () => {
@@ -906,29 +887,31 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             )
             expect(response.status).toBe(200)
             const body = await response.json()
-            expect(body.total).toBe(2)
+            expect(body.total).toBe(3)
             expect(body.items).toHaveLength(1)
             expect(body.items[0].data.title).toBe('Needle one')
             expect(
                 await storage.pageEntries({ models: ['posts'], locale: 'en', q: 'needle' }, { limit: 1, offset: 20 }),
-            ).toEqual({ items: [], total: 2 })
+            ).toEqual({ items: [], total: 3 })
             expect(await storage.pageEntries({ models: [] }, { limit: 1, offset: 0 })).toEqual({ items: [], total: 0 })
             core.listEntries = original
         })
         it('pins scheduled revisions, protects pointers while pruning and blocks retained references', async () => {
             const { core } = await setup(kind)
-            const parent = await core.createEntry('parents', { data: { title: 'Parent' } })
+            const parent = await core.createEntry('parents', { data: { slug: 'parent', title: 'Parent' } })
             let entry = await core.createEntry('posts', {
-                slug: 'post',
-                data: { title: 'Scheduled', parent: parent.id },
+                data: { slug: 'post', title: 'Scheduled', parent: parent.id },
             })
             const pinned = entry.revisionId
             entry = await core.schedulePublish(entry.id, { expectedVersion: entry.version, at: '2026-10-09T12:00:00Z' })
-            entry = await core.updateEntry(entry.id, { expectedVersion: entry.version, data: { title: 'Newer' } })
+            entry = await core.updateEntry(entry.id, {
+                expectedVersion: entry.version,
+                data: { slug: entry.data.slug, title: 'Newer' },
+            })
             expect(await core.pruneRevisions(entry.id, 0)).toEqual({ deleted: [] })
             expect((await core.publishDue(new Date('2026-10-09T13:00:00Z'))).published).toEqual([entry.id])
             expect((await core.getEntry(entry.id)).publishedRevisionId).toBe(pinned)
-            expect((await core.getPublicEntry('posts', 'post', 'en'))?.data.title).toBe('Scheduled')
+            expect((await core.getPublicEntry('posts', entry.id, 'en'))?.data.title).toBe('Scheduled')
             await expect(core.deleteEntry(parent.id, { expectedVersion: parent.version })).rejects.toMatchObject({
                 code: 'SITE_ADMIN_RELATION_BLOCKED',
             })
@@ -939,7 +922,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
         })
         it('keeps a required publication guard when an optional field references the same target', async () => {
             const { core, storage } = await setup(kind)
-            let parent = await core.createEntry('parents', { slug: 'parent', data: { title: 'Parent' } })
+            let parent = await core.createEntry('parents', { data: { slug: 'parent', title: 'Parent' } })
             parent = await core.publishEntry(parent.id, { expectedVersion: parent.version })
             const entry = await core.createEntry('dependencies', {
                 data: { requiredParent: parent.id, optionalParent: parent.id },
@@ -967,14 +950,14 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             for (let index = 0; index < 105; index++)
                 parents.push(await core.createEntry('parents', { data: { title: `Parent ${index}` } }))
             let entry = await core.createEntry('posts', {
-                data: { title: 'References', links: parents.map(({ id }) => id) },
+                data: { slug: 'references', title: 'References', links: parents.map(({ id }) => id) },
             })
             expect(await storage.incomingReferences(parents[104]!.id, { view: 'current' })).toHaveLength(1)
             for (let index = 0; index < 105; index++) {
                 tick()
                 entry = await core.updateEntry(entry.id, {
                     expectedVersion: entry.version,
-                    data: { title: `Revision ${index}` },
+                    data: { slug: entry.data.slug, title: `Revision ${index}`, links: [] },
                 })
             }
             expect((await core.pruneRevisions(entry.id, 0)).deleted).toHaveLength(105)
@@ -999,7 +982,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
                 createdAt: now,
                 updatedAt: now,
             })
-            const entry = await core.createEntry('posts', { data: { title: 'Before' } })
+            const entry = await core.createEntry('posts', { data: { slug: 'before', title: 'Before' } })
             const before = await graph(storage),
                 commit = storage.commit.bind(storage)
             storage.commit = async (input) => {
@@ -1009,7 +992,7 @@ for (const kind of ['memory', 'sqlite', 'd1'] as const)
             await expect(
                 core.updateEntry(entry.id, {
                     expectedVersion: entry.version,
-                    data: { title: 'After', attachment: { id: 'asset' } },
+                    data: { slug: entry.data.slug, title: 'After', attachment: { id: 'asset' } },
                 }),
             ).rejects.toMatchObject({ code: 'SITE_ADMIN_CONFLICT' })
             expect(await graph(storage)).toEqual(before)

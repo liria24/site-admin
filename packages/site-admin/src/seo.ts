@@ -1,5 +1,6 @@
 import { addRoute, createRouter, findAllRoutes } from 'rou3'
 import type { PublicEntrySeo, PublicEntrySeoValue } from './server/types'
+import { resolvePresentation, type Localized, type PresentationContext } from './presentation'
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -56,12 +57,13 @@ export const serializeSiteAdminSeo = (value: unknown): PublicEntrySeo => {
 
 export interface SiteAdminRouteRule {
     llms?: boolean
-    seo?: PublicEntrySeo
+    seo?: Localized<PublicEntrySeo>
     sitemap?: boolean
 }
 
 export type SiteAdminRouteRules = Record<string, SiteAdminRouteRule>
-export type SiteAdminRouteResolver = (path: string) => SiteAdminRouteRule
+export type ResolvedSiteAdminRouteRule = Omit<SiteAdminRouteRule, 'seo'> & { seo?: PublicEntrySeo }
+export type SiteAdminRouteResolver = (path: string) => ResolvedSiteAdminRouteRule
 
 /** Resolve only pathname. Query/hash and URL origins never change the matching route. */
 export const normalizeSiteAdminPath = (path: string): string => new URL(path, 'http://site-admin.local').pathname
@@ -74,7 +76,10 @@ export const mergeSiteAdminSeo = <Options extends object = PublicEntrySeo>(
         layers.flatMap((layer) => Object.entries(layer ?? {}).filter(([, value]) => value !== undefined)),
     ) as Options
 
-export const serializeSiteAdminRouteRules = (value: unknown): SiteAdminRouteRules => {
+export const serializeSiteAdminRouteRules = (
+    value: unknown,
+    context?: PresentationContext,
+): Record<string, ResolvedSiteAdminRouteRule> => {
     if (!isObject(value)) return {}
     return Object.fromEntries(
         Object.entries(value).flatMap(([path, rule]) => {
@@ -85,7 +90,15 @@ export const serializeSiteAdminRouteRules = (value: unknown): SiteAdminRouteRule
                     {
                         ...(typeof rule.llms === 'boolean' ? { llms: rule.llms } : {}),
                         ...(typeof rule.sitemap === 'boolean' ? { sitemap: rule.sitemap } : {}),
-                        ...(isObject(rule.seo) ? { seo: serializeSiteAdminSeo(rule.seo) } : {}),
+                        ...(isObject(rule.seo) || (context && typeof rule.seo === 'function')
+                            ? {
+                                  seo: serializeSiteAdminSeo(
+                                      context
+                                          ? resolvePresentation(rule.seo as Localized<PublicEntrySeo>, context)
+                                          : rule.seo,
+                                  ),
+                              }
+                            : {}),
                     },
                 ],
             ]
@@ -95,10 +108,10 @@ export const serializeSiteAdminRouteRules = (value: unknown): SiteAdminRouteRule
 
 /** rou3 returns overlapping matches from least to most specific, independent of declaration order. */
 export const createSiteAdminRouteResolver = (rules?: SiteAdminRouteRules): SiteAdminRouteResolver => {
-    const router = createRouter<SiteAdminRouteRule>()
+    const router = createRouter<ResolvedSiteAdminRouteRule>()
     for (const [path, rule] of Object.entries(serializeSiteAdminRouteRules(rules))) addRoute(router, 'GET', path, rule)
     return (path) => {
-        const result: SiteAdminRouteRule = {}
+        const result: ResolvedSiteAdminRouteRule = {}
         for (const { data } of findAllRoutes(router, 'GET', normalizeSiteAdminPath(path), {
             params: false,
             normalize: true,

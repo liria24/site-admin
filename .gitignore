@@ -10,3 +10,8 @@ dist
 coverage
 *.tgz
 .vitest/
+.void
+.void-wrangler.jsonc
+server/middleware/__void-dev-trigger.ts
+test/fixtures/nuxt/db/
+test/fixtures/nuxt-d1/db/

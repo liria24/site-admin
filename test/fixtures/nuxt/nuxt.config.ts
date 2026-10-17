@@ -7,7 +7,10 @@ export default defineNuxtConfig({
     devtools: { enabled: false },
     i18n: {
         defaultLocale: 'en',
-        locales: ['en', 'ja'],
+        locales: [
+            { code: 'en', file: 'en.json' },
+            { code: 'ja', file: 'ja.json' },
+        ],
         strategy: 'prefix_except_default',
     },
     llms: {

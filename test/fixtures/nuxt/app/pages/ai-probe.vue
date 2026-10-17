@@ -1,5 +1,5 @@
 <script setup lang="ts">
-const { data, status, error } = await useAiAction('proofread', { props: { content: 'SSR input' } })
+const { data, status, error } = await useAi('proofread', { input: { content: 'SSR input' } })
 const content: string | undefined = data.value?.content
 void content
 </script>

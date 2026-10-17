@@ -12,9 +12,10 @@ import {
 
 const config = defineSiteAdminConfig({
     models: {
-        authors: { fields: { name: text({ required: true }) } },
+        authors: { fields: { slug: text(), name: text({ required: true }) } },
         posts: {
             fields: {
+                slug: text(),
                 sections: array(object({ author: relation('authors'), heading: text({ required: true }) })),
                 cover: image(),
                 title: text({ required: true }),
@@ -58,6 +59,7 @@ const requiredConfig = defineSiteAdminConfig({
     models: {
         required: {
             fields: {
+                slug: text(),
                 items: array(text(), { required: true }),
                 nested: object({ value: text({ required: true }) }, { required: true }),
                 relation: relation('authors', { required: true }),

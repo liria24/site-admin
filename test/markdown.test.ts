@@ -24,8 +24,8 @@ const elements = (nodes: Node[], tag: string): ElementNode[] =>
 
 describe('internal Markdown asset contracts', () => {
     it('uses explicit native summaries before bounded paragraph fallback and respects disable/empty overrides', async () => {
-        const parse = (source: string, options: Parameters<typeof markdownPlugins>[0] = {}) =>
-            parseMarkdown(source, { plugins: markdownPlugins(options, url) })
+        const parse = async (source: string, options: Parameters<typeof markdownPlugins>[0] = {}) =>
+            parseMarkdown(source, { plugins: await markdownPlugins(options, url) })
         const source = '# Heading\n\nFirst **body** paragraph.\n\nSecond paragraph.\n\nThird paragraph.'
         const document = await parse(source)
         expect(document.meta.summary).toEqual([
@@ -161,27 +161,29 @@ describe('internal Markdown asset contracts', () => {
         for (const target of ['javascript:alert(1)', 'https://blocked.example/a']) {
             const policy = security({ allowedImagePrefixes: ['https://allowed.example/'] })
             const document = await parseMarkdown(source, {
-                plugins: markdownPlugins({ plugins: [policy] }, () => target),
+                plugins: await markdownPlugins({ plugins: [policy] }, () => target),
             })
             expect(elements(document.nodes, 'img')[0]?.[1].src).toBeUndefined()
             expect(elements(document.meta.summary as Node[], 'img')[0]?.[1].src).toBeUndefined()
         }
         const safe = await parseMarkdown(source, {
-            plugins: markdownPlugins(
+            plugins: await markdownPlugins(
                 { plugins: [security({ allowedProtocols: ['https'] })] },
                 () => 'https://allowed.example/a',
             ),
         })
         expect(elements(safe.nodes, 'img')[0]?.[1].src).toBe('https://allowed.example/a')
         expect(elements(safe.meta.summary as Node[], 'img')[0]?.[1].src).toBe('https://allowed.example/a')
-        const unsafe = await parseMarkdown(source, { plugins: markdownPlugins(undefined, () => 'javascript:alert(1)') })
+        const unsafe = await parseMarkdown(source, {
+            plugins: await markdownPlugins(undefined, () => 'javascript:alert(1)'),
+        })
         expect(elements(unsafe.nodes, 'img')[0]?.[1].src).toBeUndefined()
         expect(elements(unsafe.meta.summary as Node[], 'img')[0]?.[1].src).toBeUndefined()
     })
 
     it('does not authorize new destinations introduced by consumer pre hooks', async () => {
         const document = await parseMarkdown('Original', {
-            plugins: markdownPlugins(
+            plugins: await markdownPlugins(
                 {
                     plugins: [
                         {
@@ -202,7 +204,7 @@ describe('internal Markdown asset contracts', () => {
 
     it('isolates summary safety transformations when a consumer shares body nodes', async () => {
         const document = await parseMarkdown('![a](/image)', {
-            plugins: markdownPlugins(
+            plugins: await markdownPlugins(
                 {
                     plugins: [
                         security({
@@ -236,15 +238,17 @@ describe('internal Markdown asset contracts', () => {
         }
         const source = 'Intro ![a](site-admin://asset/a)\n\n<!-- cut -->\n\nAfter'
         const document = await parseMarkdown(source, {
-            plugins: markdownPlugins({ plugins: [configured], summary: { delimiter: '<!-- cut -->' } }, url),
+            plugins: await markdownPlugins({ plugins: [configured], summary: { delimiter: '<!-- cut -->' } }, url),
         })
         expect(events).toEqual([url('a')])
         expect(document.meta.custom).toBe('kept')
         expect(cleanText(astText(document.meta.summary))).toBe('Intro')
-        const disabled = await parseMarkdown(source, { plugins: markdownPlugins({ summary: { enabled: false } }, url) })
+        const disabled = await parseMarkdown(source, {
+            plugins: await markdownPlugins({ summary: { enabled: false } }, url),
+        })
         expect(disabled.meta.summary).toBeUndefined()
         const override = await parseMarkdown(source, {
-            plugins: markdownPlugins(
+            plugins: await markdownPlugins(
                 {
                     plugins: [
                         {
@@ -264,16 +268,16 @@ describe('internal Markdown asset contracts', () => {
     it('preserves content source identity, nested fields, frontmatter and document output shape', async () => {
         const body = '---\ntitle: Frontmatter\n---\nIntro\n\n<!-- more -->\n\n![a](site-admin://asset/a)'
         const entry = {
-            data: { body, sections: [{ body }] },
+            defaultLocale: '',
             id: 'entry',
             locale: '',
             model: 'posts',
             path: '/posts/post',
             publishedAt: '2026-01-01',
             revisionId: 'revision',
-            slug: 'post',
+            data: { slug: 'post', body, sections: [{ body }] },
         }
-        const content = createMarkdownContent(
+        const content = await createMarkdownContent(
             'posts',
             { route: true, fields: { body: markdown(), sections: array(object({ body: markdown() })) } },
             [entry],
@@ -281,7 +285,7 @@ describe('internal Markdown asset contracts', () => {
             url,
         )
         const [item] = await content.list()
-        expect(item?.path).toBe('/posts/post')
+        expect(item?.path).toBe('/posts/entry')
         expect(item?.data).toMatchObject({
             _siteAdmin: { id: 'entry', revisionId: 'revision', path: '/posts/post' },
             body: { frontmatter: { title: 'Frontmatter' }, meta: { summary: [['p', {}, 'Intro']] } },
@@ -289,6 +293,6 @@ describe('internal Markdown asset contracts', () => {
         const data = item!.data as { body: { nodes: Node[] }; sections: { body: { nodes: Node[] } }[] }
         expect(elements(data.body.nodes, 'img')[0]?.[1].src).toBe(url('a'))
         expect(elements(data.sections[0]!.body.nodes, 'img')[0]?.[1].src).toBe(url('a'))
-        expect(entry.data).toEqual({ body, sections: [{ body }] })
+        expect(entry.data).toEqual({ slug: 'post', body, sections: [{ body }] })
     })
 })

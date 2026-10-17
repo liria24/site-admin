@@ -1,10 +1,17 @@
+export interface IndexedReference {
+    locale?: string
+    id: string
+    path: string
+    position: number
+}
+
 import type { AssetRecord, EntryRecord, IncomingReference, RevisionRecord } from './server/types'
 import { SiteAdminError } from './errors'
 
 export const searchQueryLimit = 512
 export const searchQuery = (
     value: string | undefined,
-    lowercase: (text: string) => string = (text) => text.toLocaleLowerCase(),
+    lowercase: (text: string) => string = (text) => text.toLowerCase(),
 ): string | undefined => {
     const validate = (text: string) => {
         let count = 0
@@ -22,7 +29,7 @@ export const searchQuery = (
 }
 
 /** Storage data uses domain names and values, never SQL, ORM columns or encoded JSON. */
-export type StorageEntryState = Omit<EntryRecord, 'data' | 'revisionId' | 'slug'>
+export type StorageEntryState = Omit<EntryRecord, 'data' | 'revisionId' | 'locale' | 'translations'>
 export type StorageEntryPatch = Partial<
     Pick<
         StorageEntryState,
@@ -36,14 +43,14 @@ export type StorageEntryPatch = Partial<
     >
 >
 export interface StoragePublishedEntry {
+    defaultLocale: string
+    translations: import('./i18n').Translations
     data: Record<string, unknown>
     id: string
     locale: string
     model: string
     publishedAt: string
     revisionId: string
-    slug: string
-    translationGroup: string
 }
 export interface StorageRoute {
     entryId: string
@@ -63,13 +70,13 @@ export type StorageCondition =
     | { kind: 'noRequiredPublicReferences'; id: string; models: readonly string[] }
     | { kind: 'noRetainedRelations'; id: string }
 export type StorageRouteChange =
-    | { kind: 'remove'; entryId: string; kinds?: readonly StorageRoute['kind'][]; path?: string }
-    | { kind: 'retargetHistory'; entryId: string; path: string | null; status: number }
+    | { kind: 'remove'; entryId: string; kinds?: readonly StorageRoute['kind'][]; path?: string; locale?: string }
+    | { kind: 'retargetHistory'; entryId: string; path: string | null; status: number; locale?: string }
     | { kind: 'put'; route: StorageRoute }
 export interface StorageRevisionCandidate extends RevisionRecord {
     model: string
-    assets: readonly { id: string; path: string; position: number }[]
-    relations: readonly { id: string; path: string; position: number; required: boolean }[]
+    assets: readonly { id: string; path: string; position: number; locale?: string }[]
+    relations: readonly { id: string; path: string; position: number; required: boolean; locale?: string }[]
 }
 
 /** All conditions are evaluated against the same pre-commit state. No partial effects on conflict. */
@@ -80,6 +87,7 @@ export interface StorageContentCommit {
     routes?: readonly StorageRouteChange[]
     updates?: readonly { id: string; patch: StorageEntryPatch }[]
     delete?: string
+    prune?: readonly string[]
     publicGeneration?: boolean
 }
 export interface StorageEntryFilter {
@@ -114,13 +122,21 @@ export interface StorageContent {
         },
     ): Promise<IncomingReference[]>
     hasRetainedRelations(id: string): Promise<boolean>
-    published(filter?: {
-        model?: string
-        ids?: readonly string[]
-        locale?: string
-        translationGroups?: readonly string[]
-        key?: string
-    }): Promise<StoragePublishedEntry[]>
+    published(filter?: { model?: string; ids?: readonly string[]; locale?: string }): Promise<StoragePublishedEntry[]>
+    pagePublished(
+        filter: { model: string; locale?: string },
+        page: { limit: number; offset: number },
+    ): Promise<{ items: StoragePublishedEntry[]; total: number }>
+    publicTranslations(ids: readonly string[]): Promise<
+        Array<{
+            entryId: string
+            locale: string
+            data: Record<string, unknown>
+            assets: IndexedReference[]
+            relations: IndexedReference[]
+        }>
+    >
+    rebuildSearch(): Promise<{ indexed: number }>
     routes(filter?: {
         entryId?: string
         kinds?: readonly StorageRoute['kind'][]

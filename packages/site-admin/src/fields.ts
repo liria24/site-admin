@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
+import type { Localized } from './presentation'
 
 export interface AssetValue {
     id: string
@@ -13,9 +14,11 @@ export interface PublicAsset extends AssetValue {
 }
 
 export interface BaseFieldOptions<Value> {
+    /** Store locale overrides as children of the original entry's revision. */
+    i18n?: boolean
     default?: Value
-    description?: string
-    label?: string
+    description?: Localized<string>
+    label?: Localized<string>
     required?: boolean
     validate?: StandardSchemaV1<unknown, Value>
 }

@@ -6,13 +6,13 @@ import { unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/drizzle'
+import type { DrizzleSiteAdminDatabase } from '../packages/site-admin/src/adapters/database'
 const queryRows = (database: DrizzleSiteAdminDatabase, sql: string) => database.query(sql)
 const runAtomic = (database: DrizzleSiteAdminDatabase, statements: Parameters<DrizzleSiteAdminDatabase['atomic']>[0]) =>
     database.atomic(statements)
 import { createMigratedTestAdmin, testAdapter } from './migrate'
 import { defineSiteAdminConfig, text } from '../packages/site-admin/src'
-import { drizzleAdapter, type DrizzleConnection } from '../packages/site-admin/src/adapters/drizzle'
+import { createD1Database, type DrizzleConnection } from '../packages/site-admin/src/adapters/database'
 import {
     queryRows as nativeQueryRows,
     runAtomic as nativeRunAtomic,
@@ -33,10 +33,10 @@ describe('atomic database execution', () => {
         const reader = createDatabase(nodeSqlite({ path })),
             writer = createDatabase(nodeSqlite({ path }))
         databases.push(reader, writer)
-        const config = defineSiteAdminConfig({ models: { posts: { fields: { title: text() } } } })
+        const config = defineSiteAdminConfig({ models: { posts: { fields: { slug: text(), title: text() } } } })
         const core = await createMigratedTestAdmin({ config, database: reader })
-        const entry = await core.createEntry('posts', { data: { title: 'Reader snapshot' } })
-        await core.createEntry('posts', { data: { title: 'Other' } })
+        const entry = await core.createEntry('posts', { data: { slug: 'reader-snapshot', title: 'Reader snapshot' } })
+        await core.createEntry('posts', { data: { slug: 'other', title: 'Other' } })
         const storage = (await testAdapter(reader, config)).bind(config)
         await storage.pageEntries({ q: 'reader' }, { limit: 1, offset: 0 })
         const nativeReader = (await reader.getInstance()) as import('node:sqlite').DatabaseSync
@@ -79,7 +79,7 @@ describe('atomic database execution', () => {
         expect(statements).toEqual(['BEGIN IMMEDIATE', 'COMMIT'])
     })
     it('rejects connections without an atomic native client', () => {
-        expect(() => drizzleAdapter({ $client: {}, insert: () => undefined }, { schema: {} })).toThrow('transactional')
+        expect(() => createD1Database({} as Parameters<typeof createD1Database>[0], {})).toThrow('Void D1')
     })
 
     it('serializes reads behind a transaction on the same Database instance', async () => {

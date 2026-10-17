@@ -1,23 +1,16 @@
+import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import {
-    array,
-    createSiteAdminDescriptor,
-    datetime,
-    defineSiteAdminConfig,
-    number,
-    object,
-    relation,
-    text,
-    url,
-} from '../packages/site-admin/src'
-import { useSiteAdminForm } from '../packages/site-admin/src/form'
+import { array, datetime, defineSiteAdminConfig, number, object, relation, text, url } from '../packages/site-admin/src'
+import { useEntryForm } from '../packages/site-admin/src/form'
+import { modelFixture } from './model-fixture'
 import { validateModelData } from '../packages/site-admin/src/validation'
 
 const config = defineSiteAdminConfig({
     models: {
         posts: {
             fields: {
+                slug: text(),
                 count: number({ integer: true, min: 1, max: 5 }),
                 link: url(),
                 at: datetime(),
@@ -27,7 +20,7 @@ const config = defineSiteAdminConfig({
                 invalidPattern: text({ pattern: '[' }),
             },
         },
-        parents: { fields: {} },
+        parents: { fields: { slug: text() } },
     },
 })
 const descriptor = createSiteAdminDescriptor(config).models.posts!
@@ -52,15 +45,11 @@ describe('shared built-in form/server validation', () => {
             const fetch = vi.fn(async () =>
                 Response.json({ id: 'unused', model: 'posts', version: 1, sortOrder: null }),
             )
-            const controller = useSiteAdminForm<Record<string, unknown>>({
-                modelName: 'posts',
-                descriptor,
-                defaultValues: data,
-                fetch,
-            })
-            await controller.form.handleSubmit()
+            const fixture = modelFixture(fetch, null, {}, { model: 'posts', descriptor })
+            const controllerState = useEntryForm(fixture.resource, { defaultValues: data })
+            await controllerState.form.handleSubmit()
             expect(fetch).not.toHaveBeenCalled()
-            expect(JSON.stringify(controller.form.state.errors)).toContain(message)
+            expect(JSON.stringify(controllerState.form.state.errors)).toContain(message)
             if ('nested' in data) expect(result.issues[0]?.path).toBe('nested.links.0')
         },
     )
@@ -74,13 +63,9 @@ describe('shared built-in form/server validation', () => {
         }
         expect(await validateModelData(config.models.posts, data)).toEqual({ data, issues: [] })
         const fetch = vi.fn(async () => Response.json({ id: 'saved', model: 'posts', version: 1, sortOrder: null }))
-        const controller = useSiteAdminForm<Record<string, unknown>>({
-            modelName: 'posts',
-            descriptor,
-            defaultValues: data,
-            fetch,
-        })
-        await controller.form.handleSubmit()
+        const fixture = modelFixture(fetch, null, {}, { model: 'posts', descriptor })
+        const controllerState = useEntryForm(fixture.resource, { defaultValues: data })
+        await controllerState.form.handleSubmit()
         expect(fetch).toHaveBeenCalledOnce()
         const transformed = { fields: { count: number({ integer: true, validate: z.number().transform(() => 1.5) }) } }
         expect(await validateModelData(transformed, { count: 2 })).toEqual({

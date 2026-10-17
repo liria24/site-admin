@@ -8,6 +8,7 @@ const config = defineSiteAdminConfig({
     models: {
         posts: {
             fields: {
+                slug: text(),
                 title: text({ required: true }),
                 cover: image(),
                 body: markdown(),
@@ -30,7 +31,7 @@ const config = defineSiteAdminConfig({
                 return { title, image: false }
             },
         },
-        private: { fields: { secret: text() }, public: false },
+        private: { fields: { slug: text(), secret: text() }, public: false },
     },
 })
 const required: true = config.models.posts.fields.title.required

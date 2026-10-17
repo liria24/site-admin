@@ -15,13 +15,11 @@ describe('environment-resolved schema CLI', () => {
             await writeFile(
                 resolve(path, 'site-admin.config.ts'),
                 `import { text } from ${JSON.stringify(fields)}
-import { getProvider } from '#files-sdk/providers'
+import { getProvider } from 'files-sdk/providers'
 if (!getProvider('memory')) throw new Error('CLI native Files alias failed')
 export default {
-  database: () => { throw new Error('The CLI must not invoke the application database') },
   models: { posts: { fields: { title: text() } } },
   $production: {
-    database: () => { throw new Error('The CLI must not resolve a production database') },
     models: { posts: { fields: { title: text({ required: true }) } } },
   },
   $env: { preview: {
@@ -38,7 +36,7 @@ export default {
                     encoding: 'utf8',
                 })
             expect(run('development')).toContain('no database was modified')
-            expect(await readFile(resolve(path, 'schema.ts'), 'utf8')).not.toContain('text("field_title").notNull()')
+            expect(await readFile(resolve(path, 'db/schema.ts'), 'utf8')).not.toContain('text("field_title").notNull()')
             run('production', ['--out', 'schema-production.ts'])
             expect(await readFile(resolve(path, 'schema-production.ts'), 'utf8')).toContain(
                 'text("field_title").notNull()',
@@ -55,15 +53,13 @@ export default {
             expect(await readFile(resolve(path, 'explicit/schema.ts'), 'utf8')).toContain(
                 'text("field_title").notNull()',
             )
-            const authAdapter = resolve(
-                'packages/site-admin/node_modules/@better-auth/drizzle-adapter/dist/relations-v2/index.mjs',
-            ).replaceAll('\\', '/')
-            const authSource = (usePlural: boolean) =>
-                `import { drizzleAdapter } from ${JSON.stringify(authAdapter)}\nexport default { database: drizzleAdapter({}, { provider: 'sqlite', usePlural: ${usePlural} }) }\n`
-            await writeFile(resolve(path, 'auth.config.ts'), authSource(false))
+            await writeFile(resolve(path, 'auth.config.ts'), 'export default {}')
             run('production', ['--auth', 'auth.config.ts', '--out', 'schema-auth.ts'])
             expect(await readFile(resolve(path, 'schema-auth.ts'), 'utf8')).toContain('export const user = sqliteTable')
-            await writeFile(resolve(path, 'auth.config.ts'), authSource(true))
+            await writeFile(
+                resolve(path, 'nuxt.config.ts'),
+                "export default { auth: { schema: { usePlural: true, casing: 'snake_case' } } }",
+            )
             run('production', ['--auth', 'auth.config.ts', '--out', 'schema-auth-plural.ts'])
             expect(await readFile(resolve(path, 'schema-auth-plural.ts'), 'utf8')).toContain(
                 'export const users = sqliteTable',

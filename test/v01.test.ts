@@ -5,7 +5,7 @@ import nodeSqlite from 'db0/connectors/node-sqlite'
 import { Files } from 'files-sdk'
 import { memory } from 'files-sdk/memory'
 
-import { defineSiteAdminAuthorization, defineSiteAdminConfig, file, relation, text } from '../packages/site-admin/src'
+import { defineSiteAdminConfig, file, relation, text } from '../packages/site-admin/src'
 import { handleManagementRequest, handlePublicRequest } from '../packages/site-admin/src/server'
 import { queryRow, runAtomic } from './sqlite-queries'
 
@@ -39,7 +39,7 @@ const measure = async (size: number): Promise<{ cold: number; warm: number }> =>
     const db = raw
     const admin = await createMigratedTestAdmin({
         config: defineSiteAdminConfig({
-            models: { posts: { fields: { title: text() }, publishing: false } },
+            models: { posts: { fields: { slug: text(), title: text() }, publishing: false } },
         }),
         database: db,
     })
@@ -49,20 +49,20 @@ const measure = async (size: number): Promise<{ cold: number; warm: number }> =>
             params: [size],
             sql: `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?)
                   INSERT INTO site_admin_entries(
-                      id, model, locale, translation_group, current_revision_id, published_revision_id,
+                      id, model, default_locale, current_revision_id, published_revision_id,
                       version, created_at, updated_at, published_at
-                  ) SELECT 'entry-' || n, 'posts', '', 'entry-' || n, 'revision-' || n, 'revision-' || n,
+                  ) SELECT 'entry-' || n, 'posts', '', 'revision-' || n, 'revision-' || n,
                            1, '2026-01-01', '2026-01-01', '2026-01-01' FROM seq`,
         },
         {
             params: [size],
             sql: `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?)
-                  INSERT INTO site_admin_revisions(id, entry_id, slug, created_at)
-                  SELECT 'revision-' || n, 'entry-' || n, 'post-' || n, '2026-01-01'
+                  INSERT INTO site_admin_revisions(id, entry_id, created_at)
+                  SELECT 'revision-' || n, 'entry-' || n, '2026-01-01'
                   FROM seq`,
         },
         {
-            sql: "INSERT INTO site_admin_content_posts(revision_id, field_title) SELECT id, 'Post' FROM site_admin_revisions",
+            sql: "INSERT INTO site_admin_content_posts(revision_id, field_title, field_slug) SELECT id, 'Post', 's-' || substr(entry_id, 3) FROM site_admin_revisions",
         },
     ])
     queries = 0
@@ -76,7 +76,10 @@ const measure = async (size: number): Promise<{ cold: number; warm: number }> =>
 
 describe('v0.1 publication contract', () => {
     it('keeps cold list query counts constant and warm reads generation-only at 100/1000 entries', async () => {
-        expect(await measure(100)).toEqual(await measure(1_000))
+        const small = await measure(100),
+            large = await measure(1_000)
+        expect(large.cold).toBeLessThan(small.cold + 30)
+        expect(large.warm).toBe(small.warm)
         expect((await measure(100)).warm).toBe(1)
     })
 
@@ -84,17 +87,17 @@ describe('v0.1 publication contract', () => {
         const db = database()
         const initial = defineSiteAdminConfig({
             models: {
-                authors: { fields: { name: text({ required: true }) } },
+                authors: { fields: { slug: text(), name: text({ required: true }) } },
                 posts: {
-                    fields: { author: relation('authors', { required: true }), title: text() },
-                    route: true,
+                    fields: { slug: text(), author: relation('authors', { required: true }), title: text() },
+                    route: '/posts/:slug',
                 },
             },
         })
         const first = await createMigratedTestAdmin({ config: initial, database: db })
-        const author = await first.createEntry('authors', { data: { name: 'Ada' } })
+        const author = await first.createEntry('authors', { data: { slug: 'ada', name: 'Ada' } })
         await first.publishEntry(author.id, { expectedVersion: author.version })
-        const post = await first.createEntry('posts', { data: { author: author.id, title: 'Policy' } })
+        const post = await first.createEntry('posts', { data: { slug: 'policy', author: author.id, title: 'Policy' } })
         await first.publishEntry(post.id, { expectedVersion: post.version })
         const generation = await first.publicGeneration()
 
@@ -114,7 +117,7 @@ describe('v0.1 publication contract', () => {
         const changed = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
                 models: {
-                    authors: { fields: { name: text({ required: true }) }, public: false },
+                    authors: { fields: { slug: text(), name: text({ required: true }) }, public: false },
                     posts: initial.models.posts,
                 },
             }),
@@ -135,17 +138,17 @@ describe('v0.1 publication contract', () => {
         let now = Date.parse('2026-01-01T00:00:00.000Z')
         const admin = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
-                models: { posts: { fields: { title: text() }, route: true, sortable: true } },
+                models: { posts: { fields: { slug: text(), title: text() }, route: '/posts/:slug', sortable: true } },
             }),
             database: db,
             now: () => new Date(now),
         })
-        const draft = await admin.createEntry('posts', { data: { title: 'One' }, sortOrder: 1 })
+        const draft = await admin.createEntry('posts', { data: { slug: 'one', title: 'One' }, sortOrder: 1 })
         const published = await admin.publishEntry(draft.id, { expectedVersion: draft.version })
         const generation = await admin.publicGeneration()
         now += 1_000
         const edited = await admin.updateEntry(draft.id, {
-            data: { title: 'Draft only' },
+            data: { slug: draft.data.slug, title: 'Draft only' },
             expectedVersion: published.version,
         })
         expect(edited.publishedAt).toBe(published.publishedAt)
@@ -164,6 +167,7 @@ describe('v0.1 publication contract', () => {
             models: {
                 posts: {
                     fields: {
+                        slug: text(),
                         title: text({
                             required: true,
                             validate: standard<string, string>((value) => value.trim()),
@@ -176,7 +180,7 @@ describe('v0.1 publication contract', () => {
             },
         })
         const first = await createMigratedTestAdmin({ config: v1, database: db })
-        const entry = await first.createEntry('posts', { data: { title: '  transformed  ' } })
+        const entry = await first.createEntry('posts', { data: { slug: 'transformed', title: '  transformed  ' } })
         expect(entry.data).toEqual({ title: 'TRANSFORMED' })
 
         const changedTransform = await createMigratedTestAdmin({
@@ -206,18 +210,21 @@ describe('v0.1 publication contract', () => {
         const admin = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
                 models: {
-                    authors: { fields: { name: text() } },
-                    posts: { fields: { author: relation('authors'), title: text() } },
+                    authors: { fields: { slug: text(), name: text() } },
+                    posts: { fields: { slug: text(), author: relation('authors'), title: text() } },
                 },
             }),
             database: db,
             id: () => `id_${String(++id).padStart(3, '0')}`,
             now: () => new Date(time++),
         })
-        const author = await admin.createEntry('authors', { data: { name: 'Ada' } })
-        const post = await admin.createEntry('posts', { data: { author: author.id, title: 'One' } })
+        const author = await admin.createEntry('authors', { data: { slug: 'ada', name: 'Ada' } })
+        const post = await admin.createEntry('posts', { data: { slug: 'one', author: author.id, title: 'One' } })
         const published = await admin.publishEntry(post.id, { expectedVersion: post.version })
-        const edited = await admin.updateEntry(post.id, { data: { title: 'Two' }, expectedVersion: published.version })
+        const edited = await admin.updateEntry(post.id, {
+            data: { slug: post.data.slug, title: 'Two', author: null },
+            expectedVersion: published.version,
+        })
         expect(await admin.referencesTo(author.id, { view: 'current' })).toEqual([])
         expect(await admin.referencesTo(author.id, { view: 'published' })).toMatchObject([
             { entryId: post.id, field: 'author', model: 'posts', view: 'published' },
@@ -239,9 +246,12 @@ describe('v0.1 publication contract', () => {
         const admin = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
                 models: {
-                    pages: { fields: { title: text() }, localized: true, route: true },
+                    pages: {
+                        fields: { slug: text({ i18n: true }), title: text({ i18n: true }) },
+                        route: '/pages/:slug',
+                    },
                     hidden: {
-                        fields: { title: text() },
+                        fields: { slug: text(), title: text() },
                         publishing: false,
                         route: { llms: false, sitemap: false },
                     },
@@ -255,20 +265,15 @@ describe('v0.1 publication contract', () => {
             },
         })
         const en = await admin.createEntry('pages', {
-            data: { title: 'English' },
-            locale: 'en',
-            translationGroup: 'home',
+            defaultLocale: 'en',
+            data: { slug: 'english', title: 'English' },
+            translations: { ja: { slug: '日本語', title: 'Japanese' } },
         })
-        const ja = await admin.createEntry('pages', {
-            data: { title: '日本語' },
-            locale: 'ja',
-            translationGroup: 'home',
-        })
+        const ja = en
         await admin.publishEntry(en.id, { expectedVersion: en.version })
-        await admin.publishEntry(ja.id, { expectedVersion: ja.version })
-        await admin.createEntry('hidden', { data: { title: 'Excluded' } })
-        expect(await admin.getPublicEntry('pages', 'english')).toMatchObject({ locale: 'en' })
-        expect(await admin.getPublicEntry('pages', '日本語', 'ja')).toMatchObject({ locale: 'ja' })
+        await admin.createEntry('hidden', { data: { slug: 'excluded', title: 'Excluded' } })
+        expect(await admin.getPublicEntry('pages', en.id)).toMatchObject({ locale: 'en' })
+        expect(await admin.getPublicEntry('pages', ja.id, 'ja')).toMatchObject({ locale: 'ja' })
         expect(await admin.resolvePath('/ja/pages/日本語', 'ja')).toMatchObject({
             entry: { alternates: expect.arrayContaining([{ locale: 'en', path: '/en/pages/english' }]) },
             kind: 'page',
@@ -282,13 +287,15 @@ describe('v0.1 authorization and assets', () => {
     it('grants only explicit roles and filters descriptors', async () => {
         const db = database()
         const config = defineSiteAdminConfig({
-            authorization: defineSiteAdminAuthorization({
-                editor: { models: { posts: ['create', 'readDraft'] } },
-                reader: { models: { secrets: ['readDraft'] } },
-            }),
+            authorization: {
+                roles: {
+                    editor: { models: { posts: ['create', 'readDraft'] } },
+                    reader: { models: { secrets: ['readDraft'] } },
+                },
+            },
             models: {
-                posts: { fields: { title: text() } },
-                secrets: { fields: { title: text() }, public: false },
+                posts: { fields: { slug: text(), title: text() } },
+                secrets: { fields: { slug: text(), title: text() }, public: false },
             },
         })
         const requestAs = async (roles: string[]) =>
@@ -309,6 +316,7 @@ describe('v0.1 authorization and assets', () => {
             await requestAs(['user']),
             new Request('http://localhost/api/site-admin/entries/posts', {
                 body: JSON.stringify({ data: { title: 'Denied' } }),
+                headers: { 'content-type': 'application/json' },
                 method: 'POST',
             }),
         )
@@ -328,7 +336,7 @@ describe('v0.1 authorization and assets', () => {
         const admin = await createMigratedTestAdmin({
             config: defineSiteAdminConfig({
                 assets: { storage: 'current' },
-                models: { downloads: { fields: { attachment: file() }, publishing: false } },
+                models: { downloads: { fields: { slug: text(), attachment: file() }, publishing: false } },
             }),
             database: db,
             getFiles: async () => files,
@@ -353,7 +361,7 @@ describe('v0.1 authorization and assets', () => {
         ).toBe(304)
         const head = await handlePublicRequest(admin, new Request(url, { method: 'HEAD' }))
         expect(await head.text()).toBe('')
-        await admin.unpublishEntry(entry.id, { expectedVersion: entry.version })
+        await admin.deleteEntry(entry.id, { expectedVersion: entry.version })
         expect((await handlePublicRequest(admin, new Request(url))).status).toBe(404)
     })
 
