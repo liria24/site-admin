@@ -19,7 +19,7 @@ ${options.auth ? "import { useUserSession } from '#imports'" : ''}
 export const siteAdminAsyncData = createUseAsyncData()
 export const siteAdminAiFetch = createUseFetch(siteAdminAiFetchOptions)
 export const { useContent, ${options.aiActions ? 'useAi, ' : ''}siteAdminPublicClientOptions, siteAdminManagementClientOptions, useAdminClient, useSiteAdminRoute, siteAdminAttachAsyncData, useSiteAdminAuthScope, siteAdminManagementKey, createNuxtSiteAdminManagementClient, useSiteAdminModels, siteAdminReadModels, useAdminEntries, useAdminEntry, useAdminForm } = createSiteAdminComposables(${JSON.stringify(options)}, siteAdminAsyncData, siteAdminAiFetch${options.auth ? ', useUserSession' : ''})
-export type { UseAiOptions, SiteAdminModelOptions, SiteAdminLocaleOptions, SiteAdminBatchRequest, SiteAdminBatchResult } from '@liria24/site-admin/internal/runtime/composables'
+export type { UseAiOptions, SiteAdminModelOptions, SiteAdminFormOptions, SiteAdminLocaleOptions, SiteAdminBatchRequest, SiteAdminBatchResult } from '@liria24/site-admin/internal/runtime/composables'
 `
 
 /** A config path is used only by TypeScript; the app never loads its runtime code. */

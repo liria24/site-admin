@@ -11,13 +11,27 @@ import {
 } from './client'
 import type { EntryPrepareContext } from './model'
 import { presentAdminValue, siteAdminAsset } from './management-assets'
-import type { ModelDescriptor } from './descriptor'
+import type { ModelDescriptor, SiteAdminDescriptor } from './descriptor'
 import type { TranslationInput } from './i18n'
 
 type Target = { id: string; version: number }
 type Shape<Models> = { [Name in keyof Models]: Record<string, unknown> }
 type NameOf<Models> = Extract<keyof Models, string>
 type Input<Data> = { data?: Partial<Data>; translations?: TranslationInput<Data>; defaultLocale?: string }
+
+export const siteAdminModels = (descriptor: SiteAdminDescriptor) =>
+    Object.entries(descriptor.models).map(([name, model]) => ({
+        name,
+        meta: (model.meta ?? { label: name, plural: name }) as import('./client').SiteAdminModelMeta,
+        fields: model.fields,
+        displayFields: model.displayFields,
+        features: {
+            publishing: model.publishing,
+            scheduling: model.scheduling,
+            revisions: model.revisions,
+            sortable: model.sortable,
+        },
+    }))
 
 /** Imperative operations have no Vue lifetime or reactive state. */
 export const createAdminClient = <Models extends Shape<Models> = SiteAdminManagementModels>(
@@ -88,17 +102,7 @@ export const createAdminClient = <Models extends Shape<Models> = SiteAdminManage
     }
 
     return {
-        models: async () =>
-            Object.entries((await descriptors()).models).map(([name, model]) => ({
-                name,
-                meta: (model.meta ?? { label: name, plural: name }) as import('./client').SiteAdminModelMeta,
-                features: {
-                    publishing: model.publishing,
-                    scheduling: model.scheduling,
-                    revisions: model.revisions,
-                    sortable: model.sortable,
-                },
-            })),
+        models: async () => siteAdminModels(await descriptors()),
         entries: {
             list: async <Name extends NameOf<Models>>(model: Name, options?: ManagementListOptions) => {
                 const [page, descriptor] = await Promise.all([client.listEntries(model, options), describe(model)])

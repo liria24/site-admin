@@ -102,7 +102,7 @@ Native AsyncData options, transforms, status and errors are supported. Locale re
 const route = useRoute()
 const pendingReview = ref(false)
 const uploadedName = ref('')
-const { form, data, meta, error, operation, draft, publish, schedule, upload } = await useAdminForm('posts', {
+const { form, data, meta, error, status, operation, draft, publish, schedule, upload } = useAdminForm('posts', {
     id: () => route.params.id as string | undefined, // omit for a new entry
     onBeforeSubmit: ({ operation }) => {
         if (operation !== 'save' && pendingReview.value) throw new Error('Review the suggestion first.')
@@ -116,16 +116,20 @@ const { form, data, meta, error, operation, draft, publish, schedule, upload } =
 
 <template>
     <form @submit.prevent="form.handleSubmit()">
-        <form.Field name="title" v-slot="{ field }">
-            <input :value="field.state.value" @input="field.handleChange($event.target.value)" />
-        </form.Field>
-        <button type="submit">Save draft</button>
-        <button type="button" @click="publish()">Publish</button>
+        <fieldset :disabled="status === 'idle' || status === 'pending' || operation !== null">
+            <form.Field name="title" v-slot="{ field }">
+                <input :value="field.state.value" @input="field.handleChange($event.target.value)" />
+            </form.Field>
+            <button type="submit">Save draft</button>
+            <button type="button" @click="publish()">Publish</button>
+        </fieldset>
     </form>
 </template>
 ```
 
-`upload(field, files)` updates the field and returns uploaded assets. `schedule(date)` accepts a `Date` or date string. `draft.ensure()` persists a draft without firing `onSuccess`. Hooks share `error`; `operation` is `save | publish | schedule | upload | null`. Unsaved input and active operations enable `beforeunload`; use `beforeUnload: () => otherWorkIsRunning.value` to include app work, or `false` to opt out.
+`useAdminForm` exposes its handles immediately; `await useAdminForm(...)` waits for the initial load. Pass a stable `instance` string or getter for independent editors of the same model/entry. Instances separate input, saved IDs, errors and operations while sharing descriptors and clients. Reopening an instance restores its session draft; changing instance selects another draft, and authentication changes clear the previous actor's drafts. Explicit instances also retain a newly saved ID, so reopening does not create a duplicate. Omit `instance` for the default model/entry draft.
+
+`upload(field, files)` updates the field and returns uploaded assets. It accepts native TanStack paths such as `sections[0].image`, including nested galleries. Array rows must exist; if a target row changes during an upload, the result is not applied. `onUpload.field` uses the same path type. Disable array editing while uploading. `schedule(date)` accepts a `Date` or date string. `draft.ensure()` persists a draft without firing `onSuccess`. Hooks share `error`; `operation` is `save | publish | schedule | upload | null`. Unsaved input and active operations enable `beforeunload`; use `beforeUnload: () => otherWorkIsRunning.value` to include app work, or `false` to opt out.
 
 ```ts
 // app/plugins/prepare-content.ts — application-owned slug policy
@@ -147,6 +151,7 @@ A committed write remains committed if asset synchronization fails: its receipt 
 
 ```ts
 const admin = useAdminClient() // server: useAdmin(event)
+const models = await admin.models() // authorized name, meta, features, fields and displayFields
 let post = await admin.entries.create('posts', {
     defaultLocale: 'ja',
     data: { slug: 'hello', title: 'こんにちは', body: '日本語本文' },

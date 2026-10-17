@@ -110,6 +110,7 @@ export interface SiteAdminModelContext<Data extends Record<string, unknown>> {
     locale: MaybeRefOrGetter<string | undefined>
     client: SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     drafts: Record<string, SiteAdminSessionDraft>
+    instance?: MaybeRefOrGetter<string | undefined>
     prepare?: (context: EntryPrepareContext<Data>) => void | Promise<void>
     receipt?: SiteAdminEntryMutation<Data>
     report: (error: unknown, committed?: boolean) => SiteAdminModelError
@@ -174,7 +175,7 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
                     }
                     return result
                 } catch (cause) {
-                    if (identity !== toValue(input.identity)) throw cause
+                    if (controller.signal.aborted || identity !== toValue(input.identity)) throw cause
                     const receipt = (cause as { receipt?: SiteAdminFailure['receipt'] }).receipt
                     if (receipt) {
                         if (receipt.deleted) {
@@ -266,7 +267,10 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
             )
         const entry =
             'data' in result
-                ? { ...result, data: presentSiteAdminData<Data>(getDescriptor(), result.data, input.client.assetUrl) }
+                ? {
+                      ...result,
+                      data: presentSiteAdminData<Data>(getDescriptor(), result.data, input.client.assetUrl),
+                  }
                 : result
         context.receipt = entry
         const previous = state.data.value
@@ -491,7 +495,11 @@ export const createSiteAdminModel = <Data extends Record<string, unknown>>(
                 try {
                     return await input.client.setSortOrders(
                         input.model,
-                        entries.map(({ id, version }, sortOrder) => ({ id, expectedVersion: version, sortOrder })),
+                        entries.map(({ id, version }, sortOrder) => ({
+                            id,
+                            expectedVersion: version,
+                            sortOrder,
+                        })),
                     )
                 } catch (error) {
                     state.data.value = previous

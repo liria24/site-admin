@@ -1,5 +1,5 @@
 import type { RequestEvent } from 'nuxt/server'
-import type { createAdminClient } from './admin-client'
+import { siteAdminModels, type createAdminClient } from './admin-client'
 import type {
     SiteAdminNamedAiActions,
     SiteAdminFormModels,
@@ -117,17 +117,7 @@ export const useAdmin = (event?: RequestEvent, platformContext?: object): Server
         return admin.syncAssetCopies()
     }
     const api = {
-        models: async () =>
-            Object.entries((await raw.models()).models).map(([name, model]) => ({
-                name,
-                meta: model.meta ?? { label: name, plural: name },
-                features: {
-                    publishing: model.publishing,
-                    scheduling: model.scheduling,
-                    revisions: model.revisions,
-                    sortable: model.sortable,
-                },
-            })),
+        models: async () => siteAdminModels(await raw.models()),
         entries: {
             list: async <Model extends ModelName>(model: Model, options?: import('./client').ManagementListOptions) => {
                 const page = await forModel(model).listEntries(model, options)

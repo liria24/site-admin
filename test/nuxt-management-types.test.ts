@@ -48,6 +48,12 @@ declare module '#imports' {
 import { useAdminEntries, useAdminEntry, useAdminForm } from './client'
 const id = ref<string | null>('post')
 const post = await useAdminEntry('posts', id)
+const immediate = useAdminForm('posts', { instance: ref('one') })
+const immediateTitle: string = immediate.form.state.values.title
+immediate.upload('sections[0].attachment', new File(['x'], 'x.txt'))
+// @ts-expect-error Unknown nested field.
+immediate.upload('sections[0].missing', new File(['x'], 'x.txt'))
+void immediateTitle
 const { form } = await useAdminForm('posts', { id, onSuccess: (saved) => {
     const version: number = saved.version
     if ('data' in saved) { const title: string = saved.data.title; const url: string | undefined = saved.data.image?.url; void [title, url] }

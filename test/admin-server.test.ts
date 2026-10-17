@@ -77,3 +77,33 @@ it('loads definitions once for a list and fetches an imperative update target on
     expect(get).toHaveBeenCalledTimes(1)
     vi.restoreAllMocks()
 })
+
+it('exposes the same authorized field and display descriptors from server and browser clients', async () => {
+    const admin = createSiteAdmin({
+        config: defineSiteAdminConfig({
+            authorization: { roles: { editor: { models: { posts: ['readDraft'] } } } },
+            models: {
+                posts: {
+                    meta: { label: 'Articles' },
+                    displayFields: { title: 'heading' },
+                    fields: { heading: text({ required: true }) },
+                },
+                private: { fields: { secret: text() } },
+            },
+        }),
+        database: createMemoryDatabase(),
+        authorize: () => ({ id: 'editor', roles: ['editor'] }),
+    })
+    const request = new Request('https://site.test/models')
+    configureSiteAdminRuntime({ managementBase: '/manage', publicBase: '/content', getSiteAdmin: () => admin })
+    const browser = createAdminClient(createManagementOperations(() => admin, request))
+    const models = await browser.models()
+    expect(models.map((model) => model.name)).toEqual(['posts'])
+    expect(models[0]).toMatchObject({
+        meta: { label: 'Articles' },
+        displayFields: { title: 'heading' },
+        fields: { heading: { kind: 'text', required: true } },
+        features: { publishing: true },
+    })
+    expect(await useAdmin({ req: request } as RequestEvent).models()).toEqual(models)
+})

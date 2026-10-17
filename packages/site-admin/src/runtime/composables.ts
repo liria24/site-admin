@@ -145,6 +145,12 @@ export interface SiteAdminModelOptions extends SiteAdminLocaleOptions {
     lazy?: boolean
 }
 
+export type SiteAdminFormOptions<Data extends Record<string, unknown>> = SiteAdminModelOptions &
+    UseEntryFormOptions<Data> & {
+        id?: MaybeRefOrGetter<string | null | undefined>
+        instance?: MaybeRefOrGetter<string | undefined>
+    }
+
 type Handled<Actions> = {
     [Key in keyof Actions]: Actions[Key] extends (...args: infer Args) => Promise<infer Result>
         ? (...args: Args) => Promise<Result | undefined>
@@ -911,6 +917,7 @@ export const createSiteAdminComposables = (
         model: string | null,
         identity: unknown,
         locale?: string,
+        instance?: string,
     ): string =>
         'site-admin-management:' +
         JSON.stringify([
@@ -921,6 +928,7 @@ export const createSiteAdminComposables = (
             model,
             identity,
             locale ?? null,
+            ...(instance === undefined ? [] : [instance]),
         ])
 
     const siteAdminCachedEntryId = (data: unknown): string | undefined => {
@@ -1094,10 +1102,13 @@ export const createSiteAdminComposables = (
 
     const useAdminForm = <Name extends string>(
         model: ValidModel<Name>,
-        options: SiteAdminModelOptions &
-            UseEntryFormOptions<FormData<Name>> & { id?: MaybeRefOrGetter<string | null | undefined> } = {},
+        options: SiteAdminFormOptions<FormData<Name>> = {},
     ) => {
-        const resource = useAdminEntry(model, () => toValue(options.id) ?? null, options)
+        const resource = useAdminResource(
+            model,
+            { ...options, id: () => toValue(options.id) ?? null },
+            true,
+        ) as unknown as Promise<SingleResource<Name>> & SingleResource<Name>
         const editor = useEntryForm(resource, options)
         const result = {
             ...editor,
@@ -1109,12 +1120,19 @@ export const createSiteAdminComposables = (
             features: resource.features,
             display: resource.display,
         }
-        return resource.then(() => result)
+        return Object.assign(
+            resource.then(() => result),
+            result,
+        )
     }
 
     function useAdminResource(
         model: string,
-        options: SiteAdminModelOptions & { id?: MaybeRefOrGetter<string | null> },
+        options: SiteAdminModelOptions & {
+            id?: MaybeRefOrGetter<string | null>
+            instance?: MaybeRefOrGetter<string | undefined>
+        },
+        form = false,
     ) {
         const connection = siteAdminManagementClientOptions()
         const auth = useSiteAdminAuthScope(options.authScope, connection)
@@ -1129,8 +1147,8 @@ export const createSiteAdminComposables = (
         const single = options.id !== undefined
         const id = ref(single ? toValue(options.id!) : null)
         watch(
-            () => toValue(options.id),
-            (value) => {
+            [() => toValue(options.id), () => toValue(options.instance), auth],
+            ([value]) => {
                 id.value = value ?? null
             },
             { flush: 'sync' },
@@ -1153,13 +1171,22 @@ export const createSiteAdminComposables = (
             offset: (Math.max(1, page.value) - 1) * size,
         }))
         const identity = computed(() =>
-            siteAdminManagementKey(connection, auth.value, 'form', model, toValue(options.id) ?? null, locale.value),
+            siteAdminManagementKey(
+                connection,
+                auth.value,
+                'form',
+                model,
+                toValue(options.instance) === undefined
+                    ? (toValue(options.id) ?? null)
+                    : [toValue(options.id) ?? null, toValue(options.instance)],
+                locale.value,
+            ),
         )
         const key = computed(() =>
             siteAdminManagementKey(
                 connection,
                 auth.value,
-                single ? 'entry' : 'list',
+                single ? (form ? 'form-entry' : 'entry') : 'list',
                 model,
                 single
                     ? id.value
@@ -1167,6 +1194,7 @@ export const createSiteAdminComposables = (
                       ? { locale: locale.value, q: toValue(options.q), all: true }
                       : query.value,
                 locale.value,
+                form ? toValue(options.instance) : undefined,
             ),
         )
         let retained: unknown
@@ -1250,6 +1278,7 @@ export const createSiteAdminComposables = (
                 identity,
                 locale,
                 client,
+                instance: options.instance,
                 ...((options.defaultLocale ?? configuration.defaultLocale)
                     ? { defaultLocale: options.defaultLocale ?? configuration.defaultLocale! }
                     : {}),

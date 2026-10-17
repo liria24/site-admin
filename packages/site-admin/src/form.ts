@@ -1,6 +1,6 @@
 import { resolveTranslation } from './i18n'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import { useForm } from '@tanstack/vue-form'
+import { useForm, type DeepKeys } from '@tanstack/vue-form'
 import {
     computed,
     getCurrentInstance,
@@ -34,7 +34,7 @@ export interface UseEntryFormOptions<Data extends Record<string, unknown>> {
         defaultLocale?: string
     }) => void | Promise<void>
     onUpload?: (context: {
-        field: Extract<keyof Data, string>
+        field: DeepKeys<Data>
         files: File[]
         assets: import('./management-assets').SiteAdminAsset[]
     }) => void | Promise<void>
@@ -137,7 +137,10 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
         presentSiteAdminData<Data>(descriptor(), data, (id) => context.client.assetUrl(id))
     const clone = <Value>(value: Value): Value => JSON.parse(JSON.stringify(value)) as Value
     const serialize = (value: Data) => serializeSiteAdminData(descriptor(), value)
-    const currentEntry = () => (resource.data.value && 'id' in resource.data.value ? resource.data.value : null)
+    const currentEntry = () =>
+        resource.data.value && 'id' in resource.data.value && resource.data.value.id === context.id.value
+            ? resource.data.value
+            : null
     const initial = currentEntry()
     const draftKey = () => toValue(context.identity)
     let storedKey = draftKey()
@@ -258,6 +261,7 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
                         ? { defaultLocale: currentEntry()?.defaultLocale ?? context.defaultLocale! }
                         : {}),
                 })
+                lifetime.signal.throwIfAborted()
                 if (
                     resource.error.value?.data?.committed &&
                     resource.error.value.data.code === 'SITE_ADMIN_INVALID_RESPONSE'
@@ -319,7 +323,7 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
                 }
                 return result
             } catch (cause) {
-                if (identity !== draftKey()) return
+                if (lifetime.signal.aborted || identity !== draftKey()) return
                 if (context.receipt) {
                     entryId.value = context.receipt.id
                     version.value = context.receipt.version
@@ -352,7 +356,7 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
     const isDirty = computed(() => siteAdminSnapshot(serialize(values.value)) !== siteAdminSnapshot(baseline.value))
     function remember() {
         if (switching) return
-        if (!isDirty.value && !pendingPublication) {
+        if (!isDirty.value && !pendingPublication && !(toValue(context.instance) !== undefined && entryId.value)) {
             delete context.drafts[storedKey]
             return
         }
@@ -384,6 +388,7 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
             pendingPublication = restored?.pendingPublication ?? false
             entryId.value = restored?.entryId ?? null
             version.value = restored?.version ?? null
+            if (entryId.value) context.id.value = entryId.value
             const fallback = currentEntry() ? entryValue(currentEntry()!) : newDefaultValue()
             baseline.value = restored?.baseline ?? serialize(fallback)
             form.reset(restored ? present(restored.value) : fallback)
@@ -457,6 +462,38 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
     }
     let uploadSequence = 0
     const uploadIds = new WeakMap<File, number>()
+    const uploadTarget = (path: string) => {
+        const invalid = () =>
+            new SiteAdminClientError('SITE_ADMIN_INVALID_INPUT', 'Select an existing asset field.', 400)
+        if (!/^[^.[\]]+(?:\.[^.[\]]+|\[(?:0|[1-9]\d*)\])*$/u.test(path)) throw invalid()
+        let definition: FieldDescriptor | undefined
+        let fields = descriptor().fields
+        let value: unknown = form.state.values
+        const rows: unknown[] = []
+        for (const match of path.matchAll(/([^.[\]]+)|\[(\d+)\]/gu)) {
+            if (match[2] !== undefined) {
+                const index = Number(match[2])
+                if (definition?.kind !== 'array' || !Array.isArray(value) || !Object.hasOwn(value, index))
+                    throw invalid()
+                definition = definition.item
+                value = value[index]
+                rows.push(toRaw(value))
+            } else {
+                const key = match[1]!
+                if (['__proto__', 'prototype', 'constructor'].includes(key)) throw invalid()
+                if (definition) {
+                    if (definition.kind !== 'object') throw invalid()
+                    fields = definition.fields ?? {}
+                }
+                if (!Object.hasOwn(fields, key)) throw invalid()
+                definition = fields[key]
+                value = isRecord(value) && Object.hasOwn(value, key) ? value[key] : undefined
+            }
+            if (!definition) throw invalid()
+        }
+        if (!definition || !['image', 'images', 'file'].includes(definition.kind)) throw invalid()
+        return { definition, rows, value }
+    }
     const fieldPriority = (field: { key: string; kind: string }) =>
         field.key === (context.descriptor.value?.displayFields?.title ?? 'title')
             ? 0
@@ -489,10 +526,27 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
             }
             return publish(at.toISOString())
         },
-        upload: (field: Extract<keyof Data, string>, files: File | File[] | null | undefined) => {
+        upload: (field: DeepKeys<Data>, files: File | File[] | null | undefined) => {
             if (lifetime.signal.aborted) return Promise.resolve(undefined)
             const selected = files ? (Array.isArray(files) ? files : [files]) : []
             if (!selected.length) return Promise.resolve([])
+            let target: ReturnType<typeof uploadTarget>
+            try {
+                target = uploadTarget(field)
+            } catch (cause) {
+                context.report(cause)
+                return Promise.resolve(undefined)
+            }
+            const currentTarget = () => {
+                const current = uploadTarget(field)
+                if (current.rows.some((row, index) => row !== target.rows[index]))
+                    throw new SiteAdminClientError(
+                        'SITE_ADMIN_CONFLICT',
+                        'The upload target changed. Select the image again.',
+                        409,
+                    )
+                return current
+            }
             const token = selected
                 .map((file) => {
                     if (!uploadIds.has(file)) uploadIds.set(file, ++uploadSequence)
@@ -505,32 +559,27 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
                     async (signal) => {
                         uploading.value = true
                         try {
-                            const key = field
-                            const definition = descriptor().fields[key]
-                            if (!definition || !['image', 'images', 'file'].includes(definition.kind))
-                                throw new SiteAdminClientError(
-                                    'SITE_ADMIN_INVALID_INPUT',
-                                    'Select an asset field.',
-                                    400,
-                                )
+                            const { definition } = currentTarget()
                             const identity = toValue(context.identity)
                             const records = []
                             for (const file of definition.kind === 'images' ? selected : selected.slice(0, 1)) {
-                                const asset = siteAdminAsset(await context.client.uploadAsset(file), (id) =>
-                                    context.client.assetUrl(id),
+                                const asset = siteAdminAsset(
+                                    await context.client.uploadAsset(file, { filename: file.name, signal }),
+                                    (id) => context.client.assetUrl(id),
                                 )
                                 signal.throwIfAborted()
                                 lifetime.signal.throwIfAborted()
                                 if (identity !== toValue(context.identity))
                                     throw new DOMException('Resource identity changed during upload.', 'AbortError')
                                 records.push(asset)
-                                const current = form.state.values[key]
+                                const current = currentTarget().value
                                 setFieldValue(
                                     field,
                                     definition.kind === 'images'
                                         ? [...(Array.isArray(current) ? current : []), asset]
                                         : asset,
                                 )
+                                target = uploadTarget(field)
                             }
                             signal.throwIfAborted()
                             lifetime.signal.throwIfAborted()

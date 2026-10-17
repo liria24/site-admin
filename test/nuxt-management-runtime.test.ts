@@ -32,15 +32,7 @@ interface State {
     refresh(options?: { cachedData?: unknown; signal?: AbortSignal; dedupe?: 'cancel' | 'defer' }): Promise<void>
 }
 interface Helpers {
-    useAdminForm(
-        model: string,
-        options?: Record<string, unknown>,
-    ): Promise<
-        ReturnType<typeof useEntryForm<Record<string, unknown>>> & {
-            status: State['status']
-            refresh: State['refresh']
-        }
-    >
+    useAdminForm(model: string, options?: Record<string, unknown>): Promise<FormResource> & FormResource
     siteAdminManagementKey(
         connection: import('../packages/site-admin/src/client').SiteAdminManagementClientOptions,
         scope: string,
@@ -58,10 +50,18 @@ interface Helpers {
     publicBatch(requests: Record<string, unknown>, options?: Record<string, unknown>): State
     useSiteAdminManagementClient(): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
     createNuxtSiteAdminManagementClient(
-        connection: { origin: string; basePath: string; fetch: typeof fetch; credentials?: RequestCredentials },
+        connection: {
+            origin: string
+            basePath: string
+            fetch: typeof fetch
+            credentials?: RequestCredentials
+        },
         auth: Vue.MaybeRefOrGetter<string>,
     ): SiteAdminManagementClient<Record<string, Record<string, unknown>>>
 }
+
+type FormResource = ReturnType<typeof useEntryForm<Record<string, unknown>>> &
+    Pick<State, 'data' | 'status' | 'error' | 'refresh'>
 
 const nativeEnvironment = async (
     request: typeof fetch,
@@ -119,14 +119,23 @@ const nativeEnvironment = async (
             return response.json()
         },
     }
-    const fetchSource = nativeRuntimeSource(await readNuxtSource('composables/fetch.js'), { serverRuntime })
-    const addonsSource = nativeRuntimeSource(await readNuxtSource('composables/addons.js'), { serverRuntime })
+    const fetchSource = nativeRuntimeSource(await readNuxtSource('composables/fetch.js'), {
+        serverRuntime,
+    })
+    const addonsSource = nativeRuntimeSource(await readNuxtSource('composables/addons.js'), {
+        serverRuntime,
+    })
     const runtime = new Function(
         ...Object.keys(nativeDependencies),
         `${native}\n${addonsSource}\n${fetchSource}; return { useAsyncData, clearNuxtData, refreshNuxtData, useNuxtData, createUseFetch, defineUseFetchAddon }`,
     )(...Object.values(nativeDependencies)) as Record<string, unknown>
     const generated = generatedRuntimeSource(
-        siteAdminNuxtClientTemplate({ basePath: '/content', managementBase: '/manage', i18n, aiActions }),
+        siteAdminNuxtClientTemplate({
+            basePath: '/content',
+            managementBase: '/manage',
+            i18n,
+            aiActions,
+        }),
         { serverFetch, asyncData: true },
     )
     let managementFactories = 0
@@ -300,7 +309,9 @@ describe('native createUseFetch AI actions', () => {
                 if (calls === 1) {
                     transport = init?.signal ?? undefined
                     await new Promise<void>((_resolve, reject) => {
-                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                            once: true,
+                        })
                     })
                 }
                 return Response.json('Retried')
@@ -369,7 +380,9 @@ describe('native createUseFetch AI actions', () => {
                 if (calls === 1) {
                     transport = init?.signal ?? undefined
                     await new Promise<void>((_resolve, reject) => {
-                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                            once: true,
+                        })
                     })
                 }
                 return Response.json('Retried')
@@ -466,7 +479,9 @@ describe('native createUseFetch AI actions', () => {
                 calls++
                 await new Promise<void>((resolve, reject) => {
                     complete = resolve
-                    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+                    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                        once: true,
+                    })
                 })
                 return Response.json({ error: { code: 'SITE_ADMIN_AI_FAILED' } }, { status: 502 })
             },
@@ -500,6 +515,197 @@ const modelDescriptor = createSiteAdminDescriptor(
 )
 
 describe('native management AsyncData and mutation invalidation', () => {
+    it('isolates immediate forms, restores their saved identities, and resets on instance or actor changes', async () => {
+        const records = new Map<string, ReturnType<typeof modelRecord>>()
+        const writes: Array<{ method: string; id: string; title: unknown }> = []
+        let descriptions = 0
+        const { helpers } = await nativeEnvironment(async (input, init) => {
+            const url = new URL(String(input))
+            if (url.pathname === '/manage/models') {
+                descriptions++
+                return Response.json(modelDescriptor)
+            }
+            if (!init?.method || init.method === 'GET')
+                return Response.json(records.get(url.pathname.split('/').at(-1)!))
+            const body = JSON.parse(String(init.body))
+            const id = init.method === 'POST' ? 'created-' + (records.size + 1) : url.pathname.split('/').at(-1)!
+            const entry = modelRecord(id, (body.expectedVersion ?? 0) + 1, body.data)
+            records.set(id, entry)
+            writes.push({ method: init.method, id, title: body.data.title })
+            return Response.json(entry)
+        })
+        const actor = Vue.ref('alice')
+        const instance = Vue.ref('a')
+        const firstScope = Vue.effectScope()
+        const a = firstScope.run(() => helpers.useAdminForm('posts', { instance, authScope: actor }))!
+        const secondScope = Vue.effectScope()
+        const b = secondScope.run(() => helpers.useAdminForm('posts', { instance: 'b', authScope: actor }))!
+        expect(a.form.Field).toBeDefined()
+        expect((await a).form).toBe(a.form)
+        await b
+        expect(descriptions).toBe(1)
+        a.form.setFieldValue('title', 'A')
+        b.form.setFieldValue('title', 'B')
+        await a.form.handleSubmit()
+        expect(a.draft.snapshot().entryId).toBe('created-1')
+        expect(b.draft.snapshot().entryId).toBeNull()
+        expect(b.form.state.values.title).toBe('B')
+        expect(b.error.value).toBeUndefined()
+        instance.value = 'c'
+        await flush()
+        expect(a.draft.snapshot()).toMatchObject({ entryId: null, version: null })
+        expect(a.form.state.values.title).toBe('')
+        a.form.setFieldValue('title', 'C')
+        await a.form.handleSubmit()
+        expect(writes.map((write) => write.method)).toEqual(['POST', 'POST'])
+        instance.value = 'a'
+        await flush()
+        expect(a.draft.snapshot().entryId).toBe('created-1')
+        expect(a.form.state.values.title).toBe('A')
+        firstScope.stop()
+        const reopenedScope = Vue.effectScope()
+        const reopened = reopenedScope.run(() => helpers.useAdminForm('posts', { instance, authScope: actor }))!
+        await reopened
+        expect(reopened.draft.snapshot().entryId).toBe('created-1')
+        reopened.form.setFieldValue('title', 'A again')
+        await reopened.form.handleSubmit()
+        expect(writes.at(-1)).toEqual({ method: 'PATCH', id: 'created-1', title: 'A again' })
+        actor.value = 'bob'
+        await flush()
+        expect(reopened.draft.snapshot()).toMatchObject({ entryId: null, version: null })
+        expect(reopened.form.state.values.title).toBe('')
+        expect(b.form.state.values.title).toBe('')
+        actor.value = 'alice'
+        await flush()
+        expect(b.form.state.values.title).toBe('')
+        reopenedScope.stop()
+        secondScope.stop()
+    })
+
+    it('does not submit before loading and protects another form while an instance changes during a save', async () => {
+        const descriptor = Promise.withResolvers<Response>()
+        const save = Promise.withResolvers<Response>()
+        let saves = 0
+        let saveSignal: AbortSignal | null | undefined
+        const { helpers } = await nativeEnvironment(async (input, init) => {
+            if (new URL(String(input)).pathname === '/manage/models') return descriptor.promise
+            saves++
+            saveSignal = init?.signal
+            return save.promise
+        })
+        const instance = Vue.ref('a')
+        const scope = Vue.effectScope()
+        const a = scope.run(() => helpers.useAdminForm('posts', { instance, defaultValues: { title: 'A' } }))!
+        const b = scope.run(() => helpers.useAdminForm('posts', { instance: 'b', defaultValues: { title: 'B' } }))!
+        await a.form.handleSubmit()
+        expect(saves).toBe(0)
+        descriptor.resolve(Response.json(modelDescriptor))
+        await Promise.all([a, b])
+        const pending = a.form.handleSubmit()
+        await vi.waitFor(() => expect(saves).toBe(1))
+        expect(b.status.value).toBe('success')
+        instance.value = 'c'
+        expect(saveSignal?.aborted).toBe(true)
+        save.resolve(Response.json(modelRecord('late', 1, { title: 'Late response' })))
+        await pending
+        await flush()
+        expect(a.draft.snapshot().entryId).toBeNull()
+        expect(a.form.state.values.title).toBe('A')
+        expect(a.error.value).toBeUndefined()
+        expect(b.form.state.values.title).toBe('B')
+        expect(b.error.value).toBeUndefined()
+        scope.stop()
+    })
+
+    it('does not report a disposed form’s late failure into a reopened instance', async () => {
+        const save = Promise.withResolvers<Response>()
+        let saveSignal: AbortSignal | null | undefined
+        const { helpers } = await nativeEnvironment(async (input, init) => {
+            if (new URL(String(input)).pathname === '/manage/models') return Response.json(modelDescriptor)
+            saveSignal = init?.signal
+            return save.promise
+        })
+        const firstScope = Vue.effectScope()
+        const first = firstScope.run(() => helpers.useAdminForm('posts', { instance: 'a' }))!
+        await first
+        first.form.setFieldValue('title', 'Kept draft')
+        const pending = first.form.handleSubmit()
+        await vi.waitFor(() => expect(saveSignal).toBeDefined())
+        firstScope.stop()
+        expect(saveSignal?.aborted).toBe(true)
+        const nextScope = Vue.effectScope()
+        const next = nextScope.run(() => helpers.useAdminForm('posts', { instance: 'a' }))!
+        await next
+        save.resolve(Response.json(modelRecord('late', 1, { title: 'Kept draft' })))
+        await pending
+        expect(next.error.value).toBeUndefined()
+        expect(next.status.value).toBe('success')
+        expect(next.draft.snapshot().entryId).toBeNull()
+        expect(next.form.state.values.title).toBe('Kept draft')
+        nextScope.stop()
+    })
+
+    it('keeps locale buffers within each instance and creates only that instance’s translations', async () => {
+        const descriptor = structuredClone(modelDescriptor)
+        descriptor.models.posts!.fields.title!.i18n = true
+        let saved: ReturnType<typeof modelRecord> | undefined
+        let input: Record<string, unknown> | undefined
+        const { helpers } = await nativeEnvironment(async (url, init) => {
+            if (new URL(String(url)).pathname === '/manage/models') return Response.json(descriptor)
+            if (init?.method === 'POST') {
+                input = JSON.parse(String(init.body))
+                saved = { ...modelRecord('created'), ...input, defaultLocale: 'ja' }
+            }
+            return Response.json(saved)
+        })
+        const locale = Vue.ref('ja')
+        const scope = Vue.effectScope()
+        const a = scope.run(() => helpers.useAdminForm('posts', { instance: 'a', locale, defaultLocale: 'ja' }))!
+        const b = scope.run(() => helpers.useAdminForm('posts', { instance: 'b', locale, defaultLocale: 'ja' }))!
+        await Promise.all([a, b])
+        a.form.setFieldValue('title', '原本 A')
+        b.form.setFieldValue('title', '原本 B')
+        locale.value = 'en'
+        await flush()
+        expect(a.form.state.values.title).toBe('原本 A')
+        expect(b.form.state.values.title).toBe('原本 B')
+        a.form.setFieldValue('title', 'English A')
+        b.form.setFieldValue('title', 'English B')
+        locale.value = 'ja'
+        await flush()
+        await a.form.handleSubmit()
+        expect(input).toMatchObject({
+            data: { title: '原本 A' },
+            translations: { en: { title: 'English A' } },
+        })
+        expect(b.form.state.values.title).toBe('原本 B')
+        locale.value = 'en'
+        await flush()
+        expect(b.form.state.values.title).toBe('English B')
+        scope.stop()
+    })
+
+    it('refreshes another instance of the saved entry without overwriting its dirty input', async () => {
+        let record = modelRecord('one', 1, { title: 'Original' })
+        const { helpers } = await nativeEnvironment(async (input, init) => {
+            if (new URL(String(input)).pathname === '/manage/models') return Response.json(modelDescriptor)
+            if (init?.method === 'PATCH') record = modelRecord('one', 2, JSON.parse(String(init.body)).data)
+            return Response.json(record)
+        })
+        const scope = Vue.effectScope()
+        const a = scope.run(() => helpers.useAdminForm('posts', { id: 'one', instance: 'a' }))!
+        const b = scope.run(() => helpers.useAdminForm('posts', { id: 'one', instance: 'b' }))!
+        await Promise.all([a, b])
+        a.form.setFieldValue('title', 'Saved A')
+        b.form.setFieldValue('title', 'Unsaved B')
+        await a.form.handleSubmit()
+        expect(a.draft.snapshot().version).toBe(2)
+        expect(b.form.state.values.title).toBe('Unsaved B')
+        expect(b.error.value).toMatchObject({ data: { code: 'SITE_ADMIN_CONFLICT' } })
+        expect(a.error.value).toBeUndefined()
+        scope.stop()
+    })
+
     it('fills a form created before the awaited entry during SSR', async () => {
         const { helpers } = await nativeEnvironment(
             async (input) => {
@@ -814,7 +1020,13 @@ describe('native management AsyncData and mutation invalidation', () => {
             }
             return Response.json({
                 items: [
-                    { defaultLocale: '', translations: {}, id: 'one', model: 'posts', data: { title: actor.value } },
+                    {
+                        defaultLocale: '',
+                        translations: {},
+                        id: 'one',
+                        model: 'posts',
+                        data: { title: actor.value },
+                    },
                 ],
                 total: 1,
             })
@@ -925,7 +1137,7 @@ describe('native management AsyncData and mutation invalidation', () => {
         const prefix = ['http://site.test', '/manage', 'alice']
         app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'models', null, null, null])] =
             modelDescriptor
-        app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'entry', 'posts', 'one', null])] = {
+        app.payload.data['site-admin-management:' + JSON.stringify([...prefix, 'form-entry', 'posts', 'one', null])] = {
             defaultLocale: '',
             translations: {},
             id: 'one',
@@ -1112,7 +1324,10 @@ describe('native management AsyncData and mutation invalidation', () => {
             { origin: 'http://site.test', basePath: '/manage', fetch: request },
             Vue.ref('alice'),
         )
-        await client.updateEntry('one', { data: { slug: 'saved', title: 'Saved' }, expectedVersion: 1 })
+        await client.updateEntry('one', {
+            data: { slug: 'saved', title: 'Saved' },
+            expectedVersion: 1,
+        })
         expect(calls['GET /manage/entries?model=posts&limit=20&offset=0']).toBe(
             (before['GET /manage/entries?model=posts&limit=20&offset=0'] ?? 0) + 1,
         )
@@ -1131,7 +1346,10 @@ describe('native management AsyncData and mutation invalidation', () => {
         await flush()
         leaving.stop()
         const inactiveKey = Object.keys(app.payload.data).find((key) => key.includes('inactive'))!
-        await client.updateEntry('one', { data: { slug: 'again', title: 'Again' }, expectedVersion: 2 })
+        await client.updateEntry('one', {
+            data: { slug: 'again', title: 'Again' },
+            expectedVersion: 2,
+        })
         expect(inactiveKey in app.payload.data).toBe(false)
         const returning = Vue.effectScope()
         const returned = returning.run(() => helpers.modelList('posts', { authScope: 'alice', q: 'inactive' }))!
@@ -1146,7 +1364,9 @@ describe('native management AsyncData and mutation invalidation', () => {
         const request: typeof fetch = async (input, init) => {
             if (init?.method === 'PATCH') return Response.json({ id: 'one', model: 'posts', slug: 'new', version: 2 })
             reads += 1
-            return Response.json({ data: { _siteAdmin: { id: 'one', model: 'posts', slug: 'old' }, title: 'Public' } })
+            return Response.json({
+                data: { _siteAdmin: { id: 'one', model: 'posts', slug: 'old' }, title: 'Public' },
+            })
         }
         const { app, helpers, refreshSubscribers } = await nativeEnvironment(request)
         const scope = Vue.effectScope()
@@ -1191,7 +1411,11 @@ describe('native management AsyncData and mutation invalidation', () => {
             reads[path] = (reads[path] ?? 0) + 1
             return Response.json({
                 data: {
-                    _siteAdmin: { id: 'one', model: path.includes('authors') ? 'authors' : 'posts', slug: 'old' },
+                    _siteAdmin: {
+                        id: 'one',
+                        model: path.includes('authors') ? 'authors' : 'posts',
+                        slug: 'old',
+                    },
                     title: 'v' + version,
                 },
             })
@@ -1271,7 +1495,12 @@ it('preserves a management snapshot on refresh failure and corrects a deleted la
                 { status: 503 },
             )
         const offset = Number(url.searchParams.get('offset'))
-        return Response.json({ items: offset >= total ? [] : [modelRecord('one')], total, limit: 20, offset })
+        return Response.json({
+            items: offset >= total ? [] : [modelRecord('one')],
+            total,
+            limit: 20,
+            offset,
+        })
     })
     const scope = Vue.effectScope()
     const source = scope.run(() => environment.helpers.modelList('posts', { page }))! as State & {

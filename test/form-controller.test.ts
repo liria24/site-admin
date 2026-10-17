@@ -1,5 +1,6 @@
 import { createSiteAdminDescriptor } from '../packages/site-admin/src/descriptor'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { effectScope } from 'vue'
 import {
     array,
     defineSiteAdminConfig,
@@ -28,7 +29,14 @@ const config = defineSiteAdminConfig({
                 image: image(),
                 attachment: file(),
                 gallery: images(),
-                sections: array(object({ asset: image(), href: url() })),
+                sections: array(
+                    object({
+                        asset: image(),
+                        href: url(),
+                        gallery: images(),
+                        children: array(object({ asset: image() })),
+                    }),
+                ),
             },
         },
     },
@@ -68,4 +76,97 @@ it('normalizes multiple uploads into presented fields and serializes only declar
     const snapshot = formState.draft.snapshot()
     expect(snapshot.draft.gallery).toEqual([{ id: 'asset-1' }, { id: 'asset-2' }])
     expect((formState.form.state.values.gallery as Array<{ url: string }>)[0]?.url).toContain('/assets/asset-1/content')
+})
+
+it('uploads through nested arrays and appends nested galleries using native form paths', async () => {
+    const request = vi.fn(async () => Response.json({ id: 'asset-' + request.mock.calls.length }))
+    const fixture = modelFixture(request, undefined, {}, { model: 'posts', descriptor })
+    const onUpload = vi.fn()
+    const editor = useEntryForm(fixture.resource, { onUpload })
+    editor.form.setFieldValue('sections', [{ asset: { id: 'existing' }, gallery: [{ id: 'kept' }], children: [{}] }])
+    await editor.upload('sections[0].children[0].asset', new File(['a'], 'a.png'))
+    await editor.upload('sections[0].gallery', [new File(['b'], 'b.png'), new File(['c'], 'c.png')])
+    expect(editor.draft.snapshot().draft.sections).toEqual([
+        {
+            asset: { id: 'existing' },
+            children: [{ asset: { id: 'asset-1' } }],
+            gallery: [{ id: 'kept' }, { id: 'asset-2' }, { id: 'asset-3' }],
+        },
+    ])
+    expect(onUpload.mock.calls.map(([context]) => context.field)).toEqual([
+        'sections[0].children[0].asset',
+        'sections[0].gallery',
+    ])
+    expect(editor.operation.value).toBeNull()
+    expect(fixture.state.error.value).toBeUndefined()
+})
+
+it.each([
+    'sections[2].asset',
+    'sections[-1].asset',
+    'sections[0].href',
+    'sections[0].missing',
+    'sections[0].__proto__.asset',
+    'sections[0].asset.extra',
+    'sections[0]asset',
+])('rejects invalid asset path %s before uploading', async (path) => {
+    const request = vi.fn(async () => Response.json({ id: 'wrong' }))
+    const fixture = modelFixture(request, undefined, {}, { model: 'posts', descriptor })
+    const editor = useEntryForm(fixture.resource)
+    editor.form.setFieldValue('sections', [{ asset: { id: 'existing' } }])
+    expect(await editor.upload(path, new File(['x'], 'x.png'))).toBeUndefined()
+    expect(request).not.toHaveBeenCalled()
+    expect(fixture.state.error.value?.data?.code).toBe('SITE_ADMIN_INVALID_INPUT')
+    expect(editor.draft.snapshot().draft.sections).toEqual([{ asset: { id: 'existing' } }])
+})
+
+it.each(['remove', 'move', 'replace'] as const)(
+    'keeps the current rows when an upload target is changed by %s',
+    async (change) => {
+        const reply = Promise.withResolvers<Response>()
+        const request = vi.fn(() => reply.promise)
+        const fixture = modelFixture(request, undefined, {}, { model: 'posts', descriptor })
+        const editor = useEntryForm(fixture.resource)
+        editor.form.setFieldValue('sections', [{ asset: { id: 'first' } }, { asset: { id: 'second' } }])
+        const upload = editor.upload('sections[0].asset', new File(['x'], 'x.png'))
+        await vi.waitFor(() => expect(request).toHaveBeenCalledOnce())
+        const rows = editor.form.state.values.sections as Array<{ asset: { id: string } }>
+        editor.form.setFieldValue(
+            'sections',
+            change === 'remove' ? rows.slice(1) : change === 'move' ? [rows[1], rows[0]] : [{ ...rows[0] }, rows[1]],
+        )
+        const unchanged = editor.draft.snapshot()
+        reply.resolve(Response.json({ id: 'wrong-row' }))
+        expect(await upload).toBeUndefined()
+        expect(editor.draft.snapshot()).toEqual(unchanged)
+        expect(fixture.state.error.value?.data?.code).toBe('SITE_ADMIN_CONFLICT')
+        expect(editor.operation.value).toBeNull()
+    },
+)
+
+it('passes cancellation to uploads and retains the existing asset after failure or disposal', async () => {
+    let signal: AbortSignal | null | undefined
+    const reply = Promise.withResolvers<Response>()
+    const request = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        signal = init?.signal
+        return reply.promise
+    })
+    const fixture = modelFixture(request, undefined, {}, { model: 'posts', descriptor })
+    const scope = effectScope()
+    const editor = scope.run(() => useEntryForm(fixture.resource))!
+    editor.form.setFieldValue('sections', [{ asset: { id: 'existing' } }])
+    const upload = editor.upload('sections[0].asset', new File(['x'], 'x.png'))
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce())
+    fixture.identity.value = 'another-form'
+    expect(signal?.aborted).toBe(true)
+    reply.resolve(Response.json({ id: 'cancelled' }))
+    expect(await upload).toBeUndefined()
+    expect(editor.draft.snapshot().draft.sections).toBeUndefined()
+    editor.form.setFieldValue('sections', [{ asset: { id: 'existing' } }])
+    request.mockRejectedValueOnce(new Error('Upload failed'))
+    expect(await editor.upload('sections[0].asset', new File(['y'], 'y.png'))).toBeUndefined()
+    expect(editor.draft.snapshot().draft.sections).toEqual([{ asset: { id: 'existing' } }])
+    scope.stop()
+    expect(await editor.upload('sections[0].asset', new File(['z'], 'z.png'))).toBeUndefined()
+    expect(request).toHaveBeenCalledTimes(2)
 })

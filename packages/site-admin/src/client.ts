@@ -141,7 +141,7 @@ export interface SiteAdminReferencesOptions {
     view: 'current' | 'published'
 }
 
-export interface SiteAdminAssetUploadOptions {
+export interface SiteAdminAssetUploadOptions extends SiteAdminRequestOptions {
     contentType?: string
     filename: string
 }
@@ -585,7 +585,12 @@ export const createSiteAdminManagementClient = <
             })
             const contentType = uploadOptions?.contentType ?? body.type
             if (contentType) headers.set('content-type', contentType)
-            return (await json<AssetRecord>('/assets', { body, headers, method: 'POST' }))!
+            return (await json<AssetRecord>('/assets', {
+                body,
+                headers,
+                method: 'POST',
+                ...(uploadOptions?.signal ? { signal: uploadOptions.signal } : {}),
+            }))!
         },
         getAsset: (id) => get(assetPath(id)),
         downloadAsset: (id) => response(`${assetPath(id)}/content`, { method: 'GET' }) as Promise<Response>,
