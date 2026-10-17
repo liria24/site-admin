@@ -119,6 +119,34 @@ it('keeps fallback values sparse and unsaved inputs separate across locale chang
     scope.stop()
 })
 
+it.each(['onBeforeSubmit', 'onSuccess', 'onUpload'] as const)(
+    'ignores late %s completion after disposal',
+    async (name) => {
+        const deferred = Promise.withResolvers<void>()
+        const hook = vi.fn(() => deferred.promise)
+        const request = vi.fn(async () =>
+            Response.json(
+                name === 'onUpload'
+                    ? { id: 'image', contentType: 'image/png', size: 1 }
+                    : modelEntry('one', 2, { title: 'Saved' }),
+            ),
+        )
+        const scope = effectScope()
+        const fixture = scope.run(() => modelFixture(request))!
+        const editor = scope.run(() => useEntryForm(fixture.resource, { [name]: hook }))!
+        editor.form.setFieldValue('title', 'Saved')
+        const pending =
+            name === 'onUpload' ? editor.upload('image', new File(['x'], 'image.png')) : editor.form.handleSubmit()
+        await vi.waitFor(() => expect(hook).toHaveBeenCalledOnce())
+        scope.stop()
+        if (name === 'onBeforeSubmit') deferred.resolve()
+        else deferred.reject(new Error('Late hook failure'))
+        await pending
+        expect(fixture.state.error.value).toBeUndefined()
+        expect(request).toHaveBeenCalledTimes(name === 'onBeforeSubmit' ? 0 : 1)
+    },
+)
+
 it('rejects invalid schedules before preparation and stops on a failed before-submit hook', async () => {
     const request = vi.fn()
     const fixture = modelFixture(request)

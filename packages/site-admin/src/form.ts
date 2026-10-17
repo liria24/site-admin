@@ -319,7 +319,7 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
                 try {
                     if (!ensuring) await options.onSuccess?.(result, { operation: selectedIntent.kind })
                 } catch (error) {
-                    if (identity === draftKey()) throw context.report(error, true)
+                    if (!lifetime.signal.aborted && identity === draftKey()) throw context.report(error, true)
                 }
                 return result
             } catch (cause) {
@@ -590,7 +590,8 @@ export const useEntryForm = <Data extends Record<string, unknown>>(
                                     assets: records,
                                 })
                             } catch (cause) {
-                                context.report(cause, true)
+                                if (!lifetime.signal.aborted && identity === toValue(context.identity))
+                                    context.report(cause, true)
                             }
                             return records
                         } finally {
